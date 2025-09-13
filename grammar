@@ -1,0 +1,137 @@
+# For Unicode-related stuff.
+# https://www.unicode.org/Public/UCD/latest/ucd/
+
+CommentLine :- "#" NonNewLineUnicodeCharacter* NewLineCharacter
+
+Comment :- CommentLine (WhiteSpaceCharacter* CommentLine)*
+
+NonNewLineUnicodeCharacter :- !NewLineCharacter
+
+NewLineCharacter :- 000A..000D | 0085 | 2028 | 2029
+
+WhiteSpaceCharacter :-
+	0009..000D
+	| 0020
+	| 0085
+	| 00A0
+	| 1680
+	| 2000..200A
+	| 2028
+	| 2029
+	| 202F
+	| 205F
+	| 3000
+
+Separator :- Comment | WhiteSpaceCharacter
+
+BooleanLiteral :- "true" | "false"
+
+NumberLiteral :-
+	BinaryNumberLiteral
+	| OctalNumberLiteral
+	| DecimalNumberLiteral
+	| HexadecimalNumberLiteral
+
+BinaryNumberLiteral :- "0" ("b" | "B") BinaryDigit (","? BinaryDigit)*
+
+BinaryDigit :- "0" | "1"
+
+OctalNumberLiteral :- "0" ("o" | "O") OctalDigit (","? OctalDigit)*
+
+OctalDigit :- BinaryDigit | "2" | "3" | "4" | "5" | "6" | "7"
+
+DecimalNumberLiteral :-
+	IntegerNumberLiteral
+	| ScientificNumberLiteral
+	| FloatingPointNumberLiteral
+
+IntegerNumberLiteral :- DecimalDigit (","? DecimalDigit)*
+
+ScientificNumberLiteral :-
+	(IntegerNumberLiteral | FloatingPointNumberLiteral)
+	("e" | "E") ("+" | "-")? IntegerNumberLiteral
+
+FloatingPointNumberLiteral :- IntegerNumberLiteral "." IntegerNumberLiteral
+
+DecimalDigit :- OctalDigit | "8" | "9"
+
+HexadecimalNumberLiteral :- "0" ("x" | "X") HexadecimalDigit (","? HexadecimalDigit)*
+
+HexadecimalDigit :- DecimalDigit | "a-f" | "A-F"
+
+StringLiteral :- "'" ("\{" | InterpolatedValue | NonApostropheCharacter)* "'"
+
+InterpolatedValue :- "{" Separator* Expression Separator* "}"
+
+NonApostropheCharacter :- !0027
+
+# https://www.unicode.org/Public/UCD/latest/ucd/DerivedCoreProperties.txt
+Identifier :-
+	<any character which conforms to XID_Start property>
+	<any character which conforms to XID_Continue property>*
+
+Block :- "{" Separator* (Expression (Separator+ Expression)*)* Separator* "}"
+
+Tuple :- "(" Separator* (Expression (Separator+ Expression)*)* Separator* ")"
+
+Function :-
+	"(" Separator* (Identifier (Separator+ Identifier)*)* Separator* ")"
+	Separator* Expression
+
+FunctionCall :-
+	(Identifier | Block) Separator*
+	"(" Separator* (Expression (Separator+ Expression)*)* Separator* ")"
+
+Unary :- UnaryOperator Separator* Expression
+
+UnaryOperator :- "-" | "!" | "~"
+
+Binary :-
+	BaseExpression
+	(Separator* BinaryOperator Separator* BaseExpression)+
+
+BinaryOperator :-
+	"*"    # 9
+	| "/"  # 9
+	| "+"  # 8
+	| "-"  # 8
+	| "<<" # 7
+	| ">>" # 7
+	| "<=" # 6
+	| "<"  # 6
+	| ">=" # 6
+	| ">"  # 6
+	| "==" # 5
+	| "!=" # 5
+	| "&"  # 4
+	| "^"  # 3
+	| "|"  # 2
+	| "->" # 1
+
+Conditional :-
+	"if" Separator* Expression
+	Separator* Expression
+	Separator* "else" Separator* Expression
+
+Definition :- Identifier Separator* "=" Separator* Expression
+
+BaseExpression :-
+	NumberLiteral
+	| BooleanLiteral
+	| StringLiteral
+	| Function
+	| Tuple
+	| FunctionCall
+	| Block
+	| Definition
+	| Conditional
+	| Identifier
+	| Unary
+
+Expression :-
+	Binary
+	| BaseExpression
+
+Program :-
+	Separator*
+	(Expression Separator*)*
