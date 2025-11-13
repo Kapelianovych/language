@@ -1,4 +1,4 @@
-:- module(binary, [binary/4]).
+:- module(binary, [binary/4, failing_binary/4]).
 
 :- use_module(library(dcgs)).
 :- use_module(library(clpz)).
@@ -8,15 +8,21 @@
 
 :- meta_predicate(binary(2, ?, ?, ?)).
 
+%% failing_binary(?, ?).
+% Binary predicate that always fails. It replaces the binary
+% predicate in the expression, so there won't be infinite recursion
+% in the binary operand position.
+failing_binary(_, _) --> { false }.
+
 binary(
   BaseExpressionFunctor,
   Node
 ) -->
-  phrase(BaseExpressionFunctor, LeftExpression),
+  phrase(BaseExpressionFunctor, failing_binary, LeftExpression),
   separators,
   binary_operator(Operator, Precedence),
   separators,
-  phrase(BaseExpressionFunctor, RightExpression),
+  phrase(BaseExpressionFunctor, failing_binary, RightExpression),
   binary_tail(
     BaseExpressionFunctor,
     Precedence,
@@ -38,7 +44,7 @@ binary_tail(
   separators,
   binary_operator(CurrentOperator, CurrentOperatorPrecedence),
   separators,
-  phrase(BaseExpressionFunctor, CurrentRightExpression),
+  phrase(BaseExpressionFunctor, failing_binary, CurrentRightExpression),
   {
     if_(
       has_right_operator_less_importance(

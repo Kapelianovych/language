@@ -1,18 +1,13 @@
 :- module(identifier, [identifier/3]).
 
 :- use_module(library(dcgs)).
-:- use_module(library(lists)).
 
 :- use_module(unicode, [unicode_character/2,
                         between_unicode_range/3]).
 
-identifier(identifier_node(Name)) -->
-  identifier_name(Name).
-
-identifier_name(Name) -->
+identifier(identifier_node([FirstCharacter | RestCharacters])) -->
   identifier_first_character(FirstCharacter),
-  identifier_rest_characters(RestCharacters),
-  { append([FirstCharacter], RestCharacters, Name) }.
+  identifier_rest_characters(RestCharacters).
 
 identifier_first_character(Character) -->
   [Character],
