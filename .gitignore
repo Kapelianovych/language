@@ -1,1 +1,4 @@
 .DS_Store
+
+# Downloaded Unicode data used by tools/generate_identifier.py
+DerivedCoreProperties.txt

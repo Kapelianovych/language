@@ -11,7 +11,15 @@ separator -->
   whitespace
   | comment(_).
 
-separators --> [].
+% Greedy and deterministic.  Whitespace and comments are never part of a
+% token, so consuming as many separators as possible is always the only
+% correct choice -- there is never a reason to backtrack and keep fewer.
+% The cut therefore commits as soon as a separator is seen, removing the
+% choice point that the previous empty-first formulation left at every
+% separator position.  Those choice points were the parser's main source
+% of backtracking, so this is both behaviour-preserving and much faster.
 separators -->
   separator,
+  !,
   separators.
+separators --> [].

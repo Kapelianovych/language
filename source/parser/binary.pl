@@ -1,8 +1,6 @@
 :- module(binary, [binary/4, failing_binary/4]).
 
 :- use_module(library(dcgs)).
-:- use_module(library(clpz)).
-:- use_module(library(reif)).
 
 :- use_module(separator, [separators/2]).
 
@@ -46,12 +44,11 @@ binary_tail(
   separators,
   phrase(BaseExpressionFunctor, failing_binary, CurrentRightExpression),
   {
-    if_(
-      has_right_operator_less_importance(
-        LeftBinaryNodeOperatorPrecedence,
-        CurrentOperatorPrecedence
-      ),
-      (
+    % Operator precedences are always ground integers here, so a plain
+    % arithmetic comparison and if-then-else behaves exactly like the former
+    % clpz/reif `if_(has_right_operator_less_importance(...), ...)` -- without
+    % the constraint-solver overhead on every operator.
+    ( LeftBinaryNodeOperatorPrecedence >= CurrentOperatorPrecedence ->
         Operator = CurrentOperator,
         Precedence = CurrentOperatorPrecedence,
         LeftExpression = binary_node(
@@ -60,9 +57,7 @@ binary_tail(
           LeftBinaryNodeRightExpression
         ),
         RightExpression = CurrentRightExpression
-      ),
-      (
-        Operator = LeftOperator,
+    ;   Operator = LeftOperator,
         Precedence = LeftBinaryNodeOperatorPrecedence,
         LeftExpression = LeftBinaryNodeLeftExpression,
         RightExpression = binary_node(
@@ -70,7 +65,6 @@ binary_tail(
           LeftBinaryNodeRightExpression,
           CurrentRightExpression
         )
-      )
     )
   },
   binary_tail(
@@ -83,19 +77,6 @@ binary_tail(
     ),
     Node
   ).
-
-has_right_operator_less_importance(
-  LeftOperatorPrecedence,
-  RightOperatorPrecedence,
-  true
-) :-
-  LeftOperatorPrecedence #>= RightOperatorPrecedence.
-has_right_operator_less_importance(
-  LeftOperatorPrecedence,
-  RightOperatorPrecedence,
-  false
-) :-
-  LeftOperatorPrecedence #< RightOperatorPrecedence.
 
 binary_operator(multiplication, 9) --> "*".
 binary_operator(division, 9) --> "/".

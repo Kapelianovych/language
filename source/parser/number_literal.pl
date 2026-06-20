@@ -1,7 +1,6 @@
 :- module(number_literal, [number_literal/3]).
 
 :- use_module(library(dcgs)).
-:- use_module(library(clpz)).
 
 number_literal(number_node(Number)) -->
   binary_number_literal(Number)
@@ -21,8 +20,10 @@ integer_literal(
   phrase(DigitFunctor, FirstDigit),
   integer_literal_tail(DigitFunctor, Radix, RestDigits, RestDigitsCount),
   {
-    DigitsCount #= RestDigitsCount + 1,
-    Number #= FirstDigit * Radix ^ RestDigitsCount + RestDigits
+    % RestDigitsCount and RestDigits are ground once the tail is parsed, so
+    % plain `is` suffices -- no need for clpz constraints.
+    DigitsCount is RestDigitsCount + 1,
+    Number is FirstDigit * Radix ^ RestDigitsCount + RestDigits
   }.
 
 integer_literal_tail(
@@ -35,8 +36,8 @@ integer_literal_tail(
   phrase(DigitFunctor, Digit),
   integer_literal_tail(DigitFunctor, Radix, RestDigits, RestDigitsCount),
   {
-    DigitsCount #= RestDigitsCount + 1,
-    Number #= Digit * Radix ^ RestDigitsCount + RestDigits
+    DigitsCount is RestDigitsCount + 1,
+    Number is Digit * Radix ^ RestDigitsCount + RestDigits
   }.
 % Force Prolog to suggest full number as the first proposed answer.
 % It must be the last clause of the phrase predicate to have greediness.

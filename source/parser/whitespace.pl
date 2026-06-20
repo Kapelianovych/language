@@ -8,33 +8,45 @@
 :- use_module(unicode, [unicode_character/2,
                         between_unicode_range/3]).
 
+% Convert the character to its codepoint once, then test the codepoint
+% against the whitespace ranges.  (The previous version re-ran char_code/2
+% inside every disjunct.)
 is_whitespace(Character) :-
-  between_unicode_range(0x0009, 0x000D, Character)
-  ; unicode_character(0x0020, Character)
-  ; unicode_character(0x0085, Character)
-  ; unicode_character(0x00A0, Character)
-  ; unicode_character(0x1680, Character)
-  ; between_unicode_range(0x2000, 0x200A, Character)
-  ; unicode_character(0x2028, Character)
-  ; unicode_character(0x2029, Character)
-  ; unicode_character(0x202F, Character)
-  ; unicode_character(0x205F, Character)
-  ; unicode_character(0x3000, Character).
+  char_code(Character, Code),
+  whitespace_code(Code).
+
+whitespace_code(Code) :- Code >= 0x0009, Code =< 0x000D.
+whitespace_code(0x0020).
+whitespace_code(0x0085).
+whitespace_code(0x00A0).
+whitespace_code(0x1680).
+whitespace_code(Code) :- Code >= 0x2000, Code =< 0x200A.
+whitespace_code(0x2028).
+whitespace_code(0x2029).
+whitespace_code(0x202F).
+whitespace_code(0x205F).
+whitespace_code(0x3000).
 
 whitespace -->
   [Character],
   { is_whitespace(Character) }.
 
-whitespaces --> [].
+% Greedy and deterministic, for the same reason as `separators`: a run of
+% whitespace has only one sensible reading, so commit to consuming it all.
 whitespaces -->
   whitespace,
+  !,
   whitespaces.
+whitespaces --> [].
 
 is_new_line(Character) :-
-  between_unicode_range(0x000A, 0x000D, Character)
-  ; unicode_character(0x0085, Character)
-  ; unicode_character(0x2028, Character)
-  ; unicode_character(0x2029, Character).
+  char_code(Character, Code),
+  new_line_code(Code).
+
+new_line_code(Code) :- Code >= 0x000A, Code =< 0x000D.
+new_line_code(0x0085).
+new_line_code(0x2028).
+new_line_code(0x2029).
 
 new_line -->
   [Character],
