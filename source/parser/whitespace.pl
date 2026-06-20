@@ -1,12 +1,10 @@
 :- module(whitespace, [new_line/2,
-                       is_new_line/1,
-                       whitespace/2,
-                       whitespaces/2]).
+  is_new_line/1,
+  whitespace/2,
+  whitespaces/2
+]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(unicode, [unicode_character/2,
-                        between_unicode_range/3]).
 
 % Convert the character to its codepoint once, then test the codepoint
 % against the whitespace ranges.  (The previous version re-ran char_code/2
