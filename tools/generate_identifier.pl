@@ -302,7 +302,7 @@ file_text(Version, StartNodes, StartRoot, ContinueNodes, ContinueRoot) -->
 % The fixed preamble: the identifier DCG and the membership lookup.  Only the
 % Unicode-version line varies.
 header(Version) -->
-  ":- module(identifier, [identifier/3]).\n",
+  ":- module(identifier, [identifier//1]).\n",
   "\n",
   ":- use_module(library(dcgs)).\n",
   "\n",

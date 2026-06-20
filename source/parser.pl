@@ -1,6 +1,6 @@
 :- module(parser, [parse/2]).
 
-:- use_module(parser/program, [program/3]).
+:- use_module(parser/program, [program//1]).
 
 %% parse(+Input, -AST).
 %

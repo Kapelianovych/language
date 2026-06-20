@@ -1,11 +1,14 @@
-:- module(separator, [separator/2,
-                      separators/2]).
+:- module(separator, [
+  separator//0,
+  separators//0
+]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(comment, [comment/3]).
-:- use_module(whitespace, [whitespace/2,
-                           whitespaces/2]).
+:- use_module(comment, [comment//1]).
+:- use_module(whitespace, [
+  whitespace//0,
+  whitespaces//0
+]).
 
 separator -->
   whitespace

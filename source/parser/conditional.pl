@@ -1,8 +1,7 @@
-:- module(conditional, [conditional/4]).
+:- module(conditional, [conditional//2]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(separator, [separators/2]).
+:- use_module(separator, [separators//0]).
 
 :- meta_predicate(conditional(2, ?, ?, ?)).
 

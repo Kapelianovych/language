@@ -1,11 +1,12 @@
-:- module(comment, [comment/3]).
+:- module(comment, [comment//1]).
 
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
-
-:- use_module(whitespace, [new_line/2,
-                           is_new_line/1,
-                           whitespaces/2]).
+:- use_module(whitespace, [
+  new_line//0,
+  is_new_line/1,
+  whitespaces//0
+]).
 
 comment(comment_node(Text)) -->
   comment_line(Text0),

@@ -1,9 +1,8 @@
-:- module(definition, [definition/4]).
+:- module(definition, [definition//2]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(separator, [separators/2]).
-:- use_module(identifier, [identifier/3]).
+:- use_module(separator, [separators//0]).
+:- use_module(identifier, [identifier//1]).
 
 :- meta_predicate(definition(2, ?, ?, ?)).
 

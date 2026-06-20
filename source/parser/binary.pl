@@ -1,8 +1,10 @@
-:- module(binary, [binary/4, failing_binary/4]).
+:- module(binary, [
+  binary//2,
+  failing_binary//2
+]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(separator, [separators/2]).
+:- use_module(separator, [separators//0]).
 
 :- meta_predicate(binary(2, ?, ?, ?)).
 

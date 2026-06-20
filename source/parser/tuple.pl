@@ -1,9 +1,10 @@
-:- module(tuple, [tuple/4]).
+:- module(tuple, [tuple//2]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(separator, [separator/2,
-                           separators/2]).
+:- use_module(separator, [
+  separator//0,
+  separators//0
+]).
 
 :- meta_predicate(tuple(2, ?, ?, ?)).
 

@@ -1,10 +1,11 @@
-:- module(function, [function/4]).
+:- module(function, [function//2]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(identifier, [identifier/3]).
-:- use_module(separator, [separator/2,
-                           separators/2]).
+:- use_module(identifier, [identifier//1]).
+:- use_module(separator, [
+  separator//0,
+  separators//0
+]).
 
 :- meta_predicate(function(2, ?, ?, ?)).
 
@@ -28,4 +29,3 @@ function_parameters_tail([Parameter | Parameters]) -->
   separators,
   identifier(Parameter),
   function_parameters_tail(Parameters).
-

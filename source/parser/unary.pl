@@ -1,8 +1,7 @@
-:- module(unary, [unary/4]).
+:- module(unary, [unary//2]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(separator, [separators/2]).
+:- use_module(separator, [separators//0]).
 
 :- meta_predicate(unary(2, ?, ?, ?)).
 

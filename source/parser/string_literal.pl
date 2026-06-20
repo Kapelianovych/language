@@ -1,10 +1,10 @@
-:- module(string_literal, [string_literal/4]).
+:- module(string_literal, [string_literal//2]).
 
 :- use_module(library(dif)).
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
 
-:- use_module(separator, [separators/2]).
+:- use_module(separator, [separators//0]).
 
 :- meta_predicate(string_literal(2, ?, ?, ?)).
 
@@ -42,7 +42,7 @@ normalise_parts(
   length(PreviousParts, PreviousPartsLength),
   nth1(PreviousPartsLength, PreviousParts, string_interpolated_part(_)),
   append(PreviousParts, [string_static_part([Character])], NextParts).
-  
+
 string(_, []) --> [].
 string(ExpressionFunctor, [Part | Parts]) -->
   (

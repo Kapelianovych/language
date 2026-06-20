@@ -1,4 +1,4 @@
-:- module(boolean_literal, [boolean_literal/3]).
+:- module(boolean_literal, [boolean_literal//1]).
 
 :- use_module(library(dcgs)).
 

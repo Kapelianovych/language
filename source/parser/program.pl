@@ -1,9 +1,8 @@
-:- module(program, [program/3]).
+:- module(program, [program//1]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(separator, [separators/2]).
-:- use_module(expression, [expression/3]).
+:- use_module(separator, [separators//0]).
+:- use_module(expression, [expression//1]).
 
 program(program_node(Expressions)) -->
   separators,

@@ -1,9 +1,10 @@
-:- module(block, [block/4]).
+:- module(block, [block//2]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(separator, [separator/2,
-                          separators/2]).
+:- use_module(separator, [
+  separator//0,
+  separators//0
+]).
 
 :- meta_predicate(block(2, ?, ?, ?)).
 

@@ -1,4 +1,4 @@
-:- module(number_literal, [number_literal/3]).
+:- module(number_literal, [number_literal//1]).
 
 :- use_module(library(dcgs)).
 

@@ -1,11 +1,12 @@
-:- module(function_call, [function_call/4]).
+:- module(function_call, [function_call//2]).
 
 :- use_module(library(dcgs)).
-
-:- use_module(block, [block/4]).
-:- use_module(identifier, [identifier/3]).
-:- use_module(separator, [separator/2,
-                           separators/2]).
+:- use_module(block, [block//2]).
+:- use_module(identifier, [identifier//1]).
+:- use_module(separator, [
+  separator//0,
+  separators//0
+]).
 
 :- meta_predicate(function_call(2, ?, ?, ?)).
 

@@ -1,7 +1,8 @@
-:- module(whitespace, [new_line/2,
+:- module(whitespace, [
+  new_line//0,
   is_new_line/1,
-  whitespace/2,
-  whitespaces/2
+  whitespace//0,
+  whitespaces//0
 ]).
 
 :- use_module(library(dcgs)).

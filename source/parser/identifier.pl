@@ -1,4 +1,4 @@
-:- module(identifier, [identifier/3]).
+:- module(identifier, [identifier//1]).
 
 :- use_module(library(dcgs)).
 
