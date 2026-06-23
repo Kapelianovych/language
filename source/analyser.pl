@@ -10,8 +10,9 @@
 
     Pipeline:
 
-        AST  --infer_program-->  (LastType, FinalContext)
-             --zonk/substitute-->  principal type + final substitution
+        AST  --build_type_environment-->  declared type constructors
+             --infer_program-->           (LastType, FinalContext)
+             --fully_resolve-->           principal type + final substitution
 
     The flow of a single check is:
 
@@ -32,20 +33,39 @@
     unifier; `analyse/2` lets it propagate to the caller.
 */
 
+:- use_module(library(assoc)).
 :- use_module(analyser/types, [
   empty_context/1,
-  zonk/3,
+  fully_resolve/3,
   context_substitution/2
 ]).
-:- use_module(analyser/infer, [infer_program/3]).
+:- use_module(analyser/type_environment, [build_type_environment/3]).
+:- use_module(analyser/infer, [infer_program/5]).
 
 %% analyse(+AST, -Result).
 %
 % `Result` is `analysis_result(Type, Substitution)` where `Type` is the
 % fully-resolved principal type of the program and `Substitution` is the
 % solved part of the final algorithmic context as a list `Id = Type`.
+%
+% Before inference we collect and validate every `type` declaration into a
+% `TypeEnvironment` (so annotations resolve to monotypes) and seed the term
+% environment with every tagged-union constructor as a value.
 analyse(AST, analysis_result(Type, Substitution)) :-
+  build_type_environment(AST, TypeEnvironment, ConstructorBindings),
+  constructor_environment(ConstructorBindings, InitialEnvironment),
   empty_context(Context0),
-  infer_program(AST, Context0, program_type(LastType, Context)),
-  zonk(LastType, Context, Type),
+  infer_program(AST, TypeEnvironment, InitialEnvironment, Context0, program_type(LastType, Context)),
+  fully_resolve(LastType, Context, Type),
   context_substitution(Context, Substitution).
+
+% Seed a term environment from the constructor schemes (each a `defined`
+% binding usable anywhere).
+constructor_environment(ConstructorBindings, Environment) :-
+  empty_assoc(Empty),
+  constructor_environment(ConstructorBindings, Empty, Environment).
+
+constructor_environment([], Environment, Environment).
+constructor_environment([Name - Scheme | Rest], EnvironmentIn, EnvironmentOut) :-
+  put_assoc(Name, EnvironmentIn, defined(Scheme), Environment1),
+  constructor_environment(Rest, Environment1, EnvironmentOut).

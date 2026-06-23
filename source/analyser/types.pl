@@ -1,360 +1,442 @@
 :- module(types, [
   empty_context/1,
-  fresh_uvar/4,
-  resolve/3,
-  zonk/3,
+  fresh_unification_variable/4,
+  resolve_head/3,
+  fully_resolve/3,
   unify/4,
   generalize/5,
   instantiate/5,
-  monomorphic_scheme/2,
+  monomorphic_type_scheme/2,
   context_substitution/2
 ]).
 
 /*  types.pl  --  Type language + level-based algorithmic context.
 
-    This module is the heart of the checker.  It implements the
-    *level-based algorithmic type system* of Fan, Xu & Xie, "Practical
-    Type Inference with Levels" (PLDI'25), specialised to the
-    annotation-free, predicative Hindley-Milner fragment that our source
-    language can actually express.  The generalisation / instantiation
-    machinery follows Heeren, Hage & Swierstra, "Generalizing
-    Hindley-Milner Type Inference Algorithms" (UU-CS-2002-031).
+    Implements the level-based algorithmic type system of Fan, Xu & Xie,
+    "Practical Type Inference with Levels" (PLDI'25), with let-generalisation
+    as in Heeren, Hage & Swierstra (UU-CS-2002-031), extended with
+    Remy/Wand-style ROW POLYMORPHISM for tuples (records).
 
     --------------------------------------------------------------------
     THE TYPE LANGUAGE
     --------------------------------------------------------------------
-    A monotype `tau` is one of:
+    A monotype is one of:
 
-        number                      base type of all numeric literals
-        boolean                     base type of `true` / `false`
-        string                      base type of string literals
-        uvar(Id)                    a unification variable (`alpha^n` in
-                                    the paper); its level and solution
-                                    live in the algorithmic context
-        function_type(Params, Ret)  an n-ary function `(t1 .. tn) -> r`
-        tuple_type(Elems)           a tuple `(t1 .. tn)`  (Elems = [] is unit)
+        number / boolean / string       base types
+        readonly / mutable              base types, used only in the
+                                        mutability slot of a tuple field
+                                        (so mutability unifies like any type)
+        unification_variable(Id)        an as-yet-unknown type/row; level and
+                                        solution live in the context
+        function_type(Params, Ret)      an n-ary function `(t1 .. tn) -> r`
+        type_constructor(Name, Args)    a NOMINAL named type (see below)
+        tuple_type(Fields, Tail)        a RECORD; see below
 
-    A *type scheme* (the polytype assigned to a let/definition binding) is
+    TUPLES AS ROWS.  A `tuple_type(Fields, Tail)` is a record:
 
-        scheme(QVarIds, Body)
+        Fields  a list of  tuple_field(Mutability, Key, Type)
+                  Key is  index(N)   for a positional member, or
+                          label(Name) for a labeled member.
+        Tail    either `closed` (these are exactly the fields) or a
+                unification variable -- a ROW VARIABLE standing for "any
+                further fields".  Solving a row variable binds it to another
+                `tuple_type(MoreFields, FurtherTail)`, so an open record is a
+                chain that `flatten_tuple/4` collapses.
 
-    where `Body` is a monotype in which each generalised variable appears
-    as `qvar(Id)`.  `scheme([], Body)` is a trivial (monomorphic) scheme,
-    used for lambda parameters which must NOT be generalised.
+    A tuple LITERAL is closed.  A member access only requires "a record with
+    at least this field" -- an open tail -- which is what makes functions
+    like `(p) p.x` row-polymorphic: the row variable is generalised.
+
+    NOMINAL vs STRUCTURAL.  `function_type` and `tuple_type` unify
+    structurally.  `type_constructor` unifies NOMINALLY (only equal names).
+
+    A *type scheme* is `type_scheme(QuantifiedIds, Body)`; generalised
+    variables (type OR row) appear as `quantified_variable(Id)` in `Body`.
 
     --------------------------------------------------------------------
     THE ALGORITHMIC CONTEXT (Fig. 4 of the levels paper)
     --------------------------------------------------------------------
-    Rather than relying on Prolog's own unification (which cannot carry
-    levels), we make the algorithmic context `Gamma` explicit, exactly as
-    the paper's mechanised system does.  It is represented as
+        context(NextVariableId, Store)
 
-        ctx(NextId, Store)
-
-    `NextId` hands out fresh unification-variable identifiers.  `Store` is
-    an AVL map (library(assoc)) from an identifier to either
-
-        unsolved(Level)   -- an open variable `alpha^Level`
-        solved(Type)      -- a resolved variable `alpha^Level = Type`
-
-    The context is threaded through every judgement (`CtxIn` -> `CtxOut`),
-    accumulating solutions, just like the input/output contexts
-    `Gamma |- e => sigma -| Delta` of the algorithmic rules.
+    `Store` maps a variable id to `unsolved(Level)` or `solved(Type)`.
 */
 
 :- use_module(library(assoc)).
 :- use_module(library(lists)).
 
 %% empty_context(-Context).
-%
-% The initial algorithmic context: no variables, ids start at 0.
-empty_context(ctx(0, Store)) :-
+empty_context(context(0, Store)) :-
   empty_assoc(Store).
 
-%% fresh_uvar(+CtxIn, +Level, -Uvar, -CtxOut).
-%
-% Allocate a fresh unification variable `alpha^Level` (rule AT-LAM /
-% AM-FORALL: a new uvar is born at the *current* typing level, which
-% bounds the level of whatever it may later be solved to).
-fresh_uvar(ctx(Id, Store), Level, uvar(Id), ctx(Id1, Store1)) :-
-  Id1 is Id + 1,
+%% fresh_unification_variable(+ContextIn, +Level, -Variable, -ContextOut).
+fresh_unification_variable(context(Id, Store), Level, unification_variable(Id),
+                           context(NextId, Store1)) :-
+  NextId is Id + 1,
   put_assoc(Id, Store, unsolved(Level), Store1).
 
-%% monomorphic_scheme(+Type, -Scheme).
-%
-% Wrap a monotype as a scheme with no quantifiers.  Looking such a scheme
-% up and instantiating it returns the very same type (sharing its uvars),
-% which is what we want for lambda-bound variables.
-monomorphic_scheme(Type, scheme([], Type)).
+%% monomorphic_type_scheme(+Type, -Scheme).
+monomorphic_type_scheme(Type, type_scheme([], Type)).
 
 % ---------------------------------------------------------------------------
-% Resolution and zonking (context application `[Gamma]sigma`, Fig. 4)
+% Resolution (context application, Fig. 4)
 % ---------------------------------------------------------------------------
 
-%% resolve(+Type, +Ctx, -Resolved).
+%% resolve_head(+Type, +Context, -Resolved).
 %
-% Follow the chain of solved unification variables one *head* level deep:
-% if `Type` is a solved uvar we return its (recursively resolved)
-% solution, otherwise we return `Type` untouched.  The result is never a
-% solved uvar.
-resolve(Type, Ctx, Resolved) :-
-  ( Type = uvar(Id) ->
-      Ctx = ctx(_, Store),
+% Follow solved unification variables one head level deep.
+resolve_head(Type, Context, Resolved) :-
+  ( Type = unification_variable(Id) ->
+      Context = context(_, Store),
       get_assoc(Id, Store, Entry),
       ( Entry = solved(Solution) ->
-          resolve(Solution, Ctx, Resolved)
-      ; Resolved = Type            % unsolved: stays as `uvar(Id)`
+          resolve_head(Solution, Context, Resolved)
+      ; Resolved = Type
       )
   ; Resolved = Type
   ).
 
-%% zonk(+Type, +Ctx, -Resolved).
+%% fully_resolve(+Type, +Context, -Resolved).
 %
-% Deep context application: replace every solved unification variable by
-% its solution, recursively, throughout the whole type.  This is `[Gamma]`
-% applied as a substitution.
-%
-% "Zonk" is jargon borrowed from GHC's type checker: it is the (informal,
-% onomatopoeic) name for forcing the accumulated variable->solution store
-% through a type so that no solved variables remain.  It exists only at the
-% algorithmic level -- in the declarative theory it is plain substitution;
-% the name distinguishes "resolve everything now" from the lazy bindings
-% that just sit in the context.
-zonk(Type, Ctx, Resolved) :-
-  resolve(Type, Ctx, Head),
-  ( Head = function_type(Params, Ret) ->
-      zonk_list(Params, Ctx, Params1),
-      zonk(Ret, Ctx, Ret1),
-      Resolved = function_type(Params1, Ret1)
-  ; Head = tuple_type(Elems) ->
-      zonk_list(Elems, Ctx, Elems1),
-      Resolved = tuple_type(Elems1)
+% Deep context application, leaving no solved variables.  Tuple chains are
+% flattened so the result is a single `tuple_type(AllFields, FinalTail)`.
+fully_resolve(Type, Context, Resolved) :-
+  resolve_head(Type, Context, Head),
+  ( Head = function_type(Parameters, Return) ->
+      fully_resolve_list(Parameters, Context, Parameters1),
+      fully_resolve(Return, Context, Return1),
+      Resolved = function_type(Parameters1, Return1)
+  ; Head = tuple_type(_, _) ->
+      flatten_tuple(Head, Context, Fields, Tail),
+      fully_resolve_fields(Fields, Context, Fields1),
+      Resolved = tuple_type(Fields1, Tail)
+  ; Head = type_constructor(Name, Arguments) ->
+      fully_resolve_list(Arguments, Context, Arguments1),
+      Resolved = type_constructor(Name, Arguments1)
   ; Resolved = Head
   ).
 
-zonk_list([], _, []).
-zonk_list([T | Ts], Ctx, [Z | Zs]) :-
-  zonk(T, Ctx, Z),
-  zonk_list(Ts, Ctx, Zs).
+fully_resolve_list([], _, []).
+fully_resolve_list([Type | Types], Context, [Resolved | Rest]) :-
+  fully_resolve(Type, Context, Resolved),
+  fully_resolve_list(Types, Context, Rest).
+
+% Resolve the mutability and type carried by each field, keeping the key.
+fully_resolve_fields([], _, []).
+fully_resolve_fields([tuple_field(Mutability, Key, Type) | Fields], Context,
+                     [tuple_field(Mutability1, Key, Type1) | Rest]) :-
+  fully_resolve(Mutability, Context, Mutability1),
+  fully_resolve(Type, Context, Type1),
+  fully_resolve_fields(Fields, Context, Rest).
+
+% Collapse an open-record chain into its full field list and final tail.
+% The tail is resolved to either `closed` or an unsolved unification variable.
+flatten_tuple(tuple_type(Fields, Tail), Context, AllFields, FinalTail) :-
+  resolve_head(Tail, Context, ResolvedTail),
+  ( ResolvedTail = tuple_type(MoreFields, FurtherTail) ->
+      flatten_tuple(tuple_type(MoreFields, FurtherTail), Context, RestFields, FinalTail),
+      append(Fields, RestFields, AllFields)
+  ; AllFields = Fields,
+    FinalTail = ResolvedTail
+  ).
+
+% The monotypes carried by a field (its mutability and its type), used by the
+% occurs check and variable collection, which treat both like any subtype.
+field_monotypes([], []).
+field_monotypes([tuple_field(Mutability, _, Type) | Fields], [Mutability, Type | Rest]) :-
+  field_monotypes(Fields, Rest).
 
 % ---------------------------------------------------------------------------
-% Unification with level adjustment (the algorithmic `<:` collapses to
-% ordinary unification in this annotation-free fragment, Fig. 6)
+% Unification with level adjustment (Fig. 6)
 % ---------------------------------------------------------------------------
 
-%% unify(+Type1, +Type2, +CtxIn, -CtxOut).
-%
-% Make `Type1` and `Type2` equal, extending the context with the required
-% variable solutions.  Throws `analysis_error(...)` on a clash.
-unify(Type1, Type2, CtxIn, CtxOut) :-
-  resolve(Type1, CtxIn, R1),
-  resolve(Type2, CtxIn, R2),
-  unify_resolved(R1, R2, CtxIn, CtxOut).
+%% unify(+Type1, +Type2, +ContextIn, -ContextOut).
+unify(Type1, Type2, ContextIn, ContextOut) :-
+  resolve_head(Type1, ContextIn, Resolved1),
+  resolve_head(Type2, ContextIn, Resolved2),
+  unify_resolved(Resolved1, Resolved2, ContextIn, ContextOut).
 
-unify_resolved(uvar(Id), uvar(Id), Ctx, Ctx) :- !.       % already identical
-unify_resolved(uvar(Id), Type, CtxIn, CtxOut) :- !,
-  bind_uvar(Id, Type, CtxIn, CtxOut).
-unify_resolved(Type, uvar(Id), CtxIn, CtxOut) :- !,
-  bind_uvar(Id, Type, CtxIn, CtxOut).
-unify_resolved(number, number, Ctx, Ctx) :- !.
-unify_resolved(boolean, boolean, Ctx, Ctx) :- !.
-unify_resolved(string, string, Ctx, Ctx) :- !.
-unify_resolved(function_type(P1, R1), function_type(P2, R2), CtxIn, CtxOut) :- !,
-  ( same_length(P1, P2) ->
-      unify_list(P1, P2, CtxIn, Ctx1),
-      unify(R1, R2, Ctx1, CtxOut)
-  ; throw(analysis_error(function_arity_mismatch(P1, P2)))
+unify_resolved(unification_variable(Id), unification_variable(Id), Context, Context) :- !.
+unify_resolved(unification_variable(Id), Type, ContextIn, ContextOut) :- !,
+  bind_unification_variable(Id, Type, ContextIn, ContextOut).
+unify_resolved(Type, unification_variable(Id), ContextIn, ContextOut) :- !,
+  bind_unification_variable(Id, Type, ContextIn, ContextOut).
+unify_resolved(number, number, Context, Context) :- !.
+unify_resolved(boolean, boolean, Context, Context) :- !.
+unify_resolved(string, string, Context, Context) :- !.
+unify_resolved(readonly, readonly, Context, Context) :- !.
+unify_resolved(mutable, mutable, Context, Context) :- !.
+% A readonly/mutable clash is reported specifically (it is what rejects an
+% assignment to a readonly member, and a readonly-vs-mutable annotation).
+unify_resolved(readonly, mutable, _, _) :- !,
+  throw(analysis_error(mutability_mismatch(readonly, mutable))).
+unify_resolved(mutable, readonly, _, _) :- !,
+  throw(analysis_error(mutability_mismatch(mutable, readonly))).
+unify_resolved(function_type(Params1, Return1), function_type(Params2, Return2),
+               ContextIn, ContextOut) :- !,
+  ( same_length(Params1, Params2) ->
+      unify_list(Params1, Params2, ContextIn, Context1),
+      unify(Return1, Return2, Context1, ContextOut)
+  ; throw(analysis_error(function_arity_mismatch(Params1, Params2)))
   ).
-unify_resolved(tuple_type(E1), tuple_type(E2), CtxIn, CtxOut) :- !,
-  ( same_length(E1, E2) ->
-      unify_list(E1, E2, CtxIn, CtxOut)
-  ; throw(analysis_error(tuple_size_mismatch(E1, E2)))
+% STRUCTURAL, row-polymorphic rule for tuples.
+unify_resolved(tuple_type(Fields1, Tail1), tuple_type(Fields2, Tail2), ContextIn, ContextOut) :- !,
+  flatten_tuple(tuple_type(Fields1, Tail1), ContextIn, AllFields1, FinalTail1),
+  flatten_tuple(tuple_type(Fields2, Tail2), ContextIn, AllFields2, FinalTail2),
+  unify_rows(AllFields1, FinalTail1, AllFields2, FinalTail2, ContextIn, ContextOut).
+% NOMINAL rule: type constructors unify only when names match.
+unify_resolved(type_constructor(Name, Arguments1), type_constructor(Name, Arguments2),
+               ContextIn, ContextOut) :- !,
+  ( same_length(Arguments1, Arguments2) ->
+      unify_list(Arguments1, Arguments2, ContextIn, ContextOut)
+  ; throw(analysis_error(type_constructor_arity_mismatch(Name, Arguments1, Arguments2)))
   ).
-unify_resolved(A, B, CtxIn, _) :-
-  % No rule applies: a genuine type clash.  Report the fully-resolved
-  % shapes so the message is informative.
-  zonk(A, CtxIn, ZA),
-  zonk(B, CtxIn, ZB),
-  throw(analysis_error(type_mismatch(ZA, ZB))).
+unify_resolved(TypeA, TypeB, ContextIn, _) :-
+  fully_resolve(TypeA, ContextIn, ResolvedA),
+  fully_resolve(TypeB, ContextIn, ResolvedB),
+  throw(analysis_error(type_mismatch(ResolvedA, ResolvedB))).
 
-unify_list([], [], Ctx, Ctx).
-unify_list([A | As], [B | Bs], CtxIn, CtxOut) :-
-  unify(A, B, CtxIn, Ctx1),
-  unify_list(As, Bs, Ctx1, CtxOut).
+unify_list([], [], Context, Context).
+unify_list([A | As], [B | Bs], ContextIn, ContextOut) :-
+  unify(A, B, ContextIn, Context1),
+  unify_list(As, Bs, Context1, ContextOut).
 
-%% bind_uvar(+Id, +Type, +CtxIn, -CtxOut).
+% ---------------------------------------------------------------------------
+% Row unification (Remy's algorithm)
+% ---------------------------------------------------------------------------
 %
-% Solve `alpha_Id := Type`.  Two invariants from the paper are enforced
-% here:
-%
-%   * Occurs check -- `alpha_Id` must not appear inside `Type`, otherwise
-%     we would be building an infinite type.
-%
-%   * Level adjustment (a.k.a. "promotion", rule PR-UVARPR and the OCaml
-%     in-place update of section 7).  The solution of a level-`m` variable
-%     may only mention variables of level <= m; any deeper variable inside
-%     `Type` is lowered to `m`.  This single operation is what makes
-%     level-based generalisation sound: it prevents a variable that should
-%     stay monomorphic (or a would-be escaping skolem) from being
-%     generalised at an outer scope.
-bind_uvar(Id, Type, CtxIn, CtxOut) :-
-  CtxIn = ctx(_, Store),
+% Unify two flattened records.  Fields present in both are unified (by key,
+% so labels are order-insensitive and positional indices line up).  Fields
+% present in only one must be absorbed by the OTHER record's tail.
+unify_rows(Fields1, Tail1, Fields2, Tail2, ContextIn, ContextOut) :-
+  match_fields(Fields1, Fields2, Common, Only1, Only2),
+  unify_common_fields(Common, ContextIn, Context1),
+  close_rows(Only1, Tail1, Only2, Tail2, Context1, ContextOut).
+
+% Pair up fields by key; `Only1`/`Only2` are the unmatched remainders.
+match_fields([], Fields2Remaining, [], [], Fields2Remaining).
+match_fields([Field1 | Rest1], Fields2, Common, Only1, Only2) :-
+  Field1 = tuple_field(_, Key, _),
+  ( select_field(Key, Fields2, Field2, Fields2Rest) ->
+      Common = [Field1 - Field2 | CommonRest],
+      match_fields(Rest1, Fields2Rest, CommonRest, Only1, Only2)
+  ; Only1 = [Field1 | Only1Rest],
+    match_fields(Rest1, Fields2, Common, Only1Rest, Only2)
+  ).
+
+select_field(Key, [tuple_field(M, Key, T) | Rest], tuple_field(M, Key, T), Rest) :- !.
+select_field(Key, [Other | Rest], Found, [Other | RestOut]) :-
+  select_field(Key, Rest, Found, RestOut).
+
+unify_common_fields([], Context, Context).
+unify_common_fields([tuple_field(M1, _, T1) - tuple_field(M2, _, T2) | Rest], ContextIn, ContextOut) :-
+  unify(M1, M2, ContextIn, Context1),     % mutability (readonly/mutable/var)
+  unify(T1, T2, Context1, Context2),
+  unify_common_fields(Rest, Context2, ContextOut).
+
+% Reconcile the leftover fields against the two tails.  `Only2` (fields only
+% in record 2) must come from record 1's tail, and vice versa.
+close_rows(Only1, Tail1In, Only2, Tail2In, ContextIn, ContextOut) :-
+  resolve_head(Tail1In, ContextIn, Tail1),
+  resolve_head(Tail2In, ContextIn, Tail2),
+  ( Tail1 == closed, Tail2 == closed ->
+      require_no_extra_fields(Only1),
+      require_no_extra_fields(Only2),
+      ContextOut = ContextIn
+  ; Tail1 == closed ->
+      require_no_extra_fields(Only2),
+      unify(Tail2, tuple_type(Only1, closed), ContextIn, ContextOut)
+  ; Tail2 == closed ->
+      require_no_extra_fields(Only1),
+      unify(Tail1, tuple_type(Only2, closed), ContextIn, ContextOut)
+  ; Tail1 == Tail2 ->
+      % The same open row cannot be extended two different ways.
+      require_no_extra_fields(Only1),
+      require_no_extra_fields(Only2),
+      ContextOut = ContextIn
+  ; % Two distinct row variables: link both through one fresh common tail.
+    fresh_common_tail(Tail1, Tail2, ContextIn, CommonTail, Context1),
+    unify(Tail1, tuple_type(Only2, CommonTail), Context1, Context2),
+    unify(Tail2, tuple_type(Only1, CommonTail), Context2, ContextOut)
+  ).
+
+require_no_extra_fields([]) :- !.
+require_no_extra_fields(Fields) :-
+  findall(Key, member(tuple_field(_, Key, _), Fields), Keys),
+  throw(analysis_error(tuple_field_mismatch(Keys))).
+
+% A fresh row variable for the shared tail, born at the shallower of the two
+% tails' levels so it generalises no more eagerly than they would.
+fresh_common_tail(unification_variable(Id1), unification_variable(Id2),
+                  context(NextId, Store), unification_variable(NextId),
+                  context(NextId1, Store1)) :-
+  get_assoc(Id1, Store, unsolved(Level1)),
+  get_assoc(Id2, Store, unsolved(Level2)),
+  ( Level1 =< Level2 -> Level = Level1 ; Level = Level2 ),
+  NextId1 is NextId + 1,
+  put_assoc(NextId, Store, unsolved(Level), Store1).
+
+%% bind_unification_variable(+Id, +Type, +ContextIn, -ContextOut).
+bind_unification_variable(Id, Type, ContextIn, ContextOut) :-
+  ContextIn = context(_, Store),
   get_assoc(Id, Store, unsolved(Level)),
-  occurs_and_adjust(Id, Level, Type, CtxIn, ctx(NextId, Store1)),
+  occurs_check_and_adjust_levels(Id, Level, Type, ContextIn, context(NextId, Store1)),
   put_assoc(Id, Store1, solved(Type), Store2),
-  CtxOut = ctx(NextId, Store2).
+  ContextOut = context(NextId, Store2).
 
-%% occurs_and_adjust(+Id, +MaxLevel, +Type, +CtxIn, -CtxOut).
-%
-% Walk `Type`; fail (throw) if `Id` occurs in it, and lower the level of
-% every unsolved variable whose level exceeds `MaxLevel`.
-occurs_and_adjust(Id, MaxLevel, Type, CtxIn, CtxOut) :-
-  resolve(Type, CtxIn, R),
-  ( R = uvar(Other) ->
+%% occurs_check_and_adjust_levels(+Id, +MaxLevel, +Type, +ContextIn, -ContextOut).
+occurs_check_and_adjust_levels(Id, MaxLevel, Type, ContextIn, ContextOut) :-
+  resolve_head(Type, ContextIn, Resolved),
+  ( Resolved = unification_variable(Other) ->
       ( Other =:= Id ->
           throw(analysis_error(occurs_check(Id)))
-      ; CtxIn = ctx(NextId, Store),
+      ; ContextIn = context(NextId, Store),
         get_assoc(Other, Store, unsolved(OtherLevel)),
         ( OtherLevel > MaxLevel ->
             put_assoc(Other, Store, unsolved(MaxLevel), Store1),
-            CtxOut = ctx(NextId, Store1)
-        ; CtxOut = CtxIn
+            ContextOut = context(NextId, Store1)
+        ; ContextOut = ContextIn
         )
       )
-  ; R = function_type(Params, Ret) ->
-      occurs_and_adjust_list(Id, MaxLevel, Params, CtxIn, Ctx1),
-      occurs_and_adjust(Id, MaxLevel, Ret, Ctx1, CtxOut)
-  ; R = tuple_type(Elems) ->
-      occurs_and_adjust_list(Id, MaxLevel, Elems, CtxIn, CtxOut)
-  ; CtxOut = CtxIn                 % base type: nothing to do
+  ; Resolved = function_type(Parameters, Return) ->
+      occurs_check_and_adjust_levels_list(Id, MaxLevel, Parameters, ContextIn, Context1),
+      occurs_check_and_adjust_levels(Id, MaxLevel, Return, Context1, ContextOut)
+  ; Resolved = tuple_type(Fields, Tail) ->
+      field_monotypes(Fields, Monotypes),
+      occurs_check_and_adjust_levels_list(Id, MaxLevel, Monotypes, ContextIn, Context1),
+      occurs_check_and_adjust_levels(Id, MaxLevel, Tail, Context1, ContextOut)
+  ; Resolved = type_constructor(_, Arguments) ->
+      occurs_check_and_adjust_levels_list(Id, MaxLevel, Arguments, ContextIn, ContextOut)
+  ; ContextOut = ContextIn                 % base type or `closed`: nothing to do
   ).
 
-occurs_and_adjust_list(_, _, [], Ctx, Ctx).
-occurs_and_adjust_list(Id, MaxLevel, [T | Ts], CtxIn, CtxOut) :-
-  occurs_and_adjust(Id, MaxLevel, T, CtxIn, Ctx1),
-  occurs_and_adjust_list(Id, MaxLevel, Ts, Ctx1, CtxOut).
+occurs_check_and_adjust_levels_list(_, _, [], Context, Context).
+occurs_check_and_adjust_levels_list(Id, MaxLevel, [Type | Types], ContextIn, ContextOut) :-
+  occurs_check_and_adjust_levels(Id, MaxLevel, Type, ContextIn, Context1),
+  occurs_check_and_adjust_levels_list(Id, MaxLevel, Types, Context1, ContextOut).
 
 % ---------------------------------------------------------------------------
 % Generalisation and instantiation (let-polymorphism, via levels)
 % ---------------------------------------------------------------------------
 
-%% generalize(+Type, +OuterLevel, +CtxIn, -Scheme, -CtxOut).
-%
-% Implements rule LT-LET / AT-LET generalisation `forall ftv^{n+1}(sigma)`.
-% The body `e1` of a definition was inferred at `OuterLevel + 1`; here we
-% quantify exactly those unification variables whose level is strictly
-% greater than `OuterLevel`.
-%
-% The level discipline is precisely the efficiency win of the paper: a
-% variable still has level > OuterLevel iff it was created inside this
-% definition AND was never linked (by `bind_uvar`'s level adjustment) to
-% anything from an enclosing scope.  So we never have to scan the typing
-% environment to decide what is safe to generalise.
-generalize(Type, OuterLevel, Ctx, scheme(QVarIds, Body), Ctx) :-
-  zonk(Type, Ctx, Zonked),
-  collect_uvar_ids(Zonked, [], AllIds),
-  include_generalizable(AllIds, OuterLevel, Ctx, QVarIds),
-  abstract_qvars(Zonked, QVarIds, Body).
+%% generalize(+Type, +OuterLevel, +Context, -Scheme, -Context).
+generalize(Type, OuterLevel, Context, type_scheme(QuantifiedIds, Body), Context) :-
+  fully_resolve(Type, Context, Resolved),
+  collect_unification_variable_ids(Resolved, [], AllIds),
+  include_generalizable(AllIds, OuterLevel, Context, QuantifiedIds),
+  abstract_quantified_variables(Resolved, QuantifiedIds, Body).
 
-% Collect, without duplicates, the ids of all (unsolved) uvars in a
-% already-zonked type.
-collect_uvar_ids(Type, Acc, Ids) :-
-  ( Type = uvar(Id) ->
-      ( memberchk(Id, Acc) -> Ids = Acc ; Ids = [Id | Acc] )
-  ; Type = function_type(Params, Ret) ->
-      collect_uvar_ids_list(Params, Acc, Acc1),
-      collect_uvar_ids(Ret, Acc1, Ids)
-  ; Type = tuple_type(Elems) ->
-      collect_uvar_ids_list(Elems, Acc, Ids)
-  ; Ids = Acc
+collect_unification_variable_ids(Type, Accumulator, Ids) :-
+  ( Type = unification_variable(Id) ->
+      ( memberchk(Id, Accumulator) -> Ids = Accumulator ; Ids = [Id | Accumulator] )
+  ; Type = function_type(Parameters, Return) ->
+      collect_unification_variable_ids_list(Parameters, Accumulator, Accumulator1),
+      collect_unification_variable_ids(Return, Accumulator1, Ids)
+  ; Type = tuple_type(Fields, Tail) ->
+      field_monotypes(Fields, Monotypes),
+      collect_unification_variable_ids_list(Monotypes, Accumulator, Accumulator1),
+      collect_unification_variable_ids(Tail, Accumulator1, Ids)
+  ; Type = type_constructor(_, Arguments) ->
+      collect_unification_variable_ids_list(Arguments, Accumulator, Ids)
+  ; Ids = Accumulator
   ).
 
-collect_uvar_ids_list([], Acc, Acc).
-collect_uvar_ids_list([T | Ts], Acc, Ids) :-
-  collect_uvar_ids(T, Acc, Acc1),
-  collect_uvar_ids_list(Ts, Acc1, Ids).
+collect_unification_variable_ids_list([], Accumulator, Accumulator).
+collect_unification_variable_ids_list([Type | Types], Accumulator, Ids) :-
+  collect_unification_variable_ids(Type, Accumulator, Accumulator1),
+  collect_unification_variable_ids_list(Types, Accumulator1, Ids).
 
-% Keep only those ids whose level is deeper than the enclosing scope.
 include_generalizable([], _, _, []).
-include_generalizable([Id | Ids], OuterLevel, Ctx, Result) :-
-  Ctx = ctx(_, Store),
+include_generalizable([Id | Ids], OuterLevel, Context, Result) :-
+  Context = context(_, Store),
   get_assoc(Id, Store, unsolved(Level)),
   ( Level > OuterLevel ->
       Result = [Id | Rest]
   ; Result = Rest
   ),
-  include_generalizable(Ids, OuterLevel, Ctx, Rest).
+  include_generalizable(Ids, OuterLevel, Context, Rest).
 
-% Replace each generalised `uvar(Id)` by the bound variable `qvar(Id)`.
-abstract_qvars(Type, QVarIds, Out) :-
-  ( Type = uvar(Id) ->
-      ( memberchk(Id, QVarIds) -> Out = qvar(Id) ; Out = Type )
-  ; Type = function_type(Params, Ret) ->
-      abstract_qvars_list(Params, QVarIds, Params1),
-      abstract_qvars(Ret, QVarIds, Ret1),
-      Out = function_type(Params1, Ret1)
-  ; Type = tuple_type(Elems) ->
-      abstract_qvars_list(Elems, QVarIds, Elems1),
-      Out = tuple_type(Elems1)
+abstract_quantified_variables(Type, QuantifiedIds, Out) :-
+  ( Type = unification_variable(Id) ->
+      ( memberchk(Id, QuantifiedIds) -> Out = quantified_variable(Id) ; Out = Type )
+  ; Type = function_type(Parameters, Return) ->
+      abstract_quantified_variables_list(Parameters, QuantifiedIds, Parameters1),
+      abstract_quantified_variables(Return, QuantifiedIds, Return1),
+      Out = function_type(Parameters1, Return1)
+  ; Type = tuple_type(Fields, Tail) ->
+      abstract_fields(Fields, QuantifiedIds, Fields1),
+      abstract_quantified_variables(Tail, QuantifiedIds, Tail1),
+      Out = tuple_type(Fields1, Tail1)
+  ; Type = type_constructor(Name, Arguments) ->
+      abstract_quantified_variables_list(Arguments, QuantifiedIds, Arguments1),
+      Out = type_constructor(Name, Arguments1)
   ; Out = Type
   ).
 
-abstract_qvars_list([], _, []).
-abstract_qvars_list([T | Ts], QVarIds, [O | Os]) :-
-  abstract_qvars(T, QVarIds, O),
-  abstract_qvars_list(Ts, QVarIds, Os).
+abstract_quantified_variables_list([], _, []).
+abstract_quantified_variables_list([Type | Types], QuantifiedIds, [Out | Outs]) :-
+  abstract_quantified_variables(Type, QuantifiedIds, Out),
+  abstract_quantified_variables_list(Types, QuantifiedIds, Outs).
 
-%% instantiate(+Scheme, +Level, +CtxIn, -Type, -CtxOut).
-%
-% Replace every quantified variable of the scheme by a fresh unification
-% variable born at the current typing `Level` (rule LT-VAR's use of a
-% scheme, and `instantiate` of the HM paper).  A monomorphic scheme
-% `scheme([], Body)` is returned verbatim, preserving variable sharing.
-instantiate(scheme(QVarIds, Body), Level, CtxIn, Type, CtxOut) :-
-  fresh_qvar_mapping(QVarIds, Level, CtxIn, Mapping, CtxOut),
-  substitute_qvars(Body, Mapping, Type).
+abstract_fields([], _, []).
+abstract_fields([tuple_field(Mutability, Key, Type) | Fields], QuantifiedIds,
+                [tuple_field(Mutability1, Key, Type1) | Outs]) :-
+  abstract_quantified_variables(Mutability, QuantifiedIds, Mutability1),
+  abstract_quantified_variables(Type, QuantifiedIds, Type1),
+  abstract_fields(Fields, QuantifiedIds, Outs).
 
-% Build a `QVarId-uvar(NewId)` map, allocating one fresh uvar per
-% quantified variable.
-fresh_qvar_mapping([], _, Ctx, [], Ctx).
-fresh_qvar_mapping([Q | Qs], Level, CtxIn, [Q - Fresh | Rest], CtxOut) :-
-  fresh_uvar(CtxIn, Level, Fresh, Ctx1),
-  fresh_qvar_mapping(Qs, Level, Ctx1, Rest, CtxOut).
+%% instantiate(+Scheme, +Level, +ContextIn, -Type, -ContextOut).
+instantiate(type_scheme(QuantifiedIds, Body), Level, ContextIn, Type, ContextOut) :-
+  fresh_quantified_mapping(QuantifiedIds, Level, ContextIn, Mapping, ContextOut),
+  substitute_quantified_variables(Body, Mapping, Type).
 
-substitute_qvars(Type, Mapping, Out) :-
-  ( Type = qvar(Q) ->
-      ( memberchk(Q - Fresh, Mapping) -> Out = Fresh ; Out = Type )
-  ; Type = function_type(Params, Ret) ->
-      substitute_qvars_list(Params, Mapping, Params1),
-      substitute_qvars(Ret, Mapping, Ret1),
-      Out = function_type(Params1, Ret1)
-  ; Type = tuple_type(Elems) ->
-      substitute_qvars_list(Elems, Mapping, Elems1),
-      Out = tuple_type(Elems1)
+fresh_quantified_mapping([], _, Context, [], Context).
+fresh_quantified_mapping([Quantified | Rest], Level, ContextIn,
+                         [Quantified - Fresh | Mapping], ContextOut) :-
+  fresh_unification_variable(ContextIn, Level, Fresh, Context1),
+  fresh_quantified_mapping(Rest, Level, Context1, Mapping, ContextOut).
+
+substitute_quantified_variables(Type, Mapping, Out) :-
+  ( Type = quantified_variable(Quantified) ->
+      ( memberchk(Quantified - Fresh, Mapping) -> Out = Fresh ; Out = Type )
+  ; Type = function_type(Parameters, Return) ->
+      substitute_quantified_variables_list(Parameters, Mapping, Parameters1),
+      substitute_quantified_variables(Return, Mapping, Return1),
+      Out = function_type(Parameters1, Return1)
+  ; Type = tuple_type(Fields, Tail) ->
+      substitute_fields(Fields, Mapping, Fields1),
+      substitute_quantified_variables(Tail, Mapping, Tail1),
+      Out = tuple_type(Fields1, Tail1)
+  ; Type = type_constructor(Name, Arguments) ->
+      substitute_quantified_variables_list(Arguments, Mapping, Arguments1),
+      Out = type_constructor(Name, Arguments1)
   ; Out = Type
   ).
 
-substitute_qvars_list([], _, []).
-substitute_qvars_list([T | Ts], Mapping, [O | Os]) :-
-  substitute_qvars(T, Mapping, O),
-  substitute_qvars_list(Ts, Mapping, Os).
+substitute_quantified_variables_list([], _, []).
+substitute_quantified_variables_list([Type | Types], Mapping, [Out | Outs]) :-
+  substitute_quantified_variables(Type, Mapping, Out),
+  substitute_quantified_variables_list(Types, Mapping, Outs).
+
+substitute_fields([], _, []).
+substitute_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping,
+                  [tuple_field(Mutability1, Key, Type1) | Outs]) :-
+  substitute_quantified_variables(Mutability, Mapping, Mutability1),
+  substitute_quantified_variables(Type, Mapping, Type1),
+  substitute_fields(Fields, Mapping, Outs).
 
 % ---------------------------------------------------------------------------
 % Reporting
 % ---------------------------------------------------------------------------
 
-%% context_substitution(+Ctx, -Substitution).
-%
-% Extract the solved part of the context as a list `Id = ResolvedType`,
-% i.e. the final substitution produced by inference.
-context_substitution(Ctx, Substitution) :-
-  Ctx = ctx(_, Store),
+%% context_substitution(+Context, -Substitution).
+context_substitution(Context, Substitution) :-
+  Context = context(_, Store),
   assoc_to_list(Store, Pairs),
-  solved_pairs(Pairs, Ctx, Substitution).
+  solved_pairs(Pairs, Context, Substitution).
 
 solved_pairs([], _, []).
-solved_pairs([Id - solved(Type) | Ps], Ctx, [Id = Zonked | Rest]) :- !,
-  zonk(Type, Ctx, Zonked),
-  solved_pairs(Ps, Ctx, Rest).
-solved_pairs([_ - unsolved(_) | Ps], Ctx, Rest) :-
-  solved_pairs(Ps, Ctx, Rest).
+solved_pairs([Id - solved(Type) | Pairs], Context, [Id = Resolved | Rest]) :- !,
+  fully_resolve(Type, Context, Resolved),
+  solved_pairs(Pairs, Context, Rest).
+solved_pairs([_ - unsolved(_) | Pairs], Context, Rest) :-
+  solved_pairs(Pairs, Context, Rest).

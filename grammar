@@ -72,15 +72,93 @@ Identifier :-
 
 Block :- "{" Separator* (Expression (Separator+ Expression)*)* Separator* "}"
 
-Tuple :- "(" Separator* (Expression (Separator+ Expression)*)* Separator* ")"
+# A type annotation: the optional `: Type` suffix on definitions, function
+# parameters and function return positions.  A leading run of separators
+# before the colon is allowed (so `a: T` and `a : T` both parse).
+TypeAnnotation :- Separator* ":" Separator* TypeExpression
+
+# A tuple mixes positional and labeled members, each optionally `mutable`.
+# Labeled members may appear in any order; positional order is significant.
+Tuple :- "(" Separator* (TupleMember (Separator+ TupleMember)*)* Separator* ")"
+
+# A member is either a SPREAD (splice another record's fields in) or a
+# (possibly mutable) labeled / positional member.  Spreads are emitted first,
+# so an explicit field overrides a spread field of the same key.
+TupleMember :- Spread | Mutability? (LabeledMember | Expression)
+
+Spread :- ".." Expression
+
+LabeledMember :- Identifier TypeAnnotation? Separator* "=" Separator* Expression
+
+# `mutable` and `opaque` (below) and `type` (below) are SOFT keywords: each
+# must be followed by a separator to be recognised, so they remain usable as
+# ordinary identifiers otherwise.
+Mutability :- "mutable" Separator+
 
 Function :-
-	"(" Separator* (Identifier (Separator+ Identifier)*)* Separator* ")"
+	TypeParameters?
+	"(" Separator* (Parameter (Separator+ Parameter)*)* Separator* ")"
+	TypeAnnotation?
 	Separator* Expression
 
-FunctionCall :-
-	(Identifier | Block) Separator*
-	"(" Separator* (Expression (Separator+ Expression)*)* Separator* ")"
+Parameter :- IrrefutablePattern TypeAnnotation?
+
+# Patterns are used by `match` arms, destructuring definitions and function
+# parameters.  An IRREFUTABLE pattern (parameters, destructuring) cannot fail,
+# so it excludes literal patterns; a full Pattern (match arms) includes them.
+Pattern :-
+	ConstructorPattern
+	| RecordPattern
+	| NumberLiteral
+	| BooleanLiteral
+	| StringLiteral
+	| "_"
+	| Identifier
+
+# A tagged-union constructor pattern.  Nullary constructors are matched with
+# empty parens (`None()`), so a bare identifier is unambiguously a binding.
+ConstructorPattern :-
+	Identifier "(" Separator* (Pattern (Separator+ Pattern)*)? Separator* ")"
+
+RecordPattern :- "(" Separator* (PatternMember (Separator+ PatternMember)*)* Separator* ")"
+
+# A labeled member uses `=` (`(x = p)` matches field x against p), mirroring
+# labeled tuple values and avoiding the typed-binder lookalike of `:`.
+PatternMember :- Identifier Separator* "=" Separator* Pattern | Pattern
+
+IrrefutablePattern :- IrrefutableRecordPattern | "_" | Identifier
+
+IrrefutableRecordPattern :-
+	"(" Separator* (IrrefutablePatternMember (Separator+ IrrefutablePatternMember)*)* Separator* ")"
+
+IrrefutablePatternMember :-
+	Identifier Separator* "=" Separator* IrrefutablePattern | IrrefutablePattern
+
+# Member access and calls are postfix operations on a primary.
+# An access chain may end in an assignment, used to mutate a `mutable` member.
+Postfix :- Primary PostfixOperator* Assignment?
+
+Primary :-
+	NumberLiteral
+	| BooleanLiteral
+	| StringLiteral
+	| Tuple
+	| Block
+	| Identifier
+
+PostfixOperator :-
+	"." Accessor
+	| "(" Separator* (CallArgument (Separator+ CallArgument)*)* Separator* ")"
+
+# A `_` argument is a placeholder (hole): a call with holes evaluates to a
+# function awaiting those arguments, in order.  e.g. `foo(_ 'x')` has the
+# type of `foo` with its first parameter still outstanding.
+CallArgument :- "_" | Expression
+
+Accessor :- Identifier | DecimalDigit+
+
+# Only valid when the target is a member access; "=" must not begin "==".
+Assignment :- Separator* "=" Separator* Expression
 
 Unary :- UnaryOperator Separator* Expression
 
@@ -113,20 +191,97 @@ Conditional :-
 	Separator* Expression
 	Separator* "else" Separator* Expression
 
-Definition :- Identifier Separator* "=" Separator* Expression
+Definition :- Identifier TypeAnnotation? Separator* "=" Separator* Expression
+
+# A destructuring definition binds a record pattern's variables.  The LHS is
+# a record pattern (a bare `name = value` is an ordinary Definition).
+Destructuring :- IrrefutableRecordPattern Separator* "=" Separator* Expression
+
+# `match` is a soft keyword.  The scrutinee is parsed at the Postfix (atom)
+# level so it never swallows the arm-separating `|`; wrap a compound scrutinee
+# as `match { a + b } | ...` or `match (t) | ...`.  Each arm is one or more
+# `|`-separated alternative patterns (an OR-PATTERN; all alternatives must
+# bind the same variables), an optional guard, and a result.  In this
+# (union-free) form every pattern is consistent with the scrutinee's type.
+Match :-
+	"match" Separator+ Postfix
+	(Separator* "|" Separator* MatchArm)+
+
+MatchArm :-
+	Pattern (Separator* "|" Separator* Pattern)*
+	Separator* ("if" Separator+ Expression Separator*)? "=>" Separator* Expression
+
+# A `type` declaration introduces a named type, which is one of:
+#  * a TAGGED UNION (variant / sum type): a `|`-separated list of constructors;
+#  * a STRUCTURAL alias for a type expression (default); or
+#  * a NOMINAL type when the body is prefixed with `opaque`.
+TypeDeclaration :-
+	"type" Separator+ Identifier TypeParameters? Separator*
+	"=" Separator* DeclarationBody
+
+DeclarationBody :- VariantBody | Opaque? TypeExpression
+
+# A body is a variant when it has a leading `|`, two or more constructors, or
+# a single constructor written with a field list `Name(...)` (this last rule
+# distinguishes `type Wrap = Wrap(number)` from the alias `type Id = number`).
+# Constructors are values/functions; construct with ordinary application,
+# e.g. `Circle(5)`, and a nullary constructor like `None` is just a value.
+VariantBody :- "|"? Constructor (Separator* "|" Separator* Constructor)*
+
+Constructor :-
+	Identifier ("(" Separator* TypeExpression (Separator+ TypeExpression)* Separator* ")")?
+
+Opaque :- "opaque" Separator+
+
+# A type-parameter list, used by declarations AND function generics.  Each
+# parameter may carry a bound, written `Name: TypeExpression`:
+#     <A b>                       two unbounded parameters
+#     <T: (number ..)>           T bounded by an open record
+TypeParameters :- "<" Separator* TypeParameter (Separator+ TypeParameter)* Separator* ">"
+
+TypeParameter :- Identifier (Separator* ":" Separator* TypeExpression)?
+
+# A type expression is either a parenthesized form (a tuple type, or a
+# function type when a `: ReturnType` follows) or a named reference.
+TypeExpression :- ParenthesizedType | TypeReference
+
+# Members optionally end with `..` (optionally naming the rest, `..R`),
+# making the record OPEN ("and possibly more fields"); otherwise it is
+# closed/exact.  Naming the rest with `..R` (R a type parameter) lets two
+# annotations share a tail, so a function can preserve a caller's extra
+# fields (open-row results).  A trailing `: ReturnType` instead makes it a
+# FUNCTION type, whose parameters are the member types:
+#     (number string)            closed tuple type
+#     (one: number two: string)  tuple type with labeled members
+#     (x: string ..)             OPEN record: at least field x, plus more
+#     (x: string ..R)            OPEN record capturing the rest as R
+#     (..)                       any record
+#     (number): number           function type  (number) -> number
+#     (number string): boolean   function type  (number, string) -> boolean
+ParenthesizedType :-
+	"(" Separator* (TypeMember (Separator+ TypeMember)*)? (Separator+ ".." Identifier?)? Separator* ")"
+	(Separator* ":" Separator* TypeExpression)?
+
+TypeMember :- Mutability? (Identifier Separator* ":" Separator* TypeExpression | TypeExpression)
+
+# A named type, optionally applied to angle-bracketed type arguments:
+#     number      Pair<A b>      Box<number>
+TypeReference :- Identifier TypeArguments?
+
+TypeArguments :- "<" Separator* TypeExpression (Separator+ TypeExpression)* Separator* ">"
 
 BaseExpression :-
-	NumberLiteral
-	| BooleanLiteral
-	| StringLiteral
-	| Function
-	| Tuple
-	| FunctionCall
-	| Block
+	TypeDeclaration
 	| Definition
+	| Destructuring
+	| Function
+	# Conditional and Match precede Binary so their bodies / arm results bind
+	# greedily (`match s | _ => a + b` keeps `a + b` in the arm).
 	| Conditional
-	| Identifier
+	| Match
+	| Binary
 	| Unary
+	| Postfix
 
 Expression :-
 	Binary

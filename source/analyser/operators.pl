@@ -25,7 +25,7 @@
                            so it has type `a (a -> b) -> b`
 */
 
-:- use_module(types, [fresh_uvar/4]).
+:- use_module(types, [fresh_unification_variable/4]).
 
 %% unary_signature(+Operator, +Level, -OperandType, -ResultType).
 %
@@ -49,13 +49,13 @@ binary_signature(Operator, Level, CtxIn, Left, Right, Result, CtxOut) :-
       Left = number, Right = number, Result = boolean, CtxOut = CtxIn
   ; equality_binary(Operator) ->
       % (a a) -> boolean : both operands share one fresh variable.
-      fresh_uvar(CtxIn, Level, A, CtxOut),
+      fresh_unification_variable(CtxIn, Level, A, CtxOut),
       Left = A, Right = A, Result = boolean
   ; Operator = pipe ->
       % a (a -> b) -> b : the right operand must be a unary function whose
       % parameter type matches the left operand.
-      fresh_uvar(CtxIn, Level, A, Ctx1),
-      fresh_uvar(Ctx1, Level, B, CtxOut),
+      fresh_unification_variable(CtxIn, Level, A, Ctx1),
+      fresh_unification_variable(Ctx1, Level, B, CtxOut),
       Left = A,
       Right = function_type([A], B),
       Result = B
