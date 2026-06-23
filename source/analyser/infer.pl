@@ -6,11 +6,13 @@
 /*  infer.pl  --  The level-indexed inference judgement.
 
     This module walks the parser's AST and computes a type for every
-    expression, threading the algorithmic context of `types.pl`.  It is a
-    synthesis-only ("Algorithm W"-style) presentation of the level-based
-    rules from Fan, Xu & Xie (PLDI'25).  The source language is mostly
-    annotation-free; where an explicit annotation IS written we simply
-    unify the inferred type against the annotation.
+    expression, threading the algorithmic context of `types.pl`.  It is
+    mostly synthesis ("Algorithm W"-style) over the level-based rules of Fan,
+    Xu & Xie (PLDI'25), with a CHECKING direction (`check_expr/8`) used where
+    an expected type is known -- a definition/return annotation, or a function
+    argument.  Checking is what supports predicative RANK-N polymorphism: a
+    polytype expectation is skolemised and the node verified against it, so a
+    polymorphic value can be checked rather than prematurely instantiated.
 
     The central judgement is
 
@@ -52,6 +54,9 @@
   resolve_head/3,
   fully_resolve/3,
   unify/4,
+  subsume/5,
+  instantiate_forall/5,
+  skolemize_forall/6,
   generalize/5,
   instantiate/5,
   monomorphic_type_scheme/2
@@ -138,8 +143,7 @@ infer_sequence_item(definition_node(identifier_node(Name), Annotation, Value),
                     Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
                     ValueType, EnvironmentOut, ContextOut) :- !,
   Level1 is Level + 1,
-  infer(Value, Level1, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
-  apply_annotation(Annotation, ValueType, TypeEnvironment, Level1, Context1, Context2),
+  define_value(Annotation, Value, Level1, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context2),
   tie_forward_knot(Name, Environment, ValueType, Context2, Context3),
   generalize(ValueType, Level, Context3, Scheme, Context4),
   put_assoc(Name, Environment, defined(Scheme), EnvironmentOut),
@@ -199,8 +203,7 @@ infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body), Level, 
   bind_type_parameters(TypeParameters, TypeEnvironment, Level, ContextIn, TypeEnvironment1, Context1),
   bind_parameters(Parameters, Level, TypeEnvironment1, Environment, Context1,
                   ParameterTypes, Environment1, Context2),
-  infer(Body, Level, true, Environment1, TypeEnvironment1, Context2, BodyType, Context3),
-  apply_annotation(ReturnAnnotation, BodyType, TypeEnvironment1, Level, Context3, ContextOut).
+  type_function_body(ReturnAnnotation, Body, Level, Environment1, TypeEnvironment1, Context2, BodyType, ContextOut).
 
 % Tuple: infer each member into a field.  A literal is a CLOSED record, so
 % its tail is `closed`.  Positional members get sequential `index` keys;
@@ -272,10 +275,7 @@ infer(destructuring_node(Pattern, Value), Level, InsideFunction, Environment, Ty
 infer(function_call_node(Target, Arguments), Level, InsideFunction, Environment,
       TypeEnvironment, ContextIn, ResultType, ContextOut) :-
   infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
-  infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ArgumentTypes, HoleTypes, Context2),
-  apply_function(TargetType, ArgumentTypes, Level, Context2, AppliedType, Context3),
-  section_result(HoleTypes, AppliedType, ResultType),
-  ContextOut = Context3.
+  apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut).
 
 % Conditional: the condition must be boolean and the two branches must agree.
 infer(conditional_node(Condition, Then, Else), Level, InsideFunction, Environment,
@@ -328,43 +328,109 @@ apply_annotation(type_annotation(TypeExpression), InferredType, TypeEnvironment,
   unify(AnnotatedType, InferredType, Context1, ContextOut).
 
 % ---------------------------------------------------------------------------
-% Application, with partial application
+% Application: bidirectional, with partial application and placeholders
 % ---------------------------------------------------------------------------
+%
+% Application is where rank-N polymorphism is both INTRODUCED and ELIMINATED,
+% so it drives the checking direction.  When the callee's type is known:
+%   * a polymorphic callee is INSTANTIATED before it is applied;
+%   * each argument is CHECKED against its parameter type (not merely inferred
+%     then unified) -- this is what lets a polymorphic argument be passed to a
+%     parameter that demands a polytype, with instantiation happening at the
+%     right (deeper) level inside the check.
+% When the callee's type is still unknown we fall back to synthesising the
+% argument types and unifying, exactly as before.
 
-%% apply_function(+TargetType, +ArgTypes, +Level, +ContextIn, -ResultType, -ContextOut).
-apply_function(TargetType, ArgumentTypes, Level, ContextIn, ResultType, ContextOut) :-
+%% apply_call(+TargetType, +Arguments, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -ContextOut).
+apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut) :-
   resolve_head(TargetType, ContextIn, Resolved),
-  ( Resolved = function_type(Parameters, Return) ->
-      apply_known(Parameters, Return, ArgumentTypes, Level, ContextIn, ResultType, ContextOut)
-  ; % Unknown callee, or a non-function: let unify settle or report it.
-    fresh_unification_variable(ContextIn, Level, Result, Context1),
-    unify(Resolved, function_type(ArgumentTypes, Result), Context1, ContextOut),
-    ResultType = Result
+  ( Resolved = forall_type(_, _) ->
+      instantiate_forall(Resolved, Level, ContextIn, Opened, Context1),
+      apply_call(Opened, Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut)
+  ; Resolved = function_type(Parameters, Return) ->
+      apply_known(Parameters, Return, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut)
+  ; % Unknown callee, or a non-function: synthesise argument types and let
+    % unify settle it or report a mismatch.
+    infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ArgumentTypes, HoleTypes, Context1),
+    fresh_unification_variable(Context1, Level, Result, Context2),
+    unify(Resolved, function_type(ArgumentTypes, Result), Context2, Context3),
+    section_result(HoleTypes, Result, ResultType),
+    ContextOut = Context3
   ).
 
 % Apply a callee whose parameter list is known: exact, partial, or
-% over-application.
-apply_known(Parameters, Return, ArgumentTypes, Level, ContextIn, ResultType, ContextOut) :-
+% over-application.  Holes (`_`) and missing trailing parameters both feed the
+% resulting section type via `section_result`.
+apply_known(Parameters, Return, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut) :-
   length(Parameters, ParameterCount),
-  length(ArgumentTypes, ArgumentCount),
+  length(Arguments, ArgumentCount),
   ( ArgumentCount =< ParameterCount ->
       length(Used, ArgumentCount),
       append(Used, Remaining, Parameters),
-      unify_pairs(ArgumentTypes, Used, ContextIn, ContextOut),
+      check_arguments(Arguments, Used, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, ContextOut),
       ( Remaining = [] ->
-          ResultType = Return
-      ; ResultType = function_type(Remaining, Return)
-      )
+          Applied = Return
+      ; Applied = function_type(Remaining, Return)
+      ),
+      section_result(HoleTypes, Applied, ResultType)
   ; length(Used, ParameterCount),
-    append(Used, Surplus, ArgumentTypes),
-    unify_pairs(Used, Parameters, ContextIn, Context1),
-    apply_function(Return, Surplus, Level, Context1, ResultType, ContextOut)
+    append(Used, SurplusArguments, Arguments),
+    check_arguments(Used, Parameters, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, Context1),
+    apply_call(Return, SurplusArguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, Applied, ContextOut),
+    section_result(HoleTypes, Applied, ResultType)
   ).
 
-unify_pairs([], [], Context, Context).
-unify_pairs([A | As], [B | Bs], ContextIn, ContextOut) :-
-  unify(A, B, ContextIn, Context1),
-  unify_pairs(As, Bs, Context1, ContextOut).
+% Check each argument NODE against the parameter type it fills.  A placeholder
+% `_` is a hole: it consumes its parameter but constrains nothing, and that
+% parameter's type becomes (in order) part of the resulting section's domain.
+check_arguments([], [], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], Context).
+check_arguments([placeholder_node | Arguments], [Parameter | Parameters], Level, InsideFunction, Environment, TypeEnvironment,
+                ContextIn, [Parameter | HoleTypes], ContextOut) :- !,
+  check_arguments(Arguments, Parameters, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, ContextOut).
+check_arguments([Argument | Arguments], [Parameter | Parameters], Level, InsideFunction, Environment, TypeEnvironment,
+                ContextIn, HoleTypes, ContextOut) :-
+  check_expr(Argument, Parameter, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Context1),
+  check_arguments(Arguments, Parameters, Level, InsideFunction, Environment, TypeEnvironment, Context1, HoleTypes, ContextOut).
+
+% ---------------------------------------------------------------------------
+% Bidirectional checking
+% ---------------------------------------------------------------------------
+
+%% check_expr(+Node, +ExpectedType, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ContextOut).
+%
+% Check that `Node` has type `ExpectedType`.  When the expectation is a
+% polytype we SKOLEMISE it (one level deeper) and check the node against the
+% rigid body -- so `Node` must work for an arbitrary type, and a skolem may not
+% escape into the surrounding scope.  Otherwise we synthesise the node's type
+% and `subsume` it against the expectation (the rank-N generalisation of a
+% plain annotation unify; for first-order types this IS a unify).
+check_expr(Node, ExpectedType, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
+  resolve_head(ExpectedType, ContextIn, Expected),
+  ( Expected = forall_type(BoundIds, Body) ->
+      Level1 is Level + 1,
+      skolemize_forall(BoundIds, Body, Level1, ContextIn, SkolemBody, Context1),
+      check_expr(Node, SkolemBody, Level1, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut)
+  ; infer(Node, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ActualType, Context1),
+    subsume(ActualType, Expected, Level, Context1, ContextOut)
+  ).
+
+% A value definition with an explicit annotation is CHECKED against it (so a
+% polytype annotation skolemises and the value is verified polymorphic); its
+% declared type is the annotation.  Without an annotation we just synthesise.
+define_value(no_annotation, Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, ContextOut) :-
+  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, ContextOut).
+define_value(type_annotation(TypeExpression), Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, AnnotatedType, ContextOut) :-
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, AnnotatedType, Context1),
+  check_expr(Value, AnnotatedType, Level, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut).
+
+% A function body is CHECKED against its return annotation when one is written
+% (so a function may return a polymorphic value), else synthesised.  The body
+% is always typed with `InsideFunction = true`.
+type_function_body(no_annotation, Body, Level, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut) :-
+  infer(Body, Level, true, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut).
+type_function_body(type_annotation(TypeExpression), Body, Level, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut) :-
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, BodyType, Context1),
+  check_expr(Body, BodyType, Level, true, Environment, TypeEnvironment, Context1, ContextOut).
 
 % ---------------------------------------------------------------------------
 % Helpers

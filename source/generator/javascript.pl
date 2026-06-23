@@ -104,7 +104,7 @@ expression(string_node(Parts)) -->
 % Lambda -> curried arrow function.  A nullary function stays nullary.
 % Type annotations carry no runtime meaning and are dropped here.
 expression(function_node(_TypeParameters, [], _ReturnAnnotation, Body)) -->
-  "(() => ", expression(Body), ")".
+  "(() => ", arrow_body(Body), ")".
 expression(function_node(_TypeParameters, [Parameter | Parameters], _ReturnAnnotation, Body)) -->
   "(", curried_arrows([Parameter | Parameters], Body), ")".
 
@@ -186,9 +186,19 @@ expression(definition_node(_Target, _Annotation, Value)) -->
 
 % Curried arrow chain: `$p1 => $p2 => ... => <body>`.
 curried_arrows([Parameter], Body) -->
-  parameter(Parameter), " => ", expression(Body).
+  parameter(Parameter), " => ", arrow_body(Body).
 curried_arrows([Parameter, Next | Parameters], Body) -->
   parameter(Parameter), " => ", curried_arrows([Next | Parameters], Body).
+
+% An arrow-function body.  A tuple compiles to an object literal `{...}`, but
+% `=> {` after an arrow opens a STATEMENT BLOCK, not an object, so a tuple body
+% must be wrapped in parentheses: `=> ({...})`.  No other expression begins
+% with `{`, so only tuples need this.
+arrow_body(tuple_node(Members)) -->
+  "(", expression(tuple_node(Members)), ")".
+arrow_body(Body) -->
+  { Body \= tuple_node(_) },
+  expression(Body).
 
 % A parameter is rendered as its JS binding pattern (parenthesised so a
 % destructuring pattern is a valid arrow-function parameter).

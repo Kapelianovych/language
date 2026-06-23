@@ -1,9 +1,13 @@
 :- module(types, [
   empty_context/1,
   fresh_unification_variable/4,
+  fresh_bound_id/3,
   resolve_head/3,
   fully_resolve/3,
   unify/4,
+  subsume/5,
+  skolemize_forall/6,
+  instantiate_forall/5,
   generalize/5,
   instantiate/5,
   monomorphic_type_scheme/2,
@@ -31,6 +35,42 @@
         function_type(Params, Ret)      an n-ary function `(t1 .. tn) -> r`
         type_constructor(Name, Args)    a NOMINAL named type (see below)
         tuple_type(Fields, Tail)        a RECORD; see below
+        forall_type(BoundIds, Body)     a RANK-N polytype `forall a.. . Body`;
+                                        the bound variables appear in Body as
+                                        `quantified_variable(Id)`.  Unlike a
+                                        `type_scheme`, a `forall_type` is a
+                                        first-class monotype, so it may NEST
+                                        (a function parameter / field whose
+                                        type is itself polymorphic).
+        type_lambda(BoundIds, Body)     a TYPE-LEVEL FUNCTION produced by a
+                                        partial type application / SECTION
+                                        (`Either<_ string>`, `Either<number>`).
+                                        Its kind is its arity; applying it to
+                                        that many arguments BETA-REDUCES (the
+                                        bound ids, appearing in Body as
+                                        `quantified_variable(Id)`, are replaced
+                                        by the arguments).
+        skolem(Id, Level)               a rigid, opaque constant standing for a
+                                        universally-quantified variable while
+                                        CHECKING a value against a polytype.
+                                        Its `Level` powers the escape check:
+                                        a unification variable at a shallower
+                                        level may not capture it (that would
+                                        let the skolem leak its scope).
+
+    --------------------------------------------------------------------
+    RANK-N POLYMORPHISM (predicative, bidirectional)
+    --------------------------------------------------------------------
+    `forall_type` is introduced by an explicit annotation and eliminated two
+    ways: INSTANTIATED (its `forall` opened to fresh unification variables)
+    when a polymorphic value is used at a specific type, and SKOLEMISED (its
+    `forall` opened to fresh rigid skolems) when a value is CHECKED to have a
+    polymorphic type.  `subsume/5` is the directed "is at least as polymorphic
+    as" check (Peyton Jones et al., JFP'07; Dunfield & Krishnaswami, ICFP'13):
+    it instantiates the actual type, skolemises the expected type, and is
+    contravariant in function arguments.  Predicativity is enforced upstream
+    (a polytype may not be a type ARGUMENT), so unification variables only ever
+    stand for monotypes.
 
     TUPLES AS ROWS.  A `tuple_type(Fields, Tail)` is a record:
 
@@ -74,6 +114,14 @@ fresh_unification_variable(context(Id, Store), Level, unification_variable(Id),
   NextId is Id + 1,
   put_assoc(Id, Store, unsolved(Level), Store1).
 
+%% fresh_bound_id(+ContextIn, -Id, -ContextOut).
+%
+% Allocate a fresh, globally-unique id WITHOUT minting a unification variable
+% for it -- used for the bound variables of a `forall_type` and for skolem
+% constants, neither of which lives in the solution store.
+fresh_bound_id(context(Id, Store), Id, context(NextId, Store)) :-
+  NextId is Id + 1.
+
 %% monomorphic_type_scheme(+Type, -Scheme).
 monomorphic_type_scheme(Type, type_scheme([], Type)).
 
@@ -92,8 +140,26 @@ resolve_head(Type, Context, Resolved) :-
           resolve_head(Solution, Context, Resolved)
       ; Resolved = Type
       )
+  ; Type = type_application(Head, Arguments) ->
+      % Normalise a higher-kinded application once its head is known: with a
+      % constructor head `F<A>` (F = Option) becomes the nominal `Option<A>`;
+      % with a SECTION head (a type_lambda) it BETA-REDUCES.
+      resolve_head(Head, Context, ResolvedHead),
+      ( ResolvedHead = constructor_ref(Name) ->
+          Resolved = type_constructor(Name, Arguments)
+      ; ResolvedHead = type_lambda(BoundIds, Body), same_length(BoundIds, Arguments) ->
+          zip_mapping(BoundIds, Arguments, Mapping),
+          substitute_quantified_variables(Body, Mapping, Reduced),
+          resolve_head(Reduced, Context, Resolved)
+      ; Resolved = type_application(ResolvedHead, Arguments)
+      )
   ; Resolved = Type
   ).
+
+% Pair each bound id with its argument for `substitute_quantified_variables`.
+zip_mapping([], [], []).
+zip_mapping([Id | Ids], [Argument | Arguments], [Id - Argument | Mapping]) :-
+  zip_mapping(Ids, Arguments, Mapping).
 
 %% fully_resolve(+Type, +Context, -Resolved).
 %
@@ -112,7 +178,22 @@ fully_resolve(Type, Context, Resolved) :-
   ; Head = type_constructor(Name, Arguments) ->
       fully_resolve_list(Arguments, Context, Arguments1),
       Resolved = type_constructor(Name, Arguments1)
-  ; Resolved = Head
+  ; Head = type_application(ApplicationHead, Arguments) ->
+      % A higher-kinded application.  Once the head is a known constructor it
+      % normalises to a plain nominal type; otherwise the head stays a variable.
+      fully_resolve(ApplicationHead, Context, ResolvedHead),
+      fully_resolve_list(Arguments, Context, Arguments1),
+      ( ResolvedHead = constructor_ref(Name) ->
+          Resolved = type_constructor(Name, Arguments1)
+      ; Resolved = type_application(ResolvedHead, Arguments1)
+      )
+  ; Head = forall_type(BoundIds, Body) ->
+      fully_resolve(Body, Context, Body1),
+      Resolved = forall_type(BoundIds, Body1)
+  ; Head = type_lambda(BoundIds, Body) ->
+      fully_resolve(Body, Context, Body1),
+      Resolved = type_lambda(BoundIds, Body1)
+  ; Resolved = Head                          % base type, skolem, constructor_ref
   ).
 
 fully_resolve_list([], _, []).
@@ -190,10 +271,70 @@ unify_resolved(type_constructor(Name, Arguments1), type_constructor(Name, Argume
       unify_list(Arguments1, Arguments2, ContextIn, ContextOut)
   ; throw(analysis_error(type_constructor_arity_mismatch(Name, Arguments1, Arguments2)))
   ).
+% HIGHER-KINDED rules.  A `type_application` always has a variable head here
+% (a constructor head would have normalised away in resolve_head).  Two
+% applications decompose; an application against a nominal type pins its head
+% to that constructor (`F<A> ~ Option<n>` gives `F = Option`, `A = n`).
+unify_resolved(type_application(Head1, Arguments1), type_application(Head2, Arguments2),
+               ContextIn, ContextOut) :- !,
+  ( same_length(Arguments1, Arguments2) ->
+      unify(Head1, Head2, ContextIn, Context1),
+      unify_list(Arguments1, Arguments2, Context1, ContextOut)
+  ; throw(analysis_error(higher_kinded_arity_mismatch(Arguments1, Arguments2)))
+  ).
+unify_resolved(type_application(Head, Arguments1), type_constructor(Name, Arguments2),
+               ContextIn, ContextOut) :- !,
+  ( same_length(Arguments1, Arguments2) ->
+      unify(Head, constructor_ref(Name), ContextIn, Context1),
+      unify_list(Arguments1, Arguments2, Context1, ContextOut)
+  ; throw(analysis_error(higher_kinded_arity_mismatch(Arguments1, Arguments2)))
+  ).
+unify_resolved(type_constructor(Name, Arguments1), type_application(Head, Arguments2),
+               ContextIn, ContextOut) :- !,
+  ( same_length(Arguments1, Arguments2) ->
+      unify(constructor_ref(Name), Head, ContextIn, Context1),
+      unify_list(Arguments1, Arguments2, Context1, ContextOut)
+  ; throw(analysis_error(higher_kinded_arity_mismatch(Arguments1, Arguments2)))
+  ).
+unify_resolved(constructor_ref(Name), constructor_ref(Name), Context, Context) :- !.
+% A skolem is rigid: it unifies only with the very same skolem (the var cases
+% above already handle a flexible variable capturing a skolem, subject to the
+% level escape check).
+unify_resolved(skolem(Id, _), skolem(Id, _), Context, Context) :- !.
+% Two polytypes unify by alpha-equivalence: open both with ONE shared set of
+% skolems (positionally) and unify the bodies.  Mismatched arities, or bodies
+% that force a shared skolem to differ, fail.
+unify_resolved(forall_type(Ids1, Body1), forall_type(Ids2, Body2), ContextIn, ContextOut) :- !,
+  ( same_length(Ids1, Ids2) ->
+      shared_skolem_mappings(Ids1, Ids2, ContextIn, Mapping1, Mapping2, Context1),
+      substitute_quantified_variables(Body1, Mapping1, Body1Skolemized),
+      substitute_quantified_variables(Body2, Mapping2, Body2Skolemized),
+      unify(Body1Skolemized, Body2Skolemized, Context1, ContextOut)
+  ; throw(analysis_error(type_mismatch(forall_type(Ids1, Body1), forall_type(Ids2, Body2))))
+  ).
+% Two SECTIONS unify by alpha-equivalence, exactly like polytypes: share one
+% set of skolems positionally and unify the bodies.
+unify_resolved(type_lambda(Ids1, Body1), type_lambda(Ids2, Body2), ContextIn, ContextOut) :- !,
+  ( same_length(Ids1, Ids2) ->
+      shared_skolem_mappings(Ids1, Ids2, ContextIn, Mapping1, Mapping2, Context1),
+      substitute_quantified_variables(Body1, Mapping1, Body1Skolemized),
+      substitute_quantified_variables(Body2, Mapping2, Body2Skolemized),
+      unify(Body1Skolemized, Body2Skolemized, Context1, ContextOut)
+  ; throw(analysis_error(type_mismatch(type_lambda(Ids1, Body1), type_lambda(Ids2, Body2))))
+  ).
 unify_resolved(TypeA, TypeB, ContextIn, _) :-
   fully_resolve(TypeA, ContextIn, ResolvedA),
   fully_resolve(TypeB, ContextIn, ResolvedB),
   throw(analysis_error(type_mismatch(ResolvedA, ResolvedB))).
+
+% Map two equal-length id lists to a single fresh skolem sequence, one mapping
+% per side, so the two bodies are compared under identical rigid constants.
+shared_skolem_mappings([], [], Context, [], [], Context).
+shared_skolem_mappings([Id1 | Ids1], [Id2 | Ids2], ContextIn,
+                       [Id1 - Skolem | Mapping1], [Id2 - Skolem | Mapping2], ContextOut) :-
+  fresh_bound_id(ContextIn, SkolemId, Context1),
+  Skolem = skolem(SkolemId, 0),
+  shared_skolem_mappings(Ids1, Ids2, Context1, Mapping1, Mapping2, ContextOut).
 
 unify_list([], [], Context, Context).
 unify_list([A | As], [B | Bs], ContextIn, ContextOut) :-
@@ -306,7 +447,23 @@ occurs_check_and_adjust_levels(Id, MaxLevel, Type, ContextIn, ContextOut) :-
       occurs_check_and_adjust_levels(Id, MaxLevel, Tail, Context1, ContextOut)
   ; Resolved = type_constructor(_, Arguments) ->
       occurs_check_and_adjust_levels_list(Id, MaxLevel, Arguments, ContextIn, ContextOut)
-  ; ContextOut = ContextIn                 % base type or `closed`: nothing to do
+  ; Resolved = type_application(Head, Arguments) ->
+      occurs_check_and_adjust_levels(Id, MaxLevel, Head, ContextIn, Context1),
+      occurs_check_and_adjust_levels_list(Id, MaxLevel, Arguments, Context1, ContextOut)
+  ; Resolved = forall_type(_BoundIds, Body) ->
+      occurs_check_and_adjust_levels(Id, MaxLevel, Body, ContextIn, ContextOut)
+  ; Resolved = type_lambda(_BoundIds, Body) ->
+      occurs_check_and_adjust_levels(Id, MaxLevel, Body, ContextIn, ContextOut)
+  ; Resolved = skolem(_SkolemId, SkolemLevel) ->
+      % ESCAPE CHECK.  Binding a variable born at `MaxLevel` to a skolem from a
+      % DEEPER scope (a larger level) would let that skolem leak outside the
+      % polymorphic context that introduced it -- exactly the unsoundness
+      % skolemisation guards against.
+      ( SkolemLevel > MaxLevel ->
+          throw(analysis_error(polymorphic_type_escapes(SkolemLevel)))
+      ; ContextOut = ContextIn
+      )
+  ; ContextOut = ContextIn                 % base type, `closed` or constructor_ref
   ).
 
 occurs_check_and_adjust_levels_list(_, _, [], Context, Context).
@@ -337,6 +494,13 @@ collect_unification_variable_ids(Type, Accumulator, Ids) :-
       collect_unification_variable_ids(Tail, Accumulator1, Ids)
   ; Type = type_constructor(_, Arguments) ->
       collect_unification_variable_ids_list(Arguments, Accumulator, Ids)
+  ; Type = type_application(Head, Arguments) ->
+      collect_unification_variable_ids(Head, Accumulator, Accumulator1),
+      collect_unification_variable_ids_list(Arguments, Accumulator1, Ids)
+  ; Type = forall_type(_BoundIds, Body) ->
+      collect_unification_variable_ids(Body, Accumulator, Ids)
+  ; Type = type_lambda(_BoundIds, Body) ->
+      collect_unification_variable_ids(Body, Accumulator, Ids)
   ; Ids = Accumulator
   ).
 
@@ -369,6 +533,16 @@ abstract_quantified_variables(Type, QuantifiedIds, Out) :-
   ; Type = type_constructor(Name, Arguments) ->
       abstract_quantified_variables_list(Arguments, QuantifiedIds, Arguments1),
       Out = type_constructor(Name, Arguments1)
+  ; Type = type_application(Head, Arguments) ->
+      abstract_quantified_variables(Head, QuantifiedIds, Head1),
+      abstract_quantified_variables_list(Arguments, QuantifiedIds, Arguments1),
+      Out = type_application(Head1, Arguments1)
+  ; Type = forall_type(BoundIds, Body) ->
+      abstract_quantified_variables(Body, QuantifiedIds, Body1),
+      Out = forall_type(BoundIds, Body1)
+  ; Type = type_lambda(BoundIds, Body) ->
+      abstract_quantified_variables(Body, QuantifiedIds, Body1),
+      Out = type_lambda(BoundIds, Body1)
   ; Out = Type
   ).
 
@@ -409,6 +583,18 @@ substitute_quantified_variables(Type, Mapping, Out) :-
   ; Type = type_constructor(Name, Arguments) ->
       substitute_quantified_variables_list(Arguments, Mapping, Arguments1),
       Out = type_constructor(Name, Arguments1)
+  ; Type = type_application(Head, Arguments) ->
+      substitute_quantified_variables(Head, Mapping, Head1),
+      substitute_quantified_variables_list(Arguments, Mapping, Arguments1),
+      Out = type_application(Head1, Arguments1)
+  ; Type = forall_type(BoundIds, Body) ->
+      % The bound ids are globally unique, so no mapping key can capture them;
+      % recurse into the body to substitute the OUTER quantified variables.
+      substitute_quantified_variables(Body, Mapping, Body1),
+      Out = forall_type(BoundIds, Body1)
+  ; Type = type_lambda(BoundIds, Body) ->
+      substitute_quantified_variables(Body, Mapping, Body1),
+      Out = type_lambda(BoundIds, Body1)
   ; Out = Type
   ).
 
@@ -423,6 +609,75 @@ substitute_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping,
   substitute_quantified_variables(Mutability, Mapping, Mutability1),
   substitute_quantified_variables(Type, Mapping, Type1),
   substitute_fields(Fields, Mapping, Outs).
+
+% ---------------------------------------------------------------------------
+% Rank-N: skolemisation, instantiation and subsumption
+% ---------------------------------------------------------------------------
+
+%% instantiate_forall(+ForallType, +Level, +ContextIn, -OpenedType, -ContextOut).
+%
+% Open a polytype by replacing its bound variables with FRESH UNIFICATION
+% variables at `Level` -- used when a polymorphic value is used at a specific
+% (as-yet-unknown) type, e.g. applying a polymorphic function.
+instantiate_forall(forall_type(BoundIds, Body), Level, ContextIn, OpenedType, ContextOut) :-
+  fresh_quantified_mapping(BoundIds, Level, ContextIn, Mapping, ContextOut),
+  substitute_quantified_variables(Body, Mapping, OpenedType).
+
+%% skolemize_forall(+BoundIds, +Body, +Level, +ContextIn, -SkolemBody, -ContextOut).
+%
+% Open a polytype by replacing its bound variables with FRESH RIGID SKOLEMS at
+% `Level` -- used when CHECKING that a value really has a polymorphic type.
+skolemize_forall(BoundIds, Body, Level, ContextIn, SkolemBody, ContextOut) :-
+  fresh_skolem_mapping(BoundIds, Level, ContextIn, Mapping, ContextOut),
+  substitute_quantified_variables(Body, Mapping, SkolemBody).
+
+fresh_skolem_mapping([], _Level, Context, [], Context).
+fresh_skolem_mapping([Id | Ids], Level, ContextIn, [Id - skolem(SkolemId, Level) | Mapping], ContextOut) :-
+  fresh_bound_id(ContextIn, SkolemId, Context1),
+  fresh_skolem_mapping(Ids, Level, Context1, Mapping, ContextOut).
+
+%% subsume(+ActualType, +ExpectedType, +Level, +ContextIn, -ContextOut).
+%
+% The directed "ActualType is at least as polymorphic as ExpectedType" check
+% (PJ et al. JFP'07 `subsCheck`; DK ICFP'13 subtyping).  It is the rank-N
+% generalisation of `unify`: a more-polymorphic actual is fine where a less-
+% polymorphic type is expected, but not the reverse.  We INSTANTIATE the
+% actual (its `forall` may be specialised), SKOLEMISE the expected (it must
+% hold for an arbitrary type), and are CONTRAVARIANT in function arguments.
+% Deep skolemisation falls out of recursing through function results.
+subsume(ActualType, ExpectedType, Level, ContextIn, ContextOut) :-
+  resolve_head(ActualType, ContextIn, Actual),
+  resolve_head(ExpectedType, ContextIn, Expected),
+  subsume_resolved(Actual, Expected, Level, ContextIn, ContextOut).
+
+% Actual is a polytype: instantiate it, then keep going.
+subsume_resolved(forall_type(BoundIds, Body), Expected, Level, ContextIn, ContextOut) :- !,
+  instantiate_forall(forall_type(BoundIds, Body), Level, ContextIn, Opened, Context1),
+  subsume(Opened, Expected, Level, Context1, ContextOut).
+% Expected is a polytype: skolemise it one level DEEPER (so the skolems are
+% rigid within the check and the level escape check guards their scope), then
+% check the actual against the skolemised body.
+subsume_resolved(Actual, forall_type(BoundIds, Body), Level, ContextIn, ContextOut) :- !,
+  Level1 is Level + 1,
+  skolemize_forall(BoundIds, Body, Level1, ContextIn, SkolemBody, Context1),
+  subsume(Actual, SkolemBody, Level1, Context1, ContextOut).
+% Both functions: contravariant in arguments (expected ⊑ actual), covariant in
+% the result.  This is what lets a less-polymorphic argument position accept a
+% more-polymorphic expectation, and propagates rank-N through nested arrows.
+subsume_resolved(function_type(ActualParams, ActualReturn),
+                 function_type(ExpectedParams, ExpectedReturn), Level, ContextIn, ContextOut) :-
+  same_length(ActualParams, ExpectedParams), !,
+  subsume_arguments(ExpectedParams, ActualParams, Level, ContextIn, Context1),
+  subsume(ActualReturn, ExpectedReturn, Level, Context1, ContextOut).
+% Anything else: there is no polymorphism left to peel, so plain unification is
+% exactly the right (invariant) check.
+subsume_resolved(Actual, Expected, _Level, ContextIn, ContextOut) :-
+  unify(Actual, Expected, ContextIn, ContextOut).
+
+subsume_arguments([], [], _Level, Context, Context).
+subsume_arguments([Expected | Expecteds], [Actual | Actuals], Level, ContextIn, ContextOut) :-
+  subsume(Expected, Actual, Level, ContextIn, Context1),
+  subsume_arguments(Expecteds, Actuals, Level, Context1, ContextOut).
 
 % ---------------------------------------------------------------------------
 % Reporting

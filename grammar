@@ -233,17 +233,39 @@ Constructor :-
 
 Opaque :- "opaque" Separator+
 
-# A type-parameter list, used by declarations AND function generics.  Each
-# parameter may carry a bound, written `Name: TypeExpression`:
-#     <A b>                       two unbounded parameters
-#     <T: (number ..)>           T bounded by an open record
+# A type-parameter list, used by declarations AND function generics.  A
+# parameter is proper (kind `*`, optionally bounded with `: TypeExpression`)
+# or HIGHER-KINDED, written `Name<_ ... _>` where the number of `_` holes is
+# its arity (so `F<_>` has kind `* -> *`).  A higher-kinded parameter `F` is
+# then applied like any constructor, `F<A>`.
+#     <A b>                       two proper parameters
+#     <T: (number ..)>            T (proper) bounded by an open record
+#     <F<_> A>                    F is a one-argument constructor, A is proper
 TypeParameters :- "<" Separator* TypeParameter (Separator+ TypeParameter)* Separator* ">"
 
-TypeParameter :- Identifier (Separator* ":" Separator* TypeExpression)?
+TypeParameter :-
+	Identifier (
+		"<" Separator* "_" (Separator+ "_")* Separator* ">"   # higher-kinded
+		| (Separator* ":" Separator* TypeExpression)?          # proper, optional bound
+	)
 
-# A type expression is either a parenthesized form (a tuple type, or a
-# function type when a `: ReturnType` follows) or a named reference.
-TypeExpression :- ParenthesizedType | TypeReference
+# A type expression is a quantified (polymorphic) type, a parenthesized form
+# (a tuple type, or a function type when a `: ReturnType` follows), or a named
+# reference.
+TypeExpression :- QuantifiedType | ParenthesizedType | TypeReference
+
+# A QUANTIFIED type bakes a `forall` into the type, so a polymorphic type can
+# be written in an annotation -- a function parameter or field that is ITSELF
+# polymorphic.  This is how RANK-N types are expressed; e.g. a function whose
+# argument must be polymorphic:
+#     applyToBoth = (f: <A>(A): A): (number string) (f(1) f('hi'))
+# It differs from a generic type ALIAS (`type Id<A> = (A): A`), whose
+# parameters sit on the type NAME and which must be applied (`Id<number>`).
+# Quantifiers are PREDICATIVE: a polytype may not be a type argument, so
+# `List<<A>(A): A>` is rejected.  Inference is bidirectional -- a value is
+# CHECKED against a polytype annotation; annotations are required only where a
+# `forall` would otherwise have to be guessed.
+QuantifiedType :- TypeParameters Separator* TypeExpression
 
 # Members optionally end with `..` (optionally naming the rest, `..R`),
 # making the record OPEN ("and possibly more fields"); otherwise it is
@@ -268,7 +290,19 @@ TypeMember :- Mutability? (Identifier Separator* ":" Separator* TypeExpression |
 #     number      Pair<A b>      Box<number>
 TypeReference :- Identifier TypeArguments?
 
-TypeArguments :- "<" Separator* TypeExpression (Separator+ TypeExpression)* Separator* ">"
+# A type argument may be a HOLE `_` (a placeholder).  A reference with holes,
+# or with FEWER arguments than the type's arity, is a SECTION -- a partial type
+# application that yields a type-level function (kind `* -> ..`) awaiting the
+# remaining arguments.  Both forms have kind equal to the number of missing
+# positions, so a section can be bound to a higher-kinded alias or passed as a
+# higher-kinded argument; applying it to the remaining arguments reduces it:
+#     type StringOr = Either<_ string>     # * -> *  ; StringOr<number> = Either<number string>
+#     type NumberOr = Either<number>       # * -> *  ; NumberOr<boolean> = Either<number boolean>
+#     Twice<Either<_ string> number>       # the section is the F<_> argument
+# Holes may only abstract PROPER (kind-`*`) positions.
+TypeArguments :- "<" Separator* TypeArgument (Separator+ TypeArgument)* Separator* ">"
+
+TypeArgument :- "_" | TypeExpression
 
 BaseExpression :-
 	TypeDeclaration
