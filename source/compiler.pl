@@ -1,6 +1,7 @@
 :- module(compiler, [
   compile/3,
-  compile_file/1
+  compile_file/1,
+  compile_program/1
 ]).
 
 :- use_module(library(pio)).
@@ -10,6 +11,7 @@
 :- use_module(parser, [parse/2]).
 :- use_module(analyser, [analyse/2]).
 :- use_module(generator, [generate/2]).
+:- use_module(module_loader, [compile_program/1]).
 
 %% compile(+Source, -Output, -AnalysisResult).
 %
@@ -23,22 +25,18 @@ compile(Source, Output, AnalysisResult) :-
 
 %% compile_file(+SourcePath).
 %
-% Compiles the `.sl` file at SourcePath, writing the generated JavaScript
-% alongside it with a `.js` extension.  The source path must end in `.sl`;
-% any other path raises domain_error(sl_source_file, SourcePath).
+% Compiles the `.sl` file at SourcePath together with every module it imports
+% (directly or transitively), writing each module's JavaScript alongside it
+% with a `.js` extension.  The entry path must end in `.sl`; any other path
+% raises domain_error(sl_source_file, SourcePath).
 compile_file(SourcePath) :-
-  once((
-    % Derive the output path first so a wrong extension fails fast and loudly,
-    % before we bother reading and compiling the file.
-    ( phrase(output_path(OutputPath), SourcePath) ->
-        true
-    ; atom_chars(SourceAtom, SourcePath),
-      domain_error(sl_source_file, SourceAtom)
-    ),
-    phrase_from_file(all_chars(Source), SourcePath),
-    compile(Source, Output, _),
-    phrase_to_file(Output, OutputPath)
-  )).
+  % Check the extension first so a wrong one fails fast and loudly.
+  ( phrase(output_path(_OutputPath), SourcePath) ->
+      true
+  ; atom_chars(SourceAtom, SourcePath),
+    domain_error(sl_source_file, SourceAtom)
+  ),
+  compile_program(SourcePath).
 
 
 % Match (or emit) an entire list of characters verbatim.

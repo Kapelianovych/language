@@ -11,6 +11,7 @@
   generalize/5,
   instantiate/5,
   monomorphic_type_scheme/2,
+  scheme_free_unification_variables/2,
   context_substitution/2
 ]).
 
@@ -481,6 +482,16 @@ generalize(Type, OuterLevel, Context, type_scheme(QuantifiedIds, Body), Context)
   collect_unification_variable_ids(Resolved, [], AllIds),
   include_generalizable(AllIds, OuterLevel, Context, QuantifiedIds),
   abstract_quantified_variables(Resolved, QuantifiedIds, Body).
+
+%% scheme_free_unification_variables(+Scheme, -Ids).
+%
+% The unification-variable ids that remain FREE in a scheme's body (i.e. were
+% not generalised away).  A scheme with none is self-contained and portable
+% to another module's context; one with free variables is ambiguous and
+% cannot be exported.  The body is assumed already fully-resolved (as
+% `generalize/5` leaves it).
+scheme_free_unification_variables(type_scheme(_BoundIds, Body), Ids) :-
+  collect_unification_variable_ids(Body, [], Ids).
 
 collect_unification_variable_ids(Type, Accumulator, Ids) :-
   ( Type = unification_variable(Id) ->

@@ -51,6 +51,13 @@ program(program_node(Expressions)) -->
   statements(Expressions).
 
 statements([]) --> [].
+% An import becomes an ES-module `import { ... }`.  The loader has already
+% rewritten each `use` into an `import_node` carrying the JavaScript specifier
+% and only the RUNTIME names (values and constructors); type-only imports were
+% dropped, so the name list is never empty here.
+statements([import_node(JsPath, Names) | Expressions]) -->
+  "import { ", import_specifiers(Names), " } from \"", chars(JsPath), "\";\n",
+  statements(Expressions).
 % A tagged-union declaration emits one `const` per constructor (a curried
 % function building a tagged object, or a value for a nullary constructor).
 statements([type_declaration_node(_, _, _, variant_body(Constructors)) | Expressions]) -->
@@ -59,10 +66,31 @@ statements([type_declaration_node(_, _, _, variant_body(Constructors)) | Express
 % Other type declarations (aliases / opaque) are compile-time only.
 statements([type_declaration_node(_, _, _, _) | Expressions]) -->
   statements(Expressions).
+% A `public` tagged union exports each of its constructors.
+statements([public_node(type_declaration_node(_, _, _, variant_body(Constructors))) | Expressions]) -->
+  exported_constructor_definitions(Constructors),
+  statements(Expressions).
+% A `public` alias / opaque type is compile-time only, like its private form.
+statements([public_node(type_declaration_node(_, _, _, _)) | Expressions]) -->
+  statements(Expressions).
+% A `public` definition becomes an exported `const`.
+statements([public_node(definition_node(Identifier, Annotation, Value)) | Expressions]) -->
+  "export ",
+  statement(definition_node(Identifier, Annotation, Value)),
+  "\n",
+  statements(Expressions).
 statements([Expression | Expressions]) -->
   statement(Expression),
   "\n",
   statements(Expressions).
+
+% Comma-separated `$`-mangled import names.
+import_specifiers([Name]) -->
+  identifier(Name).
+import_specifiers([Name, Next | Rest]) -->
+  identifier(Name),
+  ", ",
+  import_specifiers([Next | Rest]).
 
 % A statement is either a `const` binding (for a definition) or an expression
 % terminated by a semicolon.  The clauses are mutually exclusive: the last is
@@ -398,10 +426,20 @@ guard_test(guard(Expression)) -->
 % object: `const $C = $_c0 => .. => ({"$tag": "C", 0: $_c0, ..});`.  A nullary
 % constructor is just the tagged object value.
 constructor_definitions([]) --> [].
-constructor_definitions([constructor(Name, FieldTypes) | Constructors]) -->
-  { length(FieldTypes, Arity) },
-  "const $", chars(Name), " = ", constructor_arrows(Name, Arity, 0), ";\n",
+constructor_definitions([Constructor | Constructors]) -->
+  one_constructor_definition(Constructor),
   constructor_definitions(Constructors).
+
+% As above, but each `const` is `export`ed (for a `public` tagged union).
+exported_constructor_definitions([]) --> [].
+exported_constructor_definitions([Constructor | Constructors]) -->
+  "export ",
+  one_constructor_definition(Constructor),
+  exported_constructor_definitions(Constructors).
+
+one_constructor_definition(constructor(Name, FieldTypes)) -->
+  { length(FieldTypes, Arity) },
+  "const $", chars(Name), " = ", constructor_arrows(Name, Arity, 0), ";\n".
 
 constructor_arrows(Name, Arity, Index) -->
   { Index < Arity },
@@ -500,14 +538,19 @@ unary_operator(boolean_negation) --> "!".
 unary_operator(bit_invertion) --> "~".
 
 % Binary operator spellings.  Note the semantic choices that match the type
-% checker: `==`/`!=` become strict `===`/`!==`; the logical operators `& ^ |`
-% are boolean (`&&`, boolean xor via `!==`, `||`); shifts stay numeric.
+% checker: `==`/`!=` become strict `===`/`!==`; the BITWISE operators (source
+% `&& ^^ ||`, on numbers) map to JS's single-character `& ^ |`; the BOOLEAN
+% operators (source `& ^ |`, on booleans) map to `&&`, boolean xor via `!==`,
+% and `||`; shifts stay numeric.
 binary_operator(multiplication) --> "*".
 binary_operator(division) --> "/".
 binary_operator(addition) --> "+".
 binary_operator(subtraction) --> "-".
 binary_operator(left_bit_shift) --> "<<".
 binary_operator(right_bit_shift) --> ">>".
+binary_operator(bitwise_and) --> "&".
+binary_operator(bitwise_xor) --> "^".
+binary_operator(bitwise_or) --> "|".
 binary_operator(less_than) --> "<".
 binary_operator(less_than_or_equal) --> "<=".
 binary_operator(greater_than) --> ">".

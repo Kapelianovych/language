@@ -1,5 +1,6 @@
 :- module(type_environment, [
   build_type_environment/3,
+  build_type_environment/4,
   convert_annotation_type/6,
   bind_type_parameters/6,
   instantiate_constructor/7,
@@ -52,10 +53,19 @@
 % names to `variant_constructor(...)`.  `ConstructorBindings` is a list of
 % `CtorName - Scheme` term bindings (each constructor as a function/value),
 % to seed the term environment so constructors can be used in expressions.
-build_type_environment(program_node(Expressions), TypeEnvironment, ConstructorBindings) :-
-  collect_declarations(Expressions, Declarations),
+build_type_environment(ProgramNode, TypeEnvironment, ConstructorBindings) :-
   empty_assoc(Empty),
-  register_declarations(Declarations, Empty, TypeEnvironment),
+  build_type_environment(ProgramNode, Empty, TypeEnvironment, ConstructorBindings).
+
+%% build_type_environment(+ProgramNode, +InitialEnvironment, -TypeEnvironment, -ConstructorBindings).
+%
+% As above, but starts from `InitialEnvironment` instead of an empty assoc, so
+% imported types and constructors (seeded by the module loader) are in scope
+% while this module's own declarations are registered and validated.  A local
+% declaration that collides with an imported name is rejected as a duplicate.
+build_type_environment(program_node(Expressions), InitialEnvironment, TypeEnvironment, ConstructorBindings) :-
+  collect_declarations(Expressions, Declarations),
+  register_declarations(Declarations, InitialEnvironment, TypeEnvironment),
   validate_declarations(Declarations, TypeEnvironment),
   build_constructor_bindings(Declarations, TypeEnvironment, ConstructorBindings).
 

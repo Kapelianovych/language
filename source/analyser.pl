@@ -1,4 +1,4 @@
-:- module(analyser, [analyse/2]).
+:- module(analyser, [analyse/2, analyse_module/5]).
 
 /*  analyser.pl  --  Type checker entry point.
 
@@ -34,13 +34,15 @@
 */
 
 :- use_module(library(assoc)).
+:- use_module(library(lists)).
 :- use_module(analyser/types, [
   empty_context/1,
   fully_resolve/3,
+  scheme_free_unification_variables/2,
   context_substitution/2
 ]).
-:- use_module(analyser/type_environment, [build_type_environment/3]).
-:- use_module(analyser/infer, [infer_program/5]).
+:- use_module(analyser/type_environment, [build_type_environment/4]).
+:- use_module(analyser/infer, [infer_program/6]).
 
 %% analyse(+AST, -Result).
 %
@@ -51,21 +53,109 @@
 % Before inference we collect and validate every `type` declaration into a
 % `TypeEnvironment` (so annotations resolve to monotypes) and seed the term
 % environment with every tagged-union constructor as a value.
-analyse(AST, analysis_result(Type, Substitution)) :-
-  build_type_environment(AST, TypeEnvironment, ConstructorBindings),
-  constructor_environment(ConstructorBindings, InitialEnvironment),
+analyse(AST, Result) :-
+  empty_assoc(EmptyValueEnvironment),
+  empty_assoc(EmptyTypeEnvironment),
+  analyse_module(AST, EmptyValueEnvironment, EmptyTypeEnvironment, Result, _Interface).
+
+%% analyse_module(+AST, +SeedValueEnvironment, +SeedTypeEnvironment, -Result, -Interface).
+%
+% Type-checks one module.  `SeedValueEnvironment` / `SeedTypeEnvironment` are
+% assocs pre-populated by the module loader with the entries this module
+% imports (values, type names, and `constructor_key/1` constructor entries).
+% `Result` is the usual `analysis_result(Type, Substitution)`.  `Interface` is
+% `module_interface(ValueEntries, TypeEntries)`: the assoc-ready entries this
+% module makes `public`, ready to seed an importing module.
+%
+% `public` wrappers are unwrapped and `use` declarations dropped before
+% inference (the loader has already turned imports into seed entries); the set
+% of exported names is remembered so the interface can be collected afterwards.
+analyse_module(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment,
+               analysis_result(Type, Substitution),
+               module_interface(ValueEntries, TypeEntries)) :-
+  normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
+  CleanAST = program_node(CleanItems),
+  build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),
+  constructor_environment(ConstructorBindings, SeedValueEnvironment, InitialEnvironment),
   empty_context(Context0),
-  infer_program(AST, TypeEnvironment, InitialEnvironment, Context0, program_type(LastType, Context)),
+  infer_program(CleanAST, TypeEnvironment, InitialEnvironment, Context0,
+                program_type(LastType, Context), FinalEnvironment),
   fully_resolve(LastType, Context, Type),
-  context_substitution(Context, Substitution).
+  context_substitution(Context, Substitution),
+  collect_exports(PublicValueNames, PublicTypeDeclarations, FinalEnvironment, TypeEnvironment,
+                  ValueEntries, TypeEntries).
 
 % Seed a term environment from the constructor schemes (each a `defined`
-% binding usable anywhere).
-constructor_environment(ConstructorBindings, Environment) :-
-  empty_assoc(Empty),
-  constructor_environment(ConstructorBindings, Empty, Environment).
-
+% binding usable anywhere), starting from the imported value environment.
 constructor_environment([], Environment, Environment).
 constructor_environment([Name - Scheme | Rest], EnvironmentIn, EnvironmentOut) :-
   put_assoc(Name, EnvironmentIn, defined(Scheme), Environment1),
   constructor_environment(Rest, Environment1, EnvironmentOut).
+
+% ---------------------------------------------------------------------------
+% Module-system normalisation and export collection
+% ---------------------------------------------------------------------------
+
+% Drop `use` items, unwrap `public` items, and record the exported names:
+% value names from public definitions, and the full declaration node of each
+% public `type` (its constructors are exported with it).
+normalise_items([], [], [], []).
+normalise_items([use_node(_, _) | Rest], CleanItems, ValueNames, TypeDeclarations) :- !,
+  normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
+normalise_items([public_node(definition_node(identifier_node(Name), Annotation, Value)) | Rest],
+                [definition_node(identifier_node(Name), Annotation, Value) | CleanItems],
+                [Name | ValueNames], TypeDeclarations) :- !,
+  normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
+normalise_items([public_node(type_declaration_node(Name, Parameters, Opacity, Body)) | Rest],
+                [type_declaration_node(Name, Parameters, Opacity, Body) | CleanItems],
+                ValueNames,
+                [type_declaration_node(Name, Parameters, Opacity, Body) | TypeDeclarations]) :- !,
+  normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
+normalise_items([public_node(Other) | _], _, _, _) :- !,
+  throw(analysis_error(cannot_export(Other))).
+normalise_items([Item | Rest], [Item | CleanItems], ValueNames, TypeDeclarations) :-
+  normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
+
+collect_exports(ValueNames, TypeDeclarations, FinalEnvironment, TypeEnvironment,
+                ValueEntries, TypeEntries) :-
+  export_values(ValueNames, FinalEnvironment, ValueValueEntries),
+  export_types(TypeDeclarations, FinalEnvironment, TypeEnvironment, TypeValueEntries, TypeEntries),
+  append(ValueValueEntries, TypeValueEntries, ValueEntries).
+
+% Each exported value contributes its generalised scheme; a scheme with free
+% (un-generalised) unification variables is ambiguous and may not cross a
+% module boundary, so it is rejected with a clear error.
+export_values([], _Environment, []).
+export_values([Name | Names], Environment, [Name - defined(Scheme) | Rest]) :-
+  get_assoc(Name, Environment, defined(Scheme)),
+  scheme_free_unification_variables(Scheme, FreeIds),
+  ( FreeIds == [] ->
+      true
+  ; throw(analysis_error(ambiguous_export(Name)))
+  ),
+  export_values(Names, Environment, Rest).
+
+% Each exported type contributes its `TypeEnvironment` info; a tagged union
+% additionally contributes every constructor's `constructor_key/1` info (a type
+% entry) and its value scheme (a value entry).
+export_types([], _Environment, _TypeEnvironment, [], []).
+export_types([type_declaration_node(Name, _Parameters, _Opacity, Body) | Declarations],
+             Environment, TypeEnvironment, ValueEntries, TypeEntries) :-
+  get_assoc(Name, TypeEnvironment, Info),
+  export_constructors(Body, Environment, TypeEnvironment, ConstructorValueEntries, ConstructorTypeEntries),
+  export_types(Declarations, Environment, TypeEnvironment, RestValueEntries, RestTypeEntries),
+  append(ConstructorValueEntries, RestValueEntries, ValueEntries),
+  append([Name - Info | ConstructorTypeEntries], RestTypeEntries, TypeEntries).
+
+export_constructors(variant_body(Constructors), Environment, TypeEnvironment,
+                    ValueEntries, TypeEntries) :- !,
+  export_constructor_list(Constructors, Environment, TypeEnvironment, ValueEntries, TypeEntries).
+export_constructors(_OtherBody, _Environment, _TypeEnvironment, [], []).
+
+export_constructor_list([], _Environment, _TypeEnvironment, [], []).
+export_constructor_list([constructor(CtorName, _Fields) | Rest], Environment, TypeEnvironment,
+                        [CtorName - defined(CtorScheme) | RestValueEntries],
+                        [constructor_key(CtorName) - CtorInfo | RestTypeEntries]) :-
+  get_assoc(CtorName, Environment, defined(CtorScheme)),
+  get_assoc(constructor_key(CtorName), TypeEnvironment, CtorInfo),
+  export_constructor_list(Rest, Environment, TypeEnvironment, RestValueEntries, RestTypeEntries).

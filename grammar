@@ -168,22 +168,29 @@ Binary :-
 	BaseExpression
 	(Separator* BinaryOperator Separator* BaseExpression)+
 
+# The number after each operator is its precedence (higher binds tighter).
+# `&& ^^ ||` are BITWISE operators on numbers; `& ^ |` are BOOLEAN logical
+# operators on booleans.  The doubled (bitwise) forms must be tried before the
+# single (boolean) ones during lexing, and bind tighter than comparison.
 BinaryOperator :-
-	"*"    # 9
-	| "/"  # 9
-	| "+"  # 8
-	| "-"  # 8
-	| "<<" # 7
-	| ">>" # 7
+	"*"    # 12
+	| "/"  # 12
+	| "+"  # 11
+	| "-"  # 11
+	| "<<" # 10
+	| ">>" # 10
+	| "&&" # 9   # bitwise and (numbers)
+	| "^^" # 8   # bitwise xor (numbers)
+	| "||" # 7   # bitwise or  (numbers)
 	| "<=" # 6
 	| "<"  # 6
 	| ">=" # 6
 	| ">"  # 6
 	| "==" # 5
 	| "!=" # 5
-	| "&"  # 4
-	| "^"  # 3
-	| "|"  # 2
+	| "&"  # 4   # boolean and
+	| "^"  # 3   # boolean xor
+	| "|"  # 2   # boolean or
 	| "->" # 1
 
 Conditional :-
@@ -321,6 +328,30 @@ Expression :-
 	Binary
 	| BaseExpression
 
+# A program is a sequence of items: imports, exports, and ordinary
+# expressions (definitions, type declarations, bare expressions).
 Program :-
 	Separator*
-	(Expression Separator*)*
+	(ProgramItem Separator*)*
+
+ProgramItem :- Use | Public | Expression
+
+# An IMPORT.  `use ./math:(add Option Some)` brings the listed names from
+# another module into scope; `use ./math:add` is the one-name shorthand.  The
+# path is relative (no `.sl` extension) and resolves uniformly across values,
+# types and constructors: each name is bound to whatever it is in the source
+# module's exported interface.  `use` is a soft keyword (mandatory separator).
+Use :- "use" Separator+ ImportPath Separator* ":" Separator* ImportNames
+
+ImportPath :- PathCharacter+               # any chars except ":", whitespace, "(", ")"
+
+ImportNames :-
+	"(" Separator* Identifier (Separator+ Identifier)* Separator* ")"
+	| Identifier
+
+# An EXPORT.  `public` prefixes a definition or `type` declaration to expose it
+# to importers; everything else is module-private.  Exporting a tagged-union
+# type exports its constructors too.  `public` is a soft keyword.
+Public :- "public" Separator+ Expression
+
+# Import cycles are rejected; mutual recursion is a within-file feature.

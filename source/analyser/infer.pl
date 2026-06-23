@@ -1,5 +1,5 @@
 :- module(infer, [
-  infer_program/5,
+  infer_program/6,
   infer/8
 ]).
 
@@ -72,32 +72,36 @@
   union_constructor_names/3
 ]).
 
-%% infer_program(+ProgramNode, +TypeEnvironment, +ContextIn, -Result).
+%% infer_program(+ProgramNode, +TypeEnvironment, +InitialEnvironment, +ContextIn, -Result, -FinalEnvironment).
 %
 % Entry point for a whole program: a sequence of top-level expressions
 % evaluated at level 0.  `Result` is `program_type(LastType, ContextOut)`.
+% `FinalEnvironment` is the term environment after the whole sequence, i.e.
+% with every top-level definition bound to its generalised scheme -- the
+% module system reads exported value schemes from it.
 infer_program(program_node(Expressions), TypeEnvironment, InitialEnvironment, ContextIn,
-              program_type(LastType, ContextOut)) :-
-  infer_sequence(Expressions, 0, false, InitialEnvironment, TypeEnvironment, ContextIn, LastType, ContextOut).
+              program_type(LastType, ContextOut), FinalEnvironment) :-
+  infer_sequence(Expressions, 0, false, InitialEnvironment, TypeEnvironment, ContextIn, LastType, FinalEnvironment, ContextOut).
 
 % ---------------------------------------------------------------------------
 % Sequences: programs and blocks  (this is where `let` lives)
 % ---------------------------------------------------------------------------
 
-%% infer_sequence(+Expressions, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -ContextOut).
+%% infer_sequence(+Expressions, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -FinalEnvironment, -ContextOut).
 %
 % A sequence is the scope shared by a group of definitions.  We first
 % pre-bind every definition name as a `forward` placeholder (so earlier
 % definitions may refer forward, from inside a function body), then walk
 % the sequence left to right, generalising each definition as we pass it.
 % Type declarations carry no value and are skipped here (they were already
-% collected and validated into `TypeEnvironment`).
+% collected and validated into `TypeEnvironment`).  `FinalEnvironment` is the
+% environment after the last item (with all definitions bound).
 infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment,
-               ContextIn, ResultType, ContextOut) :-
+               ContextIn, ResultType, FinalEnvironment, ContextOut) :-
   definition_names(Expressions, Names),
   prebind_forward(Names, Level, Environment, ContextIn, Environment1, Context1),
   infer_sequence_walk(Expressions, Level, InsideFunction, Environment1, TypeEnvironment,
-                      Context1, ResultType, ContextOut).
+                      Context1, ResultType, FinalEnvironment, ContextOut).
 
 % Collect the names bound by value definitions directly in this sequence.
 definition_names([], []).
@@ -116,18 +120,18 @@ prebind_forward([Name | Names], Level, Environment, ContextIn, EnvironmentOut, C
 
 % Walk the sequence, threading the (growing) environment and reporting the
 % last expression's type.  An empty sequence has the unit type `()`.
-infer_sequence_walk([], _Level, _InsideFunction, _Environment, _TypeEnvironment,
-                    Context, tuple_type([], closed), Context).
+infer_sequence_walk([], _Level, _InsideFunction, Environment, _TypeEnvironment,
+                    Context, tuple_type([], closed), Environment, Context).
 infer_sequence_walk([Expression], Level, InsideFunction, Environment, TypeEnvironment,
-                    ContextIn, ResultType, ContextOut) :-
+                    ContextIn, ResultType, FinalEnvironment, ContextOut) :-
   infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironment,
-                      ContextIn, ResultType, _Environment1, ContextOut).
+                      ContextIn, ResultType, FinalEnvironment, ContextOut).
 infer_sequence_walk([Expression, Next | Rest], Level, InsideFunction, Environment,
-                    TypeEnvironment, ContextIn, ResultType, ContextOut) :-
+                    TypeEnvironment, ContextIn, ResultType, FinalEnvironment, ContextOut) :-
   infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironment,
                       ContextIn, _Type, Environment1, Context1),
   infer_sequence_walk([Next | Rest], Level, InsideFunction, Environment1, TypeEnvironment,
-                      Context1, ResultType, ContextOut).
+                      Context1, ResultType, FinalEnvironment, ContextOut).
 
 % Process one sequence element, returning its type and the environment to
 % use for the rest of the sequence.
@@ -217,7 +221,7 @@ infer(tuple_node(Members), Level, InsideFunction, Environment, TypeEnvironment,
 % Block: its own lexical scope, behaving like a sequence.
 infer(block_node(Expressions), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, Type, ContextOut) :-
-  infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Type, ContextOut).
+  infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Type, _FinalEnvironment, ContextOut).
 
 % Member access `target.label` / `target.index`: constrain the target to be
 % a record having AT LEAST this field (an open row tail), with any

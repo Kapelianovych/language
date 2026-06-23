@@ -80,12 +80,21 @@ binary_tail(
     Node
   ).
 
-binary_operator(multiplication, 9) --> "*".
-binary_operator(division, 9) --> "/".
-binary_operator(addition, 8) --> "+".
-binary_operator(subtraction, 8) --> "-".
-binary_operator(left_bit_shift, 7) --> "<<".
-binary_operator(right_bit_shift, 7) --> ">>".
+% NOTE on clause order: longer spellings must come first so a doubled
+% operator is not mis-read as two single ones.  `&&`/`^^`/`||` (bitwise, on
+% numbers) therefore precede `&`/`^`/`|` (boolean, on booleans), exactly as
+% `<<`/`<=` precede `<`.  The doubled forms bind TIGHTER than comparison so
+% `a && b == 0` groups as `(a && b) == 0`; the single boolean forms stay the
+% loosest (just above pipe), matching their original precedences.
+binary_operator(multiplication, 12) --> "*".
+binary_operator(division, 12) --> "/".
+binary_operator(addition, 11) --> "+".
+binary_operator(subtraction, 11) --> "-".
+binary_operator(left_bit_shift, 10) --> "<<".
+binary_operator(right_bit_shift, 10) --> ">>".
+binary_operator(bitwise_and, 9) --> "&&".
+binary_operator(bitwise_xor, 8) --> "^^".
+binary_operator(bitwise_or, 7) --> "||".
 binary_operator(less_than_or_equal, 6) --> "<=".
 binary_operator(less_than, 6) --> "<".
 binary_operator(greater_than_or_equal, 6) --> ">=".

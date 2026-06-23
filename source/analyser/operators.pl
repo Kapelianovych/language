@@ -18,6 +18,7 @@
       * `- ! ~`            unary negation / logical not / bitwise not
       * `* / + -`          arithmetic on numbers
       * `<< >>`            bit shifts on numbers
+      * `&& ^^ ||`         bitwise and / xor / or, on numbers
       * `& ^ |`            boolean logical and / xor / or, on booleans
       * `< <= > >=`        numeric comparison, yielding boolean
       * `== !=`            structural equality, polymorphic: (a a) -> boolean
@@ -68,6 +69,9 @@ numeric_binary(addition).
 numeric_binary(subtraction).
 numeric_binary(left_bit_shift).
 numeric_binary(right_bit_shift).
+numeric_binary(bitwise_and).
+numeric_binary(bitwise_xor).
+numeric_binary(bitwise_or).
 
 % Operators whose signature is (boolean boolean) -> boolean.
 logical_binary(and).
