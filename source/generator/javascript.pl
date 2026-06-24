@@ -58,6 +58,11 @@ statements([]) --> [].
 statements([import_node(JsPath, Names) | Expressions]) -->
   "import { ", import_specifiers(Names), " } from \"", chars(JsPath), "\";\n",
   statements(Expressions).
+% A foreign (`external`) declaration: bind the name to its JavaScript source,
+% wrapping a function source in a currying shim (see external_definition//3).
+statements([external_node(Name, Type, Source) | Expressions]) -->
+  external_definition(Name, Type, Source),
+  statements(Expressions).
 % A tagged-union declaration emits one `const` per constructor (a curried
 % function building a tagged object, or a value for a nullary constructor).
 statements([type_declaration_node(_, _, _, variant_body(Constructors)) | Expressions]) -->
@@ -78,6 +83,10 @@ statements([public_node(definition_node(Identifier, Annotation, Value)) | Expres
   "export ",
   statement(definition_node(Identifier, Annotation, Value)),
   "\n",
+  statements(Expressions).
+% A `public external` becomes an exported foreign binding.
+statements([public_node(external_node(Name, Type, Source)) | Expressions]) -->
+  exported_external_definition(Name, Type, Source),
   statements(Expressions).
 statements([Expression | Expressions]) -->
   statement(Expression),
@@ -440,6 +449,159 @@ exported_constructor_definitions([Constructor | Constructors]) -->
 one_constructor_definition(constructor(Name, FieldTypes)) -->
   { length(FieldTypes, Arity) },
   "const $", chars(Name), " = ", constructor_arrows(Name, Arity, 0), ";\n".
+
+% ---------------------------------------------------------------------------
+% Foreign (`external`) bindings
+% ---------------------------------------------------------------------------
+
+% Emit the JavaScript for one `external` declaration: the ES `import` it needs
+% (if any), then a `const $Name = <marshalled value>;`.  `exported_*` is the
+% same with an `export` prefix, for a `public external`.
+external_definition(Name, Type, Source) -->
+  external_import(Source, Name),
+  { external_callee(Source, Name, Callee) },
+  external_binding(Name, Type, Callee).
+
+exported_external_definition(Name, Type, Source) -->
+  external_import(Source, Name),
+  { external_callee(Source, Name, Callee) },
+  "export ",
+  external_binding(Name, Type, Callee).
+
+% The `import` line a source needs (none for a plain JS expression).
+external_import(js_expression(_Js), _Name) --> [].
+external_import(js_module(Module, default), Name) -->
+  "import { ", chars(Name), " } from \"", chars(Module), "\";\n".
+external_import(js_module(Module, named(Foreign)), _Name) -->
+  "import { ", chars(Foreign), " } from \"", chars(Module), "\";\n".
+
+% The JS expression text the binding wraps: the literal expression, or the
+% imported name (the declared name for `default`, the foreign name otherwise).
+external_callee(js_expression(Js), _Name, Js).
+external_callee(js_module(_Module, default), Name, Name).
+external_callee(js_module(_Module, named(Foreign)), _Name, Foreign).
+
+% `const $Name = <marshalled Callee>;`.  `from_js/5` builds the marshalled
+% value: identity for data, a curry shim for functions (see below).
+external_binding(Name, Type, Callee) -->
+  { from_js(Type, Callee, Body, 0, _Next) },
+  "const ", identifier(Name), " = ", chars(Body), ";\n".
+
+% --- Type-directed boundary marshalling -----------------------------------
+%
+% A value's declared `Type` drives how it crosses the JS boundary.  Only
+% FUNCTION types are adapted (the language curries, JS does not); every other
+% type -- numbers, strings, records, tuples, variants -- crosses AS-IS.
+% Marshalling is bidirectional and flips at each arrow (a function's arguments
+% travel the opposite way to the function itself):
+%
+%   from_js : wrap a JS value so the LANGUAGE can use it
+%             (a function becomes curried; its arguments are sent back out
+%              via to_js, its result brought in via from_js)
+%   to_js   : wrap a LANGUAGE value so JS can use it
+%             (a curried function becomes an uncurried JS function; its
+%              arguments are brought in via from_js, its result sent out via to_js)
+%
+% This is why a curried callback handed to a JS higher-order function is
+% correctly presented to JS as an uncurried function.  `ValueChars` is the JS
+% expression text being wrapped; `N` threads a counter for fresh, capture-free
+% parameter names.
+
+% from_js(+Type, +ValueChars, -ResultChars, +N0, -N).
+from_js(Type, Value, Result, N0, N) :-
+  ( function_form(Type, Parameters, Return) ->
+      Level = N0,
+      N1 is N0 + 1,
+      parameter_names(Level, 0, Parameters, Names),
+      jsify_arguments(Parameters, Names, JsArguments, N1, N2),
+      append_all(["(", Value, ")(", JsArguments, ")"], Application),
+      from_js(Return, Application, ReturnResult, N2, N),
+      curried_arrow(Names, ReturnResult, Result)
+  ; Result = Value, N = N0
+  ).
+
+% to_js(+Type, +ValueChars, -ResultChars, +N0, -N).
+to_js(Type, Value, Result, N0, N) :-
+  ( function_form(Type, Parameters, Return) ->
+      Level = N0,
+      N1 is N0 + 1,
+      parameter_names(Level, 0, Parameters, Names),
+      languagify_application(Value, Parameters, Names, Applied, N1, N2),
+      to_js(Return, Applied, ReturnResult, N2, N),
+      uncurried_arrow(Names, ReturnResult, Result)
+  ; Result = Value, N = N0
+  ).
+
+% A function type (looking through a leading quantifier `<A ..>`); fails for
+% any non-function type, which is what keeps data crossing as-is.
+function_form(quantified_type_node(_Parameters, Body), Parameters, Return) :- !,
+  function_form(Body, Parameters, Return).
+function_form(function_type_node(Parameters, Return), Parameters, Return).
+
+% Fresh shim parameter names `$_a<Level>_<Index>`, one per parameter type.
+parameter_names(_Level, _Index, [], []).
+parameter_names(Level, Index, [_Parameter | Parameters], [Name | Names]) :-
+  parameter_name(Level, Index, Name),
+  Index1 is Index + 1,
+  parameter_names(Level, Index1, Parameters, Names).
+
+parameter_name(Level, Index, Name) :-
+  number_chars(Level, LevelChars),
+  number_chars(Index, IndexChars),
+  append_all(["$_a", LevelChars, "_", IndexChars], Name).
+
+% `to_js` each shim parameter as its declared type, comma-joined -- the
+% arguments of a JS function we are wrapping for the language must leave again
+% as JS values.
+jsify_arguments(Parameters, Names, JsArguments, N0, N) :-
+  jsify_list(Parameters, Names, Converted, N0, N),
+  intercalate(", ", Converted, JsArguments).
+
+jsify_list([], [], [], N, N).
+jsify_list([Parameter | Parameters], [Name | Names], [Converted | Rest], N0, N) :-
+  to_js(Parameter, Name, Converted, N0, N1),
+  jsify_list(Parameters, Names, Rest, N1, N).
+
+% Apply a curried language function `Value` to each shim parameter, bringing
+% each one in via `from_js` first: `(Value)(from_js p0)(from_js p1)..`.  A
+% nullary function is applied with `()`.
+languagify_application(Value, [], [], Applied, N, N) :- !,
+  append_all(["(", Value, ")()"], Applied).
+languagify_application(Value, Parameters, Names, Applied, N0, N) :-
+  append_all(["(", Value, ")"], Base),
+  languagify_apply(Base, Parameters, Names, Applied, N0, N).
+
+languagify_apply(Accumulator, [], [], Accumulator, N, N).
+languagify_apply(Accumulator, [Parameter | Parameters], [Name | Names], Applied, N0, N) :-
+  from_js(Parameter, Name, Converted, N0, N1),
+  append_all([Accumulator, "(", Converted, ")"], Accumulator1),
+  languagify_apply(Accumulator1, Parameters, Names, Applied, N1, N).
+
+% `a => b => .. => Body` (curried); nullary is `() => Body`.
+curried_arrow([], Body, Result) :-
+  append_all(["() => ", Body], Result).
+curried_arrow([Name], Body, Result) :-
+  append_all([Name, " => ", Body], Result).
+curried_arrow([Name, Next | Rest], Body, Result) :-
+  curried_arrow([Next | Rest], Body, Inner),
+  append_all([Name, " => ", Inner], Result).
+
+% `(a, b, ..) => Body` (uncurried JS function); nullary is `() => Body`.
+uncurried_arrow(Names, Body, Result) :-
+  intercalate(", ", Names, ParameterList),
+  append_all(["(", ParameterList, ") => ", Body], Result).
+
+% Join character-lists with a separator.
+intercalate(_Separator, [], []).
+intercalate(_Separator, [X], X) :- !.
+intercalate(Separator, [X, Y | Rest], Result) :-
+  intercalate(Separator, [Y | Rest], Joined),
+  append_all([X, Separator, Joined], Result).
+
+append_all([], []).
+append_all([Chars | Rest], Result) :-
+  append_all(Rest, RestResult),
+  append(Chars, RestResult, Result).
 
 constructor_arrows(Name, Arity, Index) -->
   { Index < Arity },

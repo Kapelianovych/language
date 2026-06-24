@@ -137,6 +137,11 @@ infer_sequence_walk([Expression, Next | Rest], Level, InsideFunction, Environmen
 % use for the rest of the sequence.
 infer_sequence_item(type_declaration_node(_, _, _, _), _Level, _InsideFunction,
                     Environment, _TypeEnvironment, Context, tuple_type([], closed), Environment, Context) :- !.
+% An `external` declaration carries no inferable body; its (trusted) type was
+% already seeded into the environment before the walk, so there is nothing to
+% do here.  Its "value" is unit, like a type declaration.
+infer_sequence_item(external_node(_, _, _), _Level, _InsideFunction,
+                    Environment, _TypeEnvironment, Context, tuple_type([], closed), Environment, Context) :- !.
 % A destructuring definition binds the pattern's variables for the rest of
 % the sequence (monomorphically); its value is the matched value's type.
 infer_sequence_item(destructuring_node(Pattern, Value), Level, InsideFunction,

@@ -13,18 +13,36 @@
             whatever it is in the source module's exported interface.
 
         public_node(Item)
-            an EXPORT.  `public` prefixes a definition or `type` declaration
-            to expose it to importers; everything else is module-private.
-            Exporting a tagged-union type exports its constructors too.
+            an EXPORT.  `public` prefixes a definition, `type` declaration, or
+            `external` to expose it to importers; everything else is
+            module-private.  Exporting a tagged-union type exports its
+            constructors too; exporting an `external` lets a foreign binding be
+            declared once and imported elsewhere.
+
+        external_node(Name, Type, Source)
+            a FOREIGN (JavaScript) IMPORT.  `external` binds a name to a piece
+            of JavaScript, ascribing it a type that the compiler trusts (the
+            one unsafe point of the JS boundary).  Every external must state
+            its source explicitly -- there is no implicit dependency on an
+            ambient global.  `Source` is one of:
+                js_expression(Js)          `= "Math.max"`     a JS expression
+                js_module(Module, default) `from "lodash"`    import, same name
+                js_module(Module, named(Foreign))
+                                           `= "print" from "./x.js"`  renamed
+            `Type` is an ordinary type expression; if it is a function type,
+            the back end wraps the call in a currying shim (the JS side is
+            uncurried, the language side curried).  All values cross the
+            boundary AS-IS -- tuples and variants included -- with no
+            representation conversion.
 
         any other expression (definition, type declaration, bare expression)
             an ordinary, module-private top-level item.
 
-    `use` and `public` are soft keywords: they only take on their special
-    meaning when followed by the rest of an import / export; a bare
-    identifier `use` or `public` (not so followed) still parses normally,
-    because both rules require a mandatory separator and the import/export
-    shape, and the parser backtracks to `expression` otherwise.
+    `use`, `public` and `external` are soft keywords: they only take on their
+    special meaning when followed by the rest of an import / export / foreign
+    import; a bare identifier `use`, `public` or `external` (not so followed)
+    still parses normally, because each rule requires a mandatory separator and
+    the expected shape, and the parser backtracks to `expression` otherwise.
 */
 
 :- use_module(library(dcgs)).
@@ -35,6 +53,7 @@
 ]).
 :- use_module(identifier, [identifier//1]).
 :- use_module(expression, [expression//1]).
+:- use_module(type_expression, [type_expression//1]).
 :- use_module(whitespace, [is_whitespace/1]).
 
 program(program_node(Items)) -->
@@ -53,6 +72,7 @@ program_tail([Item | Items]) -->
 program_item(Item) -->
   use_declaration(Item)
   | public_item(Item)
+  | external_declaration(Item)
   | expression(Item).
 
 % ---------------------------------------------------------------------------
@@ -107,8 +127,65 @@ import_names_tail([]) --> [].
 % Exports:  public <definition | type declaration>
 % ---------------------------------------------------------------------------
 
+% `public` may prefix an ordinary definition / type declaration OR an
+% `external` (so a foreign binding can be declared once and re-imported).
 public_item(public_node(Item)) -->
   "public",
   separator, % mandatory
   separators,
-  expression(Item).
+  ( external_declaration(Item)
+  | expression(Item)
+  ).
+
+% ---------------------------------------------------------------------------
+% Foreign imports:
+%     external NAME : TYPE = "jsExpression"
+%     external NAME : TYPE from "module"
+%     external NAME : TYPE = "foreignName" from "module"
+% ---------------------------------------------------------------------------
+
+external_declaration(external_node(Name, Type, Source)) -->
+  "external",
+  separator, % mandatory: separates the keyword from the name
+  separators,
+  identifier(identifier_node(Name)),
+  separators,
+  ":",
+  separators,
+  type_expression(Type),
+  separators,
+  external_source(Source).
+
+% The source clause is MANDATORY (no implicit globals).  Order matters: the
+% combined `= "name" from "module"` form is tried before the bare `= "expr"`
+% form, so the trailing `from` is not left dangling.
+external_source(js_module(Module, named(Foreign))) -->
+  "=",
+  separators,
+  js_string(Foreign),
+  separators,
+  "from",
+  separators,
+  js_string(Module).
+external_source(js_expression(Js)) -->
+  "=",
+  separators,
+  js_string(Js).
+external_source(js_module(Module, default)) -->
+  "from",
+  separators,
+  js_string(Module).
+
+% A double-quoted JavaScript fragment (a name, member path, or module
+% specifier).  Distinct from the language's own single-quoted strings; kept
+% deliberately simple -- any character except the closing `"`.
+js_string(Characters) -->
+  "\"",
+  js_string_characters(Characters),
+  "\"".
+
+js_string_characters([Character | Characters]) -->
+  [Character],
+  { Character \== '"' },
+  js_string_characters(Characters).
+js_string_characters([]) --> [].

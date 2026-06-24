@@ -334,24 +334,43 @@ Program :-
 	Separator*
 	(ProgramItem Separator*)*
 
-ProgramItem :- Use | Public | Expression
+ProgramItem :- Use | Public | External | Expression
 
 # An IMPORT.  `use ./math:(add Option Some)` brings the listed names from
-# another module into scope; `use ./math:add` is the one-name shorthand.  The
-# path is relative (no `.sl` extension) and resolves uniformly across values,
-# types and constructors: each name is bound to whatever it is in the source
-# module's exported interface.  `use` is a soft keyword (mandatory separator).
+# another module into scope.  The path is relative (no `.sl` extension) and
+# resolves uniformly across values, types and constructors: each name is bound
+# to whatever it is in the source module's exported interface.  `use` is a soft
+# keyword (mandatory separator).
 Use :- "use" Separator+ ImportPath Separator* ":" Separator* ImportNames
 
 ImportPath :- PathCharacter+               # any chars except ":", whitespace, "(", ")"
 
-ImportNames :-
-	"(" Separator* Identifier (Separator+ Identifier)* Separator* ")"
-	| Identifier
+# The names are always parenthesised (no one-name shorthand).
+ImportNames :- "(" Separator* Identifier (Separator+ Identifier)* Separator* ")"
 
-# An EXPORT.  `public` prefixes a definition or `type` declaration to expose it
-# to importers; everything else is module-private.  Exporting a tagged-union
-# type exports its constructors too.  `public` is a soft keyword.
-Public :- "public" Separator+ Expression
+# An EXPORT.  `public` prefixes a definition, `type` declaration, or `external`
+# to expose it to importers; everything else is module-private.  Exporting a
+# tagged-union type exports its constructors too; exporting an `external` lets a
+# foreign binding be declared once and imported elsewhere.  `public` is a soft
+# keyword.
+Public :- "public" Separator+ (External | Expression)
+
+# A FOREIGN (JavaScript) IMPORT.  `external` binds a name to a piece of JS with
+# a trusted type ascription -- the one unsafe point of the boundary.  The
+# source is mandatory (no implicit globals): a JS expression (`= "Math.max"`),
+# a module import of the same name (`from "lodash"`), or a renamed module
+# import (`= "print" from "./io.js"`).  A function type gets a currying shim in
+# the back end; all values (tuples and variants included) cross unchanged.
+# `external` is a soft keyword.
+External :-
+	"external" Separator+ Identifier Separator* ":" Separator* TypeExpression
+	Separator* ExternalSource
+
+ExternalSource :-
+	"=" Separator* JsString Separator* "from" Separator* JsString   # renamed module import
+	| "=" Separator* JsString                                       # JS expression
+	| "from" Separator* JsString                                    # module import, same name
+
+JsString :- "\"" (!"\"")* "\""             # double-quoted; language's own strings use ''
 
 # Import cycles are rejected; mutual recursion is a within-file feature.

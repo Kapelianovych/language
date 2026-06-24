@@ -38,10 +38,14 @@
 :- use_module(analyser/types, [
   empty_context/1,
   fully_resolve/3,
+  generalize/5,
   scheme_free_unification_variables/2,
   context_substitution/2
 ]).
-:- use_module(analyser/type_environment, [build_type_environment/4]).
+:- use_module(analyser/type_environment, [
+  build_type_environment/4,
+  convert_annotation_type/6
+]).
 :- use_module(analyser/infer, [infer_program/6]).
 
 %% analyse(+AST, -Result).
@@ -76,9 +80,13 @@ analyse_module(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment,
   normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
   CleanAST = program_node(CleanItems),
   build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),
-  constructor_environment(ConstructorBindings, SeedValueEnvironment, InitialEnvironment),
+  constructor_environment(ConstructorBindings, SeedValueEnvironment, ConstructorEnvironment),
   empty_context(Context0),
-  infer_program(CleanAST, TypeEnvironment, InitialEnvironment, Context0,
+  % `external` declarations have no body to infer: their ascribed type is taken
+  % on trust and seeded into the environment as a normal (generalised) scheme,
+  % so the rest of the module sees them like any other top-level binding.
+  seed_externals(CleanItems, TypeEnvironment, 0, ConstructorEnvironment, Context0, InitialEnvironment, Context1),
+  infer_program(CleanAST, TypeEnvironment, InitialEnvironment, Context1,
                 program_type(LastType, Context), FinalEnvironment),
   fully_resolve(LastType, Context, Type),
   context_substitution(Context, Substitution),
@@ -91,6 +99,24 @@ constructor_environment([], Environment, Environment).
 constructor_environment([Name - Scheme | Rest], EnvironmentIn, EnvironmentOut) :-
   put_assoc(Name, EnvironmentIn, defined(Scheme), Environment1),
   constructor_environment(Rest, Environment1, EnvironmentOut).
+
+% Bind every `external Name: Type = ...` (foreign JS import) into the
+% environment.  The ascribed `Type` is converted to a monotype and generalised
+% into a scheme exactly as a top-level annotation would be -- there is no value
+% to check it against, so the type is simply trusted (this is the one unsafe
+% point of the JS boundary).  Binding them up front (before inference walks the
+% items) makes every external visible throughout the module, like a constant.
+% Non-`external` items are left for the inference walk.
+seed_externals([], _TypeEnvironment, _Level, Environment, Context, Environment, Context).
+seed_externals([external_node(Name, TypeExpression, _Source) | Rest], TypeEnvironment, Level,
+               EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :- !,
+  Level1 is Level + 1,
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level1, ContextIn, MonoType, Context1),
+  generalize(MonoType, Level, Context1, Scheme, Context2),
+  put_assoc(Name, EnvironmentIn, defined(Scheme), Environment1),
+  seed_externals(Rest, TypeEnvironment, Level, Environment1, Context2, EnvironmentOut, ContextOut).
+seed_externals([_Other | Rest], TypeEnvironment, Level, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
+  seed_externals(Rest, TypeEnvironment, Level, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut).
 
 % ---------------------------------------------------------------------------
 % Module-system normalisation and export collection
@@ -110,6 +136,12 @@ normalise_items([public_node(type_declaration_node(Name, Parameters, Opacity, Bo
                 [type_declaration_node(Name, Parameters, Opacity, Body) | CleanItems],
                 ValueNames,
                 [type_declaration_node(Name, Parameters, Opacity, Body) | TypeDeclarations]) :- !,
+  normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
+% A `public external` exports a value (its name); the external itself stays in
+% the clean items so `seed_externals` binds it and codegen emits it.
+normalise_items([public_node(external_node(Name, Type, Source)) | Rest],
+                [external_node(Name, Type, Source) | CleanItems],
+                [Name | ValueNames], TypeDeclarations) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
 normalise_items([public_node(Other) | _], _, _, _) :- !,
   throw(analysis_error(cannot_export(Other))).
