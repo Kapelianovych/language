@@ -1,6 +1,7 @@
 :- module(whitespace, [
   new_line//0,
   is_new_line/1,
+  is_whitespace/1,
   whitespace//0,
   whitespaces//0
 ]).

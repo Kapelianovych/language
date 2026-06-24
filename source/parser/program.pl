@@ -6,8 +6,7 @@
 
         use_node(Path, Names)
             an IMPORT.  `use ./math:(add Option Some)` brings the listed
-            names from another module into scope; `use ./math:add` is the
-            one-name shorthand.  `Path` is the relative path characters
+            names from another module into scope.  `Path` is the relative path characters
             (without the `.sl` extension), `Names` a list of imported name
             character-lists.  Imports resolve uniformly across all three
             namespaces (values, types, constructors): each name is bound to
@@ -36,6 +35,7 @@
 ]).
 :- use_module(identifier, [identifier//1]).
 :- use_module(expression, [expression//1]).
+:- use_module(whitespace, [is_whitespace/1]).
 
 program(program_node(Items)) -->
   separators,
@@ -56,7 +56,7 @@ program_item(Item) -->
   | expression(Item).
 
 % ---------------------------------------------------------------------------
-% Imports:  use ./path:(a b c)   or   use ./path:name
+% Imports:  use ./path:(a b c)
 % ---------------------------------------------------------------------------
 
 use_declaration(use_node(Path, Names)) -->
@@ -82,9 +82,11 @@ import_path_tail([]) --> [].
 
 path_character(Character) -->
   [Character],
-  { \+ member(Character, [':', ' ', '\t', '\n', '\r', '(', ')']) }.
+  { \+ member(Character, [':', '(', ')'])
+  , \+ is_whitespace(Character)
+  }.
 
-% Either a parenthesised list of names or a single bare name.
+% A parenthesised list of names.
 import_names(Names) -->
   "(",
   separators,
@@ -93,8 +95,6 @@ import_names(Names) -->
   separators,
   ")",
   { Names = [First | Rest] }.
-import_names([Name]) -->
-  identifier(identifier_node(Name)).
 
 import_names_tail([Name | Rest]) -->
   separator, % mandatory
