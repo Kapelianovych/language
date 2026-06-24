@@ -1,7 +1,6 @@
 :- module(compiler, [
   compile/3,
-  compile_file/1,
-  compile_program/1
+  compile_file/1
 ]).
 
 :- use_module(library(pio)).
@@ -37,7 +36,6 @@ compile_file(SourcePath) :-
     domain_error(sl_source_file, SourceAtom)
   ),
   compile_program(SourcePath).
-
 
 % Match (or emit) an entire list of characters verbatim.
 all_chars([]) --> [].
