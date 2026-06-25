@@ -3,13 +3,14 @@
   main/0
 ]).
 
-/*  generate_identifier.pl  --  Generate source/parser/identifier.pl from the
-    Unicode character database.  (Prolog port of the former
-    generate_identifier.py.)
+/*  generate_unicode.pl  --  Generate source/unicode.pl from the Unicode
+    character database.  (Prolog port of the former generate_identifier.py.)
 
-    The `identifier` DCG recognises an identifier as an XID_Start character
-    followed by zero or more XID_Continue characters (Unicode UAX #31).  Those
-    two properties are defined in the UCD file `DerivedCoreProperties.txt`.
+    `source/unicode.pl` exports `xid_start/1` and `xid_continue/1`, the two
+    Unicode UAX #31 properties (defined in the UCD file
+    `DerivedCoreProperties.txt`).  They are shared by the lexer's `identifier`
+    DCG (source/parser/identifier.pl, a static consumer of this module) and the
+    back end's foreign-name check (source/analyser.pl).
 
     This script reads that file directly -- from a local path with
     library(pio), or straight from unicode.org with library(http/http_open) --
@@ -23,13 +24,13 @@
     Usage (note Scryer passes script arguments after `--`):
 
         # from a local copy of the UCD file:
-        scryer-prolog tools/generate_identifier.pl -- --ucd DerivedCoreProperties.txt
+        scryer-prolog tools/generate_unicode.pl -- --ucd DerivedCoreProperties.txt
 
         # or fetch it from unicode.org (latest, or a pinned version):
-        scryer-prolog tools/generate_identifier.pl -- --download
-        scryer-prolog tools/generate_identifier.pl -- --download --unicode-version 17.0.0
+        scryer-prolog tools/generate_unicode.pl -- --download
+        scryer-prolog tools/generate_unicode.pl -- --download --unicode-version 17.0.0
 
-    By default the result is written to source/parser/identifier.pl; pass
+    By default the result is written to source/unicode.pl; pass
     `--output PATH` (or `-o PATH`) to write elsewhere.
 */
 
@@ -68,12 +69,12 @@ main :-
   ),
   halt(0).
 
-% Defaults mirror the Python version: read a local DerivedCoreProperties.txt
-% and write source/parser/identifier.pl, unless overridden.
+% Defaults: read a local DerivedCoreProperties.txt and write
+% source/unicode.pl, unless overridden.
 parse_args(Args, Source, Output) :-
   parse_args(Args,
              file("DerivedCoreProperties.txt"),
-             "source/parser/identifier.pl",
+             "source/unicode.pl",
              Source, Output).
 
 parse_args([], Source, Output, Source, Output).
@@ -299,40 +300,20 @@ file_text(Version, StartNodes, StartRoot, ContinueNodes, ContinueRoot) -->
   "% XID_Continue ranges.\n",
   facts(xc_node, ContinueNodes).
 
-% The fixed preamble: the identifier DCG and the membership lookup.  Only the
-% Unicode-version line varies.
+% The fixed preamble: the membership lookup over the XID property sets.  Only
+% the Unicode-version line varies.  The `identifier` DCG that consumes these
+% lookups lives, hand-maintained, in source/parser/identifier.pl.
 header(Version) -->
-  ":- module(identifier, [identifier//1]).\n",
-  "\n",
-  ":- use_module(library(dcgs)).\n",
+  ":- module(unicode, [xid_start/1, xid_continue/1]).\n",
   "\n",
   "% GENERATED FILE -- do not edit by hand.\n",
-  "% Regenerate with: scryer-prolog tools/generate_identifier.pl -- --download\n",
+  "% Regenerate with: scryer-prolog tools/generate_unicode.pl -- --download\n",
   "% Source: Unicode ", all_chars(Version), " DerivedCoreProperties.txt (XID_Start / XID_Continue).\n",
   "%\n",
-  "% An identifier is an XID_Start character followed by zero or more\n",
-  "% XID_Continue characters (Unicode UAX #31).\n",
-  "identifier(identifier_node([FirstCharacter | RestCharacters])) -->\n",
-  "  identifier_first_character(FirstCharacter),\n",
-  "  identifier_rest_characters(RestCharacters).\n",
-  "\n",
-  "identifier_first_character(Character) -->\n",
-  "  [Character],\n",
-  "  { char_code(Character, Code), xid_start(Code) }.\n",
-  "\n",
-  "identifier_rest_characters([ContinueCharacter | Characters]) -->\n",
-  "  identifier_continue_character(ContinueCharacter),\n",
-  "  identifier_rest_characters(Characters).\n",
-  "% The default clause has to be the last definition to enforce Prolog\n",
-  "% to report the largest available token as identifier first.\n",
-  "identifier_rest_characters([]) --> [].\n",
-  "\n",
-  "identifier_continue_character(Character) -->\n",
-  "  [Character],\n",
-  "  { char_code(Character, Code), xid_continue(Code) }.\n",
-  "\n",
-  "% Membership of a codepoint in a property's range set, via an O(log n)\n",
-  "% balanced binary search tree.  The tree is stored as id-keyed facts\n",
+  "% Membership of a codepoint in the Unicode XID_Start / XID_Continue property\n",
+  "% sets (UAX #31), shared by the lexer's identifier rule (source/parser/\n",
+  "% identifier.pl) and the back end's foreign-name check (source/analyser.pl).\n",
+  "% Each set is an O(log n) balanced binary search tree stored as id-keyed facts\n",
   "% `xs_node/xc_node(Id, Lo, Hi, Left, Right)`: the node covers the inclusive\n",
   "% range Lo..Hi, with smaller codepoints in the Left subtree and larger in\n",
   "% Right.  A child of `nil` is absent, so its lookup simply fails.  First-\n",

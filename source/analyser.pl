@@ -47,6 +47,7 @@
   convert_annotation_type/6
 ]).
 :- use_module(analyser/infer, [infer_program/6]).
+:- use_module(unicode, [xid_start/1, xid_continue/1]).
 
 %% analyse(+AST, -Result).
 %
@@ -131,24 +132,22 @@ validate_external_source(js_module(_Module, named(Foreign))) :- !,
   ).
 validate_external_source(_Source).
 
-% A conservative JS IdentifierName: a non-empty ASCII identifier (letter, `_`
-% or `$` to start, then letters, digits, `_` or `$`).  Foreign export names are
-% ASCII in practice; anything more exotic should be written as `= '...'`.
+% A JS IdentifierName, on the language's own Unicode identifier basis (UAX #31
+% XID_Start / XID_Continue, via `unicode`) plus the two characters JS allows
+% that XID does not: `$` (in neither set) and a leading `_` (XID_Continue but
+% not XID_Start).  So foreign names are exactly as permissive as the language's
+% own identifiers.
 js_identifier([First | Rest]) :-
   js_identifier_start(First),
   maplist(js_identifier_continue, Rest).
 
 js_identifier_start(Char) :-
   char_code(Char, Code),
-  ( Code =:= 0'_ ; Code =:= 0'$
-  ; Code >= 0'A, Code =< 0'Z
-  ; Code >= 0'a, Code =< 0'z
-  ).
+  ( Code =:= 0'_ ; Code =:= 0'$ ; xid_start(Code) ).
 
 js_identifier_continue(Char) :-
-  ( js_identifier_start(Char)
-  ; char_code(Char, Code), Code >= 0'0, Code =< 0'9
-  ).
+  char_code(Char, Code),
+  ( Code =:= 0'$ ; xid_continue(Code) ).   % `_` is already in XID_Continue
 
 % ---------------------------------------------------------------------------
 % Module-system normalisation and export collection

@@ -1,8 +1,8 @@
 # tools
 
-## `generate_identifier.pl`
+## `generate_unicode.pl`
 
-Regenerates [`source/parser/identifier.pl`](../source/parser/identifier.pl)
+Regenerates [`source/unicode.pl`](../source/unicode.pl)
 from the Unicode character database.
 
 `identifier.pl` recognises an identifier as an `XID_Start` character followed
@@ -20,11 +20,11 @@ Scryer passes script arguments after `--`:
 
 ```sh
 # From a local copy of the UCD file:
-scryer-prolog tools/generate_identifier.pl -- --ucd path/to/DerivedCoreProperties.txt
+scryer-prolog tools/generate_unicode.pl -- --ucd path/to/DerivedCoreProperties.txt
 
 # Or fetch it from unicode.org (latest, or a pinned version):
-scryer-prolog tools/generate_identifier.pl -- --download
-scryer-prolog tools/generate_identifier.pl -- --download --unicode-version 17.0.0
+scryer-prolog tools/generate_unicode.pl -- --download
+scryer-prolog tools/generate_unicode.pl -- --download --unicode-version 17.0.0
 ```
 
 By default the result is written to `source/parser/identifier.pl`; pass
