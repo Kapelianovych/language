@@ -22,13 +22,15 @@
         external_node(Name, Type, Source)
             a FOREIGN (JavaScript) IMPORT.  `external` binds a name to a piece
             of JavaScript, ascribing it a type that the compiler trusts (the
-            one unsafe point of the JS boundary).  Every external must state
-            its source explicitly -- there is no implicit dependency on an
-            ambient global.  `Source` is one of:
-                js_expression(Js)          `= "Math.max"`     a JS expression
+            one unsafe point of the JS boundary).  `Source` is one of:
+                js_global                  `external max : T` an ambient global
+                                           of the same name (no source clause)
+                js_expression(Js)          `= 'Math.max'`     a JS expression
                 js_module(Module, default) `from "lodash"`    import, same name
-                js_module(Module, named(Foreign))
-                                           `= "print" from "./x.js"`  renamed
+                js_module(Module, Foreign) `= 'print' from './x.js'`  renamed
+            The foreign strings are single-quoted but, unlike the language's
+            own strings, carry no escapes or interpolation -- they are raw
+            fragments, any character except the closing `'`.
             `Type` is an ordinary type expression; if it is a function type,
             the back end wraps the call in a currying shim (the JS side is
             uncurried, the language side curried).  All values cross the
@@ -139,6 +141,7 @@ public_item(public_node(Item)) -->
 
 % ---------------------------------------------------------------------------
 % Foreign imports:
+%     external NAME : TYPE
 %     external NAME : TYPE = "jsExpression"
 %     external NAME : TYPE from "module"
 %     external NAME : TYPE = "foreignName" from "module"
@@ -156,9 +159,10 @@ external_declaration(external_node(Name, Type, Source)) -->
   separators,
   external_source(Source).
 
-% The source clause is MANDATORY (no implicit globals).  Order matters: the
-% combined `= "name" from "module"` form is tried before the bare `= "expr"`
-% form, so the trailing `from` is not left dangling.
+% Order matters: the combined `= 'name' from 'module'` form is tried before
+% the bare `= 'expr'` form, so the trailing `from` is not left dangling; the
+% sourceless `js_global` form (an ambient global of the same name) is tried
+% last, so it only applies when there is no `=` clause to consume.
 external_source(js_module(Module, named(Foreign))) -->
   "=",
   separators,
@@ -175,17 +179,18 @@ external_source(js_module(Module, default)) -->
   "from",
   separators,
   js_string(Module).
+external_source(js_global) --> [].
 
-% A double-quoted JavaScript fragment (a name, member path, or module
-% specifier).  Distinct from the language's own single-quoted strings; kept
-% deliberately simple -- any character except the closing `"`.
+% A single-quoted JavaScript fragment (a name, member path, or module
+% specifier).  Unlike the language's own strings it is raw: no escapes and no
+% interpolation -- any character except the closing `'`.
 js_string(Characters) -->
-  "\"",
+  "'",
   js_string_characters(Characters),
-  "\"".
+  "'".
 
 js_string_characters([Character | Characters]) -->
   [Character],
-  { Character \== '"' },
+  { Character \== '\'' },
   js_string_characters(Characters).
 js_string_characters([]) --> [].

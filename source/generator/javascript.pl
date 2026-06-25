@@ -468,15 +468,38 @@ exported_external_definition(Name, Type, Source) -->
   "export ",
   external_binding(Name, Type, Callee).
 
-% The `import` line a source needs (none for a plain JS expression).
+% The `import` line a source needs (none for an ambient global or a plain JS
+% expression).
+external_import(js_global, _Name) --> [].
 external_import(js_expression(_Js), _Name) --> [].
 external_import(js_module(Module, default), Name) -->
-  "import { ", chars(Name), " } from \"", chars(Module), "\";\n".
+  "import { ", chars(Name), " } from \"", escaped_double_quoted(Module), "\";\n".
 external_import(js_module(Module, named(Foreign)), _Name) -->
-  "import { ", chars(Foreign), " } from \"", chars(Module), "\";\n".
+  "import { ", chars(Foreign), " } from \"", escaped_double_quoted(Module), "\";\n".
 
-% The JS expression text the binding wraps: the literal expression, or the
-% imported name (the declared name for `default`, the foreign name otherwise).
+% Escape a char list for a double-quoted JS string literal: backslash (92),
+% double-quote (34) and the four JavaScript line terminators -- LF (10), CR
+% (13), LINE SEPARATOR (2028) and PARAGRAPH SEPARATOR (2029) -- which would
+% otherwise break the string.  2028/2029 keep their codepoint via `\uXXXX`.
+escaped_double_quoted([]) --> [].
+escaped_double_quoted([Char | Chars]) -->
+  escaped_dq_char(Char),
+  escaped_double_quoted(Chars).
+
+escaped_dq_char(Char) --> { char_code(Char, 92) }, "\\\\".
+escaped_dq_char(Char) --> { char_code(Char, 34) }, "\\\"".
+escaped_dq_char(Char) --> { char_code(Char, 10) }, "\\n".
+escaped_dq_char(Char) --> { char_code(Char, 13) }, "\\r".
+escaped_dq_char(Char) --> { char_code(Char, 0x2028) }, "\\u2028".
+escaped_dq_char(Char) --> { char_code(Char, 0x2029) }, "\\u2029".
+escaped_dq_char(Char) -->
+  { char_code(Char, Code), \+ member(Code, [92, 34, 10, 13, 0x2028, 0x2029]) },
+  [Char].
+
+% The JS expression text the binding wraps: the declared name itself (for an
+% ambient global or a same-name module import), the literal expression, or the
+% renamed foreign name.
+external_callee(js_global, Name, Name).
 external_callee(js_expression(Js), _Name, Js).
 external_callee(js_module(_Module, default), Name, Name).
 external_callee(js_module(_Module, named(Foreign)), _Name, Foreign).

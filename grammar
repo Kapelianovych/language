@@ -357,20 +357,21 @@ Public :- "public" Separator+ (External | Expression)
 
 # A FOREIGN (JavaScript) IMPORT.  `external` binds a name to a piece of JS with
 # a trusted type ascription -- the one unsafe point of the boundary.  The
-# source is mandatory (no implicit globals): a JS expression (`= "Math.max"`),
-# a module import of the same name (`from "lodash"`), or a renamed module
-# import (`= "print" from "./io.js"`).  A function type gets a currying shim in
+# source is one of: omitted -- an ambient global of the same name
+# (`external max : T`); a JS expression (`= 'Math.max'`); or a renamed module
+# import (`= 'print' from './io.js'`).  A function type gets a currying shim in
 # the back end; all values (tuples and variants included) cross unchanged.
-# `external` is a soft keyword.
+# `external` is a soft keyword.  JsString is single-quoted but, unlike the
+# language's own strings, raw -- no escapes or interpolation.
 External :-
 	"external" Separator+ Identifier Separator* ":" Separator* TypeExpression
-	Separator* ExternalSource
+	(Separator* ExternalSource)?
 
 ExternalSource :-
 	"=" Separator* JsString Separator* "from" Separator* JsString   # renamed module import
 	| "=" Separator* JsString                                       # JS expression
 	| "from" Separator* JsString                                    # module import, same name
 
-JsString :- "\"" (!"\"")* "\""             # double-quoted; language's own strings use ''
+JsString :- "'" (!"'")* "'"
 
 # Import cycles are rejected; mutual recursion is a within-file feature.

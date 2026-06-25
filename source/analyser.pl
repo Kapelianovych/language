@@ -108,8 +108,9 @@ constructor_environment([Name - Scheme | Rest], EnvironmentIn, EnvironmentOut) :
 % items) makes every external visible throughout the module, like a constant.
 % Non-`external` items are left for the inference walk.
 seed_externals([], _TypeEnvironment, _Level, Environment, Context, Environment, Context).
-seed_externals([external_node(Name, TypeExpression, _Source) | Rest], TypeEnvironment, Level,
+seed_externals([external_node(Name, TypeExpression, Source) | Rest], TypeEnvironment, Level,
                EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :- !,
+  validate_external_source(Source),
   Level1 is Level + 1,
   convert_annotation_type(TypeExpression, TypeEnvironment, Level1, ContextIn, MonoType, Context1),
   generalize(MonoType, Level, Context1, Scheme, Context2),
@@ -117,6 +118,37 @@ seed_externals([external_node(Name, TypeExpression, _Source) | Rest], TypeEnviro
   seed_externals(Rest, TypeEnvironment, Level, Environment1, Context2, EnvironmentOut, ContextOut).
 seed_externals([_Other | Rest], TypeEnvironment, Level, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
   seed_externals(Rest, TypeEnvironment, Level, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut).
+
+% A renamed module import (`= 'foreign' from 'module'`) names a JS export that
+% codegen splices, unescaped, into `import { Foreign } from ...` -- so it must
+% be a valid JS identifier or it would break (or inject into) the emitted
+% import.  The other source forms put no name in identifier position: a
+% `js_global` / same-name `default` import reuses the (already-valid) declared
+% name, and a `js_expression` is trusted verbatim.
+validate_external_source(js_module(_Module, named(Foreign))) :- !,
+  ( js_identifier(Foreign) -> true
+  ; throw(analysis_error(invalid_external_name(Foreign)))
+  ).
+validate_external_source(_Source).
+
+% A conservative JS IdentifierName: a non-empty ASCII identifier (letter, `_`
+% or `$` to start, then letters, digits, `_` or `$`).  Foreign export names are
+% ASCII in practice; anything more exotic should be written as `= '...'`.
+js_identifier([First | Rest]) :-
+  js_identifier_start(First),
+  maplist(js_identifier_continue, Rest).
+
+js_identifier_start(Char) :-
+  char_code(Char, Code),
+  ( Code =:= 0'_ ; Code =:= 0'$
+  ; Code >= 0'A, Code =< 0'Z
+  ; Code >= 0'a, Code =< 0'z
+  ).
+
+js_identifier_continue(Char) :-
+  ( js_identifier_start(Char)
+  ; char_code(Char, Code), Code >= 0'0, Code =< 0'9
+  ).
 
 % ---------------------------------------------------------------------------
 % Module-system normalisation and export collection
