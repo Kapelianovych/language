@@ -47,6 +47,7 @@
   convert_annotation_type/6
 ]).
 :- use_module(analyser/infer, [infer_program/6]).
+:- use_module(module_expander, [expand_modules/2]).
 :- use_module(unicode, [xid_start/1, xid_continue/1]).
 
 %% analyse(+AST, -Result).
@@ -72,12 +73,17 @@ analyse(AST, Result) :-
 % `module_interface(ValueEntries, TypeEntries)`: the assoc-ready entries this
 % module makes `public`, ready to seed an importing module.
 %
-% `public` wrappers are unwrapped and `use` declarations dropped before
-% inference (the loader has already turned imports into seed entries); the set
-% of exported names is remembered so the interface can be collected afterwards.
-analyse_module(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment,
+% Nested modules are erased first (`expand_modules`); then `public` wrappers are
+% unwrapped and `use` / `use_all` declarations dropped before inference (the
+% loader has already turned imports into seed entries); the set of exported
+% names is remembered so the interface can be collected afterwards.
+analyse_module(ProgramAst, SeedValueEnvironment, SeedTypeEnvironment,
                analysis_result(Type, Substitution),
                module_interface(ValueEntries, TypeEntries)) :-
+  % Erase any nested modules first (idempotent: a flat program, e.g. one the
+  % loader already expanded, is unchanged), so inference and export collection
+  % only ever see flat, qualified top-level items.
+  expand_modules(ProgramAst, program_node(Items)),
   normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
   CleanAST = program_node(CleanItems),
   build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),
@@ -158,6 +164,11 @@ js_identifier_continue(Char) :-
 % public `type` (its constructors are exported with it).
 normalise_items([], [], [], []).
 normalise_items([use_node(_, _) | Rest], CleanItems, ValueNames, TypeDeclarations) :- !,
+  normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
+% A whole-module `use ./Math` seeds the environment directly (the loader has
+% already entered every imported member under its qualified name), so like a
+% named `use` it leaves no item behind for inference.
+normalise_items([use_all_node(_) | Rest], CleanItems, ValueNames, TypeDeclarations) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
 normalise_items([public_node(definition_node(identifier_node(Name), Annotation, Value)) | Rest],
                 [definition_node(identifier_node(Name), Annotation, Value) | CleanItems],

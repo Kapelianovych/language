@@ -58,6 +58,12 @@ statements([]) --> [].
 statements([import_node(JsPath, Names) | Expressions]) -->
   "import { ", import_specifiers(Names), " } from \"", chars(JsPath), "\";\n",
   statements(Expressions).
+% A whole-module import: each `Foreign - Local` pair becomes a renamed
+% specifier `$Foreign as $Local`, so a namespaced member `Math.add` (the local
+% `$Math$add`) binds to the dependency's export `$add`.
+statements([namespace_import_node(JsPath, Renames) | Expressions]) -->
+  "import { ", renamed_specifiers(Renames), " } from \"", chars(JsPath), "\";\n",
+  statements(Expressions).
 % A foreign (`external`) declaration: bind the name to its JavaScript source,
 % wrapping a function source in a currying shim (see external_definition//3).
 statements([external_node(Name, Type, Source) | Expressions]) -->
@@ -100,6 +106,13 @@ import_specifiers([Name, Next | Rest]) -->
   identifier(Name),
   ", ",
   import_specifiers([Next | Rest]).
+
+% Comma-separated `$Foreign as $Local` renamed specifiers.
+renamed_specifiers([Foreign - Local]) -->
+  identifier(Foreign), " as ", identifier(Local).
+renamed_specifiers([Foreign - Local, Next | Rest]) -->
+  identifier(Foreign), " as ", identifier(Local), ", ",
+  renamed_specifiers([Next | Rest]).
 
 % A statement is either a `const` binding (for a definition) or an expression
 % terminated by a semicolon.  The clauses are mutually exclusive: the last is
@@ -392,8 +405,24 @@ escaped_char(Char) -->
 % User identifiers are prefixed with `$` so they can never collide with a
 % JavaScript reserved word or global (`if`, `var`, `function`, ...).  The
 % prefix is applied uniformly to definitions and references, so they match.
+%
+% A QUALIFIED name from a nested module (`Math.add`, produced by
+% `module_expander.pl`) carries `.` separators, which are not legal in a JS
+% identifier; each is translated to a further `$` (`$Math$add`).  Source
+% identifiers are XID and so contain neither `.` nor `$`, which keeps both the
+% prefix and the translated separators collision-free, and leaves ordinary
+% (dot-free) names emitted exactly as before.
 identifier(Name) -->
-  "$", chars(Name).
+  "$", dollar_separated(Name).
+
+dollar_separated([]) --> [].
+dollar_separated(['.' | Characters]) -->
+  "$",
+  dollar_separated(Characters).
+dollar_separated([Character | Characters]) -->
+  { Character \== ('.') },
+  [Character],
+  dollar_separated(Characters).
 
 % Emit a list of characters verbatim.
 chars([]) --> [].
@@ -446,9 +475,13 @@ exported_constructor_definitions([Constructor | Constructors]) -->
   one_constructor_definition(Constructor),
   exported_constructor_definitions(Constructors).
 
+% The binding name is `$`-prefixed and dot-mangled (a qualified constructor
+% from a module, e.g. `Opt.Some`, becomes `$Opt$Some`), but the runtime `$tag`
+% keeps the dotted qualified name verbatim (a string, where `.` is fine, and
+% kept distinct so sibling modules' same-named constructors don't clash).
 one_constructor_definition(constructor(Name, FieldTypes)) -->
   { length(FieldTypes, Arity) },
-  "const $", chars(Name), " = ", constructor_arrows(Name, Arity, 0), ";\n".
+  "const ", identifier(Name), " = ", constructor_arrows(Name, Arity, 0), ";\n".
 
 % ---------------------------------------------------------------------------
 % Foreign (`external`) bindings

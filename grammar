@@ -70,6 +70,14 @@ Identifier :-
 	<any character which conforms to XID_Start property>
 	<any character which conforms to XID_Continue property>*
 
+# A QUALIFIED name is one or more identifiers joined by `.`.  It appears only
+# where `.` has no other meaning -- a TYPE reference and a CONSTRUCTOR pattern --
+# to name an item reached through a namespace: a member of a nested `module`
+# (`Geo.Shape`, `Geo.Circle`) or of a whole-module import (`math.Option`,
+# `math.Some`).  In value/expression position a qualified name is instead formed
+# from member-access `.` on the namespace (see Postfix).
+QualifiedName :- Identifier ("." Identifier)*
+
 Block :- "{" Separator* (Expression (Separator+ Expression)*)* Separator* "}"
 
 # A type annotation: the optional `: Type` suffix on definitions, function
@@ -116,9 +124,11 @@ Pattern :-
 	| Identifier
 
 # A tagged-union constructor pattern.  Nullary constructors are matched with
-# empty parens (`None()`), so a bare identifier is unambiguously a binding.
+# empty parens (`None()`), so a bare identifier is unambiguously a binding.  The
+# name may be QUALIFIED (`math.Some(v)`) for a constructor from a whole-module
+# import or a nested module.
 ConstructorPattern :-
-	Identifier "(" Separator* (Pattern (Separator+ Pattern)*)? Separator* ")"
+	QualifiedName "(" Separator* (Pattern (Separator+ Pattern)*)? Separator* ")"
 
 RecordPattern :- "(" Separator* (PatternMember (Separator+ PatternMember)*)* Separator* ")"
 
@@ -293,9 +303,11 @@ ParenthesizedType :-
 
 TypeMember :- Mutability? (Identifier Separator* ":" Separator* TypeExpression | TypeExpression)
 
-# A named type, optionally applied to angle-bracketed type arguments:
-#     number      Pair<A b>      Box<number>
-TypeReference :- Identifier TypeArguments?
+# A named type, optionally applied to angle-bracketed type arguments.  The name
+# may be QUALIFIED (`math.Option`) for a type from a whole-module import or a
+# nested module:
+#     number      Pair<A b>      Box<number>      math.Option<number>
+TypeReference :- QualifiedName TypeArguments?
 
 # A type argument may be a HOLE `_` (a placeholder).  A reference with holes,
 # or with FEWER arguments than the type's arity, is a SECTION -- a partial type
@@ -328,32 +340,49 @@ Expression :-
 	Binary
 	| BaseExpression
 
-# A program is a sequence of items: imports, exports, and ordinary
-# expressions (definitions, type declarations, bare expressions).
+# A program is a sequence of items: imports, exports, nested modules, and
+# ordinary expressions (definitions, type declarations, bare expressions).
 Program :-
 	Separator*
 	(ProgramItem Separator*)*
 
-ProgramItem :- Use | Public | External | Expression
+ProgramItem :- Use | Public | External | Module | Expression
 
-# An IMPORT.  `use ./math:(add Option Some)` brings the listed names from
-# another module into scope.  The path is relative (no `.sl` extension) and
-# resolves uniformly across values, types and constructors: each name is bound
-# to whatever it is in the source module's exported interface.  `use` is a soft
-# keyword (mandatory separator).
-Use :- "use" Separator+ ImportPath Separator* ":" Separator* ImportNames
+# An IMPORT, in two forms:
+#  * `use ./math:(add Option Some)` brings the LISTED names into scope; or
+#  * `use ./math` (no `:` clause) brings the WHOLE module in under a NAMESPACE
+#    derived from the path's base name (`math`), so its public items are reached
+#    as `math.add`, `math.Option`, `math.Some`, ... (no name list needed).
+# The path is relative (no `.sl` extension); names resolve uniformly across
+# values, types and constructors against the source module's exported interface.
+# `use` is a soft keyword (mandatory separator).
+Use :- "use" Separator+ ImportPath (Separator* ":" Separator* ImportNames)?
 
 ImportPath :- PathCharacter+               # any chars except ":", whitespace, "(", ")"
 
 # The names are always parenthesised (no one-name shorthand).
 ImportNames :- "(" Separator* Identifier (Separator+ Identifier)* Separator* ")"
 
-# An EXPORT.  `public` prefixes a definition, `type` declaration, or `external`
-# to expose it to importers; everything else is module-private.  Exporting a
-# tagged-union type exports its constructors too; exporting an `external` lets a
-# foreign binding be declared once and imported elsewhere.  `public` is a soft
-# keyword.
-Public :- "public" Separator+ (External | Expression)
+# An EXPORT.  `public` prefixes a definition, `type` declaration, `external`, or
+# nested `module` to expose it to importers; everything else is module-private.
+# Exporting a tagged-union type exports its constructors too; exporting an
+# `external` lets a foreign binding be declared once and imported elsewhere; a
+# top-level `public module` exports its public members (reached by importers via
+# a whole-module `use`).  `public` is a soft keyword.
+Public :- "public" Separator+ (External | Module | Expression)
+
+# A NESTED MODULE groups items under a name as a COMPILE-TIME namespace -- it is
+# not a value and has no type.  Its body is itself a sequence of program items,
+# so modules nest and may hold definitions, `type` declarations, `external`s,
+# `use`s and further modules, each optionally `public`.  Members are reached as
+# `Name.member`; `public` exposes a member outside the module (within the file),
+# and a top-level `public module` additionally exports across files.  Member
+# names are QUALIFIED with the module path, so two modules may reuse a name (and
+# a constructor's runtime tag is likewise qualified).  `module` is a soft
+# keyword (mandatory separator).
+Module :-
+	"module" Separator+ Identifier Separator* "=" Separator*
+	"(" Separator* (ProgramItem Separator*)* ")"
 
 # A FOREIGN (JavaScript) IMPORT.  `external` binds a name to a piece of JS with
 # a trusted type ascription -- the one unsafe point of the boundary.  The

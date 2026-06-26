@@ -57,7 +57,7 @@
 
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
-:- use_module(identifier, [identifier//1]).
+:- use_module(identifier, [identifier//1, qualified_identifier//1]).
 :- use_module(mutability, [mutability//1]).
 :- use_module(separator, [
   separator//0,
@@ -145,9 +145,11 @@ labeled_type_member(labeled(Name), Type) -->
 positional_type_member(positional, Type) -->
   type_expression(Type).
 
-% A named type, optionally applied to angle-bracketed type arguments.
+% A named type, optionally applied to angle-bracketed type arguments.  The name
+% may be QUALIFIED (`Math.Option`) when it refers to a type brought in by a
+% whole-module import; the dotted name is resolved like any other type name.
 type_reference(type_name_node(Name, Arguments)) -->
-  identifier(identifier_node(Name)),
+  qualified_identifier(Name),
   type_arguments(Arguments).
 
 type_arguments(Arguments) -->

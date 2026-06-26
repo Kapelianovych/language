@@ -5,19 +5,28 @@
     A program is a separator-separated sequence of *items*.  An item is one of:
 
         use_node(Path, Names)
-            an IMPORT.  `use ./math:(add Option Some)` brings the listed
+            a NAMED IMPORT.  `use ./math:(add Option Some)` brings the listed
             names from another module into scope.  `Path` is the relative path characters
             (without the `.sl` extension), `Names` a list of imported name
             character-lists.  Imports resolve uniformly across all three
             namespaces (values, types, constructors): each name is bound to
             whatever it is in the source module's exported interface.
 
+        use_all_node(Path)
+            a WHOLE-MODULE IMPORT.  `use ./math` (no `:` clause) brings the
+            module's entire public interface into scope under a namespace named
+            after the path's base segment (`math`), reached as `math.add`,
+            `math.Option`, `math.Some`, ...  The loader (`namespace_import`)
+            does the seeding and access resolution.
+
         public_node(Item)
-            an EXPORT.  `public` prefixes a definition, `type` declaration, or
-            `external` to expose it to importers; everything else is
-            module-private.  Exporting a tagged-union type exports its
+            an EXPORT.  `public` prefixes a definition, `type` declaration,
+            `external`, or nested `module` to expose it to importers; everything
+            else is module-private.  Exporting a tagged-union type exports its
             constructors too; exporting an `external` lets a foreign binding be
-            declared once and imported elsewhere.
+            declared once and imported elsewhere; a top-level `public module`
+            exports its public members (qualified, reached via a whole-module
+            `use`).
 
         external_node(Name, Type, Source)
             a FOREIGN (JavaScript) IMPORT.  `external` binds a name to a piece
@@ -37,14 +46,24 @@
             boundary AS-IS -- tuples and variants included -- with no
             representation conversion.
 
-        any other expression (definition, type declaration, bare expression)
-            an ordinary, module-private top-level item.
+        module_node(Name, Items)
+            a NESTED MODULE.  `module Math = ( add = ...  helper = ... )`
+            groups a sequence of items under `Name`.  `Items` is the same item
+            list a whole program has, so modules nest and the same `public`
+            rule applies inside -- but here `public` controls visibility to the
+            REST OF THIS FILE (as `Math.member`), not export across files.  A
+            module is a compile-time namespace: it is not a value, has no type,
+            and cannot be passed around.  The whole construct is erased before
+            type-checking by `module_expander.pl`, which lifts each member to a
+            top-level definition under a qualified name (`Math.add`) and
+            rewrites references accordingly.
 
-    `use`, `public` and `external` are soft keywords: they only take on their
-    special meaning when followed by the rest of an import / export / foreign
-    import; a bare identifier `use`, `public` or `external` (not so followed)
-    still parses normally, because each rule requires a mandatory separator and
-    the expected shape, and the parser backtracks to `expression` otherwise.
+    `use`, `public`, `external` and `module` are soft keywords: they only take
+    on their special meaning when followed by the rest of an import / export /
+    foreign import / nested module; a bare identifier `use`, `public`,
+    `external` or `module` (not so followed) still parses normally, because
+    each rule requires a mandatory separator and the expected shape, and the
+    parser backtracks to `expression` otherwise.
 */
 
 :- use_module(library(dcgs)).
@@ -75,21 +94,30 @@ program_item(Item) -->
   use_declaration(Item)
   | public_item(Item)
   | external_declaration(Item)
+  | module_declaration(Item)
   | expression(Item).
 
 % ---------------------------------------------------------------------------
 % Imports:  use ./path:(a b c)
 % ---------------------------------------------------------------------------
 
-use_declaration(use_node(Path, Names)) -->
+% `use ./math:(a b c)` imports named items; `use ./math` (no `:` clause)
+% imports the whole module under a namespace derived from the file name, so its
+% public items are reached as `math.a`, `math.Option`, `math.Some`, etc.  The
+% two forms share the path prefix and split on whether a `:` follows.
+use_declaration(Node) -->
   "use",
   separator, % mandatory: separates the keyword from the path
   separators,
   import_path(Path),
+  use_tail(Path, Node).
+
+use_tail(Path, use_node(Path, Names)) -->
   separators,
   ":",
   separators,
   import_names(Names).
+use_tail(Path, use_all_node(Path)) --> [].
 
 % A relative path is a maximal run of path characters (everything up to the
 % `:` separator or surrounding whitespace).  It carries no `.sl` extension.
@@ -130,14 +158,48 @@ import_names_tail([]) --> [].
 % ---------------------------------------------------------------------------
 
 % `public` may prefix an ordinary definition / type declaration OR an
-% `external` (so a foreign binding can be declared once and re-imported).
+% `external` (so a foreign binding can be declared once and re-imported), OR a
+% nested `module` (a public submodule, reachable as `Outer.Inner.member` from
+% outside the enclosing module).
 public_item(public_node(Item)) -->
   "public",
   separator, % mandatory
   separators,
   ( external_declaration(Item)
+  | module_declaration(Item)
   | expression(Item)
   ).
+
+% ---------------------------------------------------------------------------
+% Nested modules:  module Name = ( items )
+% ---------------------------------------------------------------------------
+
+% A nested module's body is itself a sequence of `program_item`s (so `use`,
+% `public`, `external`, definitions and further `module`s all nest), delimited
+% by parentheses rather than the program's end-of-input.  `module_expander.pl`
+% later erases this node, lifting each member to a qualified top-level item.
+module_declaration(module_node(Name, Items)) -->
+  "module",
+  separator, % mandatory: separates the keyword from the name
+  separators,
+  identifier(identifier_node(Name)),
+  separators,
+  "=",
+  separators,
+  "(",
+  separators,
+  module_items(Items),
+  separators,
+  ")".
+
+% Like `program_tail`, but terminated by the closing `)` instead of
+% end-of-input: at `)` every `program_item` alternative fails, so the cons
+% clause backtracks into the empty clause.
+module_items([Item | Items]) -->
+  program_item(Item),
+  separators,
+  module_items(Items).
+module_items([]) --> [].
 
 % ---------------------------------------------------------------------------
 % Foreign imports:

@@ -36,7 +36,7 @@
 :- use_module(number_literal, [number_literal//1]).
 :- use_module(boolean_literal, [boolean_literal//1]).
 :- use_module(string_literal, [string_literal//2]).
-:- use_module(identifier, [identifier//1]).
+:- use_module(identifier, [identifier//1, qualified_identifier//1]).
 :- use_module(separator, [
   separator//0,
   separators//0
@@ -59,9 +59,10 @@ pattern(ExpressionFunctor, Node) -->
 
 % A tagged-union constructor pattern: `Circle(r)`, `Rect(w h)`, `None()`.
 % (Nullary constructors are matched with empty parens, `None()`, so a bare
-% identifier is unambiguously a binding.)
+% identifier is unambiguously a binding.)  The name may be QUALIFIED
+% (`Math.Some(v)`) when the constructor comes from a whole-module import.
 constructor_pattern(ExpressionFunctor, constructor_pattern(Name, SubPatterns)) -->
-  identifier(identifier_node(Name)),
+  qualified_identifier(Name),
   "(",
   separators,
   constructor_sub_patterns(ExpressionFunctor, SubPatterns),
