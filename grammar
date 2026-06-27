@@ -333,6 +333,12 @@ BaseExpression :-
 	| Conditional
 	| Match
 	| Binary
+	# Reader-macro forms, atom level.  Each leads with a distinct character
+	# (`` ` ``, `~`, `@`) so it is unambiguous; placed after Binary so `` `(..) ``
+	# can be a binary operand.
+	| Quote
+	| Unquote
+	| MacroInvocation
 	| Unary
 	| Postfix
 
@@ -346,7 +352,7 @@ Program :-
 	Separator*
 	(ProgramItem Separator*)*
 
-ProgramItem :- Use | Public | External | Module | Expression
+ProgramItem :- Use | Public | External | Module | Macro | Expression
 
 # An IMPORT, in two forms:
 #  * `use ./math:(add Option Some)` brings the LISTED names into scope; or
@@ -369,7 +375,7 @@ ImportNames :- "(" Separator* Identifier (Separator+ Identifier)* Separator* ")"
 # `external` lets a foreign binding be declared once and imported elsewhere; a
 # top-level `public module` exports its public members (reached by importers via
 # a whole-module `use`).  `public` is a soft keyword.
-Public :- "public" Separator+ (External | Module | Expression)
+Public :- "public" Separator+ (External | Module | Macro | Expression)
 
 # A NESTED MODULE groups items under a name as a COMPILE-TIME namespace -- it is
 # not a value and has no type.  Its body is itself a sequence of program items,
@@ -404,3 +410,41 @@ ExternalSource :-
 JsString :- "'" (!"'")* "'"
 
 # Import cycles are rejected; mutual recursion is a within-file feature.
+
+# ---------------------------------------------------------------------------
+# READER MACROS  (compile-time metaprogramming -- see docs/reader-macros.md)
+# ---------------------------------------------------------------------------
+# A macro is a COMPILE-TIME function, written in the language, that turns the
+# raw source text following its invocation into program AST.  It runs during
+# compilation (interpreted); its body is type-checked as an ordinary function
+# `( .. ) -> Ast`.  `macro` is a soft keyword (mandatory separator).
+#
+# DEFINITION.  Parameters are bare identifiers (no annotations -- their types
+# are INFERRED, e.g. `n : number`, `source : string`).  By convention the last
+# parameter receives the invocation's raw trailing `source` text and the earlier
+# parameters the `( .. )` arguments.
+Macro :- "macro" Separator+ Identifier Separator* "=" Separator*
+         "(" Separator* (Identifier (Separator+ Identifier)*)? Separator* ")"
+         Separator* Expression
+
+# INVOCATION.  `@times(3) log('tick')` calls macro `times` with argument `3`
+# and with `source` = the RAW SOURCE TEXT of the single Expression that follows
+# (`log('tick')`).  The following expression is parsed only to delimit it; its
+# verbatim characters become the `source` string, which the macro re-parses with
+# `Compiler.parseItem`.  `@` is used nowhere else.
+MacroInvocation :- "@" Identifier
+                   "(" Separator* (Expression (Separator+ Expression)*)? Separator* ")"
+                   Separator* Expression
+
+# QUASIQUOTE / UNQUOTE.  Inside `` `( EXPR ) `` the parenthesised expression is a
+# TEMPLATE producing an Ast value -- it is NOT type-checked at the macro's
+# definition, but is checked after expansion, at each use site.  `~x` / `~( EXPR )`
+# splices an Ast-valued sub-result into the surrounding template.  The parens
+# after `` ` `` and after `~` are delimiters, not Tuple syntax.
+Quote :- "`" Separator* "(" Separator* Expression Separator* ")"
+Unquote :- "~" (Identifier | "(" Separator* Expression Separator* ")")
+
+# The builtin `Compiler` module (imported as `use Compiler:(Ast parseItem)`)
+# provides the opaque `Ast` type and `parseItem : (string): Ast`, available only
+# inside macro bodies.  Macro definitions and the `Compiler` import are ERASED
+# (after expansion) before the program is type-checked and code-generated.

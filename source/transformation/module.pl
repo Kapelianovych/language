@@ -412,6 +412,15 @@ rewrite(definition_node(Id, Ann, V, S), Ctx, definition_node(Id, Ann1, V1, S)) :
 rewrite(destructuring_node(P, V, S), Ctx, destructuring_node(P, V1, S)) :- !,
   rewrite(V, Ctx, V1).
 rewrite(type_declaration_node(N, P, O, B, S), _Ctx, type_declaration_node(N, P, O, B, S)) :- !.
+% Reader-macro forms appear only in macro bodies (compile-time code).  They pass
+% through module expansion structurally; references inside are rewritten so a
+% macro body may still refer to a module member.  (In the normal pipeline macros
+% are erased before this pass, so these clauses mainly serve the macro
+% type-check, which runs inference -- and hence expansion -- over macro bodies.)
+rewrite(quote_node(Inner, S), Ctx, quote_node(Inner1, S)) :- !,
+  rewrite(Inner, Ctx, Inner1).
+rewrite(unquote_node(Inner, S), Ctx, unquote_node(Inner1, S)) :- !,
+  rewrite(Inner, Ctx, Inner1).
 
 rewrite_list([], _Ctx, []).
 rewrite_list([E | Es], Ctx, [E1 | Es1]) :-

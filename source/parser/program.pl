@@ -77,6 +77,7 @@
 :- use_module(type_expression, [type_expression//1]).
 :- use_module(whitespace, [is_whitespace/1]).
 :- use_module(position, [here//1, span_between/3]).
+:- use_module(macro_syntax, [macro_declaration//2]).
 
 % `program_node` deliberately keeps arity 1 (no span): a whole-file span is just
 % `span(0, FileLength)` if ever needed, and adding one here would ripple through
@@ -100,6 +101,7 @@ program_item(Item) -->
   | public_item(Item)
   | external_declaration(Item)
   | module_declaration(Item)
+  | macro_declaration(expression, Item)
   | expression(Item).
 
 % ---------------------------------------------------------------------------
@@ -178,6 +180,7 @@ public_item(public_node(Item, Span)) -->
   separators,
   ( external_declaration(Item)
   | module_declaration(Item)
+  | macro_declaration(expression, Item)
   | expression(Item)
   ),
   here(End),

@@ -15,6 +15,11 @@
   % to find the procedure.
   failing_binary//2
 ]).
+:- use_module(macro_syntax, [
+  macro_invocation//2,
+  quote_expression//2,
+  unquote_expression//2
+]).
 
 base_expression(BinaryFunctor, Node) -->
   type_declaration(Node)
@@ -28,6 +33,14 @@ base_expression(BinaryFunctor, Node) -->
   | conditional(expression, Node)
   | match(expression, Node)
   | phrase(BinaryFunctor, base_expression, Node)
+  % Reader-macro syntax (atom level): a quasiquote `` `(..) ``, an unquote
+  % `~x`, or a macro invocation `@name(..) following`.  Each leads with a
+  % distinct character (`` ` ``, `~`, `@`) so it never clashes with the others
+  % or with ordinary expressions.  Tried after `binary` (so `` `(..) `` can be
+  % a binary operand) and before the bare atom level.
+  | quote_expression(expression, Node)
+  | unquote_expression(expression, Node)
+  | macro_invocation(expression, Node)
   | unary(expression, Node)
   % `postfix` is the atom level: literals, strings, tuples, blocks and
   % identifiers, plus any trailing `.access` / `(call)` / `= assignment`.

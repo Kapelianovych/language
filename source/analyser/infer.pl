@@ -324,6 +324,52 @@ infer(definition_node(_Target, Annotation, Value, _), Level, InsideFunction, Env
   apply_annotation(Annotation, ValueType, TypeEnvironment, Level, Context1, ContextOut).
 
 % ---------------------------------------------------------------------------
+% Reader-macro forms (only reachable while type-checking a MACRO BODY -- see
+% `transformation/macro.pl`; macros are erased before a normal program is
+% inferred).
+% ---------------------------------------------------------------------------
+
+% A quasiquote `` `(Template) `` evaluates (at macro-expansion time) to an
+% `Ast` value, so its TYPE is `Ast`.  The quoted `Template` is NOT type-checked
+% as runtime code -- it may mention names that exist only in the expanded
+% program -- so we do not infer it.  We only descend into it to find UNQUOTES
+% and require each spliced sub-expression to itself be an `Ast`.
+infer(quote_node(Template, _), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, AstType, ContextOut) :-
+  macro_ast_type(AstType),
+  check_template_unquotes(Template, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut).
+
+% An unquote reached on its own (not collected by an enclosing quasiquote) is a
+% misplaced `~` -- a static error.
+infer(unquote_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, _ContextIn, _Type, _ContextOut) :-
+  throw(analysis_error(unquote_outside_quasiquote)).
+
+% The monotype of an `Ast` value.  A nullary nominal type, distinct from every
+% other type; `transformation/macro.pl` seeds the type name `Ast` to the same
+% constructor so `parseItem`'s result and the macro's declared return agree.
+macro_ast_type(type_constructor("Ast", [])).
+
+% Walk a quasiquote template, type-checking every `~e` / `~(e)` against `Ast`
+% and leaving all other (template) syntax untouched.  A NESTED quasiquote is
+% opaque here (its unquotes belong to its own level) -- tier-1 does not support
+% nested-quote splicing.
+check_template_unquotes(unquote_node(Expression, _), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :- !,
+  infer(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ExpressionType, Context1),
+  macro_ast_type(AstType),
+  unify(ExpressionType, AstType, Context1, ContextOut).
+check_template_unquotes(quote_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context) :- !.
+check_template_unquotes(Template, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
+  compound(Template), !,
+  Template =.. [_Functor | Arguments],
+  check_template_unquotes_each(Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut).
+check_template_unquotes(_Atomic, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context).
+
+check_template_unquotes_each([], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context).
+check_template_unquotes_each([Argument | Arguments], Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
+  check_template_unquotes(Argument, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Context1),
+  check_template_unquotes_each(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut).
+
+% ---------------------------------------------------------------------------
 % Annotations
 % ---------------------------------------------------------------------------
 

@@ -11,13 +11,18 @@
 :- use_module(analyser, [analyse/2]).
 :- use_module(generator, [generate/2]).
 :- use_module(module_loader, [compile_program/1]).
+:- use_module('transformation/macro', [check_macros/1, expand_macros/2]).
 
 %% compile(+Source, -Output, -AnalysisResult).
 %
 % Compiles source text into output text.
 compile(Source, Output, AnalysisResult) :-
   once((
-    parse(Source, Ast),
+    parse(Source, ParsedAst),
+    % Process reader macros (type-check bodies, then expand invocations) before
+    % type-checking and generating the resulting program.
+    check_macros(ParsedAst),
+    expand_macros(ParsedAst, Ast),
     analyse(Ast, AnalysisResult),
     generate(Ast, Output)
   )).
