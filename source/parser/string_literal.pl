@@ -5,14 +5,24 @@
 :- use_module(library(lists)).
 
 :- use_module(separator, [separators//0]).
+:- use_module(position, [here//1, span_between/3]).
 
 :- meta_predicate(string_literal(2, ?, ?, ?)).
 
-string_literal(ExpressionFunctor, string_node(Parts)) -->
+% `string_node` carries the span of the whole literal (quotes included).  The
+% parts keep their plain shape: a `string_interpolated_part(Expr)` holds an
+% expression node that already carries its own span, and static parts are
+% assembled character-by-character (see `normalise_parts/3`), so per-part spans
+% would add cost without LSP value the interpolated expressions don't already give.
+string_literal(ExpressionFunctor, string_node(Parts, Span)) -->
+  here(Start),
   "'",
   string(ExpressionFunctor, MixedParts),
-  { foldl(normalise_parts, MixedParts, [string_static_part("")], Parts) },
-  "'".
+  "'",
+  here(End),
+  { foldl(normalise_parts, MixedParts, [string_static_part("")], Parts),
+    span_between(Start, End, Span)
+  }.
 
 normalise_parts(
   string_interpolated_part(Node),

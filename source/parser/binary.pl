@@ -5,6 +5,7 @@
 
 :- use_module(library(dcgs)).
 :- use_module(separator, [separators//0]).
+:- use_module(position, [span_cover/3]).
 
 :- meta_predicate(binary(2, ?, ?, ?)).
 
@@ -23,10 +24,13 @@ binary(
   binary_operator(Operator, Precedence),
   separators,
   phrase(BaseExpressionFunctor, failing_binary, RightExpression),
+  % A binary node's span covers its left and right operands (each already
+  % carries its own span); this holds for the re-associated nodes below too.
+  { span_cover(LeftExpression, RightExpression, Span) },
   binary_tail(
     BaseExpressionFunctor,
     Precedence,
-    binary_node(Operator, LeftExpression, RightExpression),
+    binary_node(Operator, LeftExpression, RightExpression, Span),
     Node
   ).
 
@@ -37,7 +41,8 @@ binary_tail(
   binary_node(
     LeftOperator,
     LeftBinaryNodeLeftExpression,
-    LeftBinaryNodeRightExpression
+    LeftBinaryNodeRightExpression,
+    _LeftSpan
   ),
   Node
 ) -->
@@ -49,25 +54,31 @@ binary_tail(
     % Operator precedences are always ground integers here, so a plain
     % arithmetic comparison and if-then-else behaves exactly like the former
     % clpz/reif `if_(has_right_operator_less_importance(...), ...)` -- without
-    % the constraint-solver overhead on every operator.
+    % the constraint-solver overhead on every operator.  Each re-associated
+    % `binary_node` recomputes its span from its (re-grouped) operands.
     ( LeftBinaryNodeOperatorPrecedence >= CurrentOperatorPrecedence ->
         Operator = CurrentOperator,
         Precedence = CurrentOperatorPrecedence,
+        span_cover(LeftBinaryNodeLeftExpression, LeftBinaryNodeRightExpression, LeftExpressionSpan),
         LeftExpression = binary_node(
           LeftOperator,
           LeftBinaryNodeLeftExpression,
-          LeftBinaryNodeRightExpression
+          LeftBinaryNodeRightExpression,
+          LeftExpressionSpan
         ),
         RightExpression = CurrentRightExpression
     ;   Operator = LeftOperator,
         Precedence = LeftBinaryNodeOperatorPrecedence,
         LeftExpression = LeftBinaryNodeLeftExpression,
+        span_cover(LeftBinaryNodeRightExpression, CurrentRightExpression, RightExpressionSpan),
         RightExpression = binary_node(
           CurrentOperator,
           LeftBinaryNodeRightExpression,
-          CurrentRightExpression
+          CurrentRightExpression,
+          RightExpressionSpan
         )
-    )
+    ),
+    span_cover(LeftExpression, RightExpression, Span)
   },
   binary_tail(
     BaseExpressionFunctor,
@@ -75,7 +86,8 @@ binary_tail(
     binary_node(
       Operator,
       LeftExpression,
-      RightExpression
+      RightExpression,
+      Span
     ),
     Node
   ).

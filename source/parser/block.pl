@@ -5,15 +5,19 @@
   separator//0,
   separators//0
 ]).
+:- use_module(position, [here//1, span_between/3]).
 
 :- meta_predicate(block(2, ?, ?, ?)).
 
-block(ExpressionFunctor, block_node(Expressions)) -->
+block(ExpressionFunctor, block_node(Expressions, Span)) -->
+  here(Start),
   "{",
   separators,
   block_section(ExpressionFunctor, Expressions),
   separators,
-  "}".
+  "}",
+  here(End),
+  { span_between(Start, End, Span) }.
 
 block_section(_, []) --> [].
 block_section(ExpressionFunctor, [Expression | Expressions]) -->

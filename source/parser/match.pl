@@ -30,6 +30,7 @@
   separator//0,
   separators//0
 ]).
+:- use_module(position, [here//1, span_between/3]).
 
 :- meta_predicate(match(2, ?, ?, ?)).
 
@@ -37,13 +38,16 @@
 % expression, so it never consumes a `|` -- which would otherwise be
 % ambiguous with the arm separator (and with the binary `|` operator).  A
 % compound scrutinee is wrapped: `match { a + b } | ...` or `match (t) | ...`.
-match(ExpressionFunctor, match_node(Scrutinee, Arms)) -->
+match(ExpressionFunctor, match_node(Scrutinee, Arms, Span)) -->
+  here(Start),
   "match",
   separator, % mandatory
   separators,
   postfix(ExpressionFunctor, Scrutinee),
   separators,
-  match_arms(ExpressionFunctor, Arms).
+  match_arms(ExpressionFunctor, Arms),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 match_arms(ExpressionFunctor, [Arm | Arms]) -->
   "|",
@@ -59,14 +63,17 @@ match_arms_tail(ExpressionFunctor, [Arm | Arms]) -->
   match_arms_tail(ExpressionFunctor, Arms).
 match_arms_tail(_, []) --> [].
 
-match_arm(ExpressionFunctor, match_arm([First | Rest], Guard, Result)) -->
+match_arm(ExpressionFunctor, match_arm([First | Rest], Guard, Result, Span)) -->
+  here(Start),
   pattern(ExpressionFunctor, First),
   arm_alternatives(ExpressionFunctor, Rest),
   separators,
   match_guard(ExpressionFunctor, Guard),
   "=>",
   separators,
-  phrase(ExpressionFunctor, Result).
+  phrase(ExpressionFunctor, Result),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 % Additional `| pattern` alternatives of an or-pattern (before the `=>`).
 arm_alternatives(ExpressionFunctor, [Pattern | Patterns]) -->

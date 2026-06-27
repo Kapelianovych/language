@@ -19,7 +19,9 @@
             type UserId = number                -- structural
             type UserId = opaque number          -- nominal
 
-    Produced AST:
+    Produced AST (each node -- including each `constructor(...)` -- additionally
+    carries a trailing `span(Start, End)` of source offsets as its last argument;
+    see `parser/position.pl`):
 
         type_declaration_node(NameChars, ParameterList, Opacity, Body)
 
@@ -43,17 +45,21 @@
   type_expression//1,
   type_parameters//1
 ]).
+:- use_module(position, [here//1, span_between/3]).
 
-type_declaration(type_declaration_node(Name, Parameters, Opacity, Body)) -->
+type_declaration(type_declaration_node(Name, Parameters, Opacity, Body, Span)) -->
+  here(Start),
   "type",
   separator, % mandatory
   separators,
-  identifier(identifier_node(Name)),
+  identifier(identifier_node(Name, _)),
   type_parameters(Parameters),
   separators,
   "=",
   separators,
-  declaration_body(Opacity, Body).
+  declaration_body(Opacity, Body),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 declaration_body(variant, variant_body(Constructors)) -->
   variant_body_form(Constructors).
@@ -77,7 +83,7 @@ variant_body_form(Constructors) -->
   { Constructors = [_, _ | _] }.
 variant_body_form([Constructor]) -->
   constructor_declaration(Constructor),
-  { Constructor = constructor(_, [_ | _]) }.
+  { Constructor = constructor(_, [_ | _], _) }.
 
 constructor_list([Constructor | Constructors]) -->
   constructor_declaration(Constructor),
@@ -91,9 +97,12 @@ constructor_list_tail([Constructor | Constructors]) -->
   constructor_list_tail(Constructors).
 constructor_list_tail([]) --> [].
 
-constructor_declaration(constructor(Name, FieldTypes)) -->
-  identifier(identifier_node(Name)),
-  constructor_fields(FieldTypes).
+constructor_declaration(constructor(Name, FieldTypes, Span)) -->
+  here(Start),
+  identifier(identifier_node(Name, _)),
+  constructor_fields(FieldTypes),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 constructor_fields(FieldTypes) -->
   "(",

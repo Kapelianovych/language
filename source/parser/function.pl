@@ -20,7 +20,8 @@
         <A>(x: A): A x
         <A: (x: string ..)>(t: A): string t.x
 
-    Produced AST:
+    Produced AST (each node additionally carries a trailing `span(Start, End)`
+    of source offsets as its last argument -- see `parser/position.pl`):
 
         function_node(TypeParameters, Parameters, ReturnAnnotation, Body)
 
@@ -41,10 +42,12 @@
   separator//0,
   separators//0
 ]).
+:- use_module(position, [here//1, span_between/3]).
 
 :- meta_predicate(function(2, ?, ?, ?)).
 
-function(ExpressionFunctor, function_node(TypeParameters, Parameters, ReturnAnnotation, Body)) -->
+function(ExpressionFunctor, function_node(TypeParameters, Parameters, ReturnAnnotation, Body, Span)) -->
+  here(Start),
   type_parameters(TypeParameters),
   separators,
   "(",
@@ -54,7 +57,9 @@ function(ExpressionFunctor, function_node(TypeParameters, Parameters, ReturnAnno
   ")",
   type_annotation(ReturnAnnotation),
   separators,
-  phrase(ExpressionFunctor, Body).
+  phrase(ExpressionFunctor, Body),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 function_parameters(_, []) --> [].
 function_parameters(ExpressionFunctor, [Parameter | Parameters]) -->
@@ -63,9 +68,12 @@ function_parameters(ExpressionFunctor, [Parameter | Parameters]) -->
 
 % A parameter is a pattern (commonly just an identifier, but also a record
 % pattern for destructuring) with an optional type annotation.
-function_parameter(ExpressionFunctor, parameter_node(Pattern, TypeAnnotation)) -->
+function_parameter(ExpressionFunctor, parameter_node(Pattern, TypeAnnotation, Span)) -->
+  here(Start),
   irrefutable_pattern(ExpressionFunctor, Pattern),
-  type_annotation(TypeAnnotation).
+  type_annotation(TypeAnnotation),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 function_parameters_tail(_, []) --> [].
 function_parameters_tail(ExpressionFunctor, [Parameter | Parameters]) -->

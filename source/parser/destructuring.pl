@@ -16,12 +16,16 @@
 :- use_module(library(dcgs)).
 :- use_module(pattern, [irrefutable_record_pattern//2]).
 :- use_module(separator, [separators//0]).
+:- use_module(position, [here//1, span_between/3]).
 
 :- meta_predicate(destructuring(2, ?, ?, ?)).
 
-destructuring(ExpressionFunctor, destructuring_node(Pattern, Value)) -->
+destructuring(ExpressionFunctor, destructuring_node(Pattern, Value, Span)) -->
+  here(Start),
   irrefutable_record_pattern(ExpressionFunctor, Pattern),
   separators,
   "=",
   separators,
-  phrase(ExpressionFunctor, Value).
+  phrase(ExpressionFunctor, Value),
+  here(End),
+  { span_between(Start, End, Span) }.

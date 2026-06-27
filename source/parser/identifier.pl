@@ -1,8 +1,9 @@
-:- module(identifier, [identifier//1, qualified_identifier//1]).
+:- module(identifier, [identifier//1, qualified_identifier//2]).
 
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
 :- use_module('../unicode', [xid_start/1, xid_continue/1]).
+:- use_module(position, [here//1, span_between/3]).
 
 % An identifier is an XID_Start character followed by zero or more
 % XID_Continue characters (Unicode UAX #31).  The XID property tables live in
@@ -15,10 +16,14 @@
 % name originates keeps qualified names built later (by the module expander and
 % loader) comparable to names the parser produced -- otherwise equal-looking
 % keys sort inconsistently and the AVL tree silently loses entries.
-identifier(identifier_node(Name)) -->
+identifier(identifier_node(Name, Span)) -->
+  here(Start),
   identifier_first_character(FirstCharacter),
   identifier_rest_characters(RestCharacters),
-  { plain_chars([FirstCharacter | RestCharacters], Name) }.
+  here(End),
+  { plain_chars([FirstCharacter | RestCharacters], Name),
+    span_between(Start, End, Span)
+  }.
 
 % Rebuild a list as fresh cons cells of character atoms.  `phrase_from_file`
 % backs its list with a partial string, and `compare/3` (which `library(assoc)`
@@ -56,16 +61,22 @@ identifier_continue_character(Character) -->
 % qualified value names are formed there from access nodes instead.)  Since a
 % source identifier contains no `.`, the joined form is unambiguous and cannot
 % collide with a plain identifier.
-qualified_identifier(Name) -->
-  identifier(identifier_node(First)),
+% Also returns the `Span` covering the whole dotted name (`Math.Option`), so a
+% qualified reference is locatable even though its joined `Name` is a single
+% flat character list.
+qualified_identifier(Name, Span) -->
+  here(Start),
+  identifier(identifier_node(First, _)),
   qualified_identifier_tail(Rest),
+  here(End),
   { append(First, Rest, Joined),
-    plain_chars(Joined, Name)             % keep one comparable representation (see plain_chars/2)
+    plain_chars(Joined, Name),            % keep one comparable representation (see plain_chars/2)
+    span_between(Start, End, Span)
   }.
 
 qualified_identifier_tail(Name) -->
   ".",
-  identifier(identifier_node(Segment)),
+  identifier(identifier_node(Segment, _)),
   qualified_identifier_tail(Rest),
   { append(['.' | Segment], Rest, Name) }.
 qualified_identifier_tail([]) --> [].

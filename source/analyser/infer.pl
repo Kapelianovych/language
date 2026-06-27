@@ -105,7 +105,7 @@ infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment,
 
 % Collect the names bound by value definitions directly in this sequence.
 definition_names([], []).
-definition_names([definition_node(identifier_node(Name), _, _) | Es], [Name | Names]) :- !,
+definition_names([definition_node(identifier_node(Name, _), _, _, _) | Es], [Name | Names]) :- !,
   definition_names(Es, Names).
 definition_names([_ | Es], Names) :-
   definition_names(Es, Names).
@@ -135,20 +135,20 @@ infer_sequence_walk([Expression, Next | Rest], Level, InsideFunction, Environmen
 
 % Process one sequence element, returning its type and the environment to
 % use for the rest of the sequence.
-infer_sequence_item(type_declaration_node(_, _, _, _), _Level, _InsideFunction,
+infer_sequence_item(type_declaration_node(_, _, _, _, _), _Level, _InsideFunction,
                     Environment, _TypeEnvironment, Context, tuple_type([], closed), Environment, Context) :- !.
 % An `external` declaration carries no inferable body; its (trusted) type was
 % already seeded into the environment before the walk, so there is nothing to
 % do here.  Its "value" is unit, like a type declaration.
-infer_sequence_item(external_node(_, _, _), _Level, _InsideFunction,
+infer_sequence_item(external_node(_, _, _, _), _Level, _InsideFunction,
                     Environment, _TypeEnvironment, Context, tuple_type([], closed), Environment, Context) :- !.
 % A destructuring definition binds the pattern's variables for the rest of
 % the sequence (monomorphically); its value is the matched value's type.
-infer_sequence_item(destructuring_node(Pattern, Value), Level, InsideFunction,
+infer_sequence_item(destructuring_node(Pattern, Value, _), Level, InsideFunction,
                     Environment, TypeEnvironment, ContextIn, ValueType, EnvironmentOut, ContextOut) :- !,
   infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
   type_pattern(Pattern, ValueType, Level, TypeEnvironment, Environment, Context1, EnvironmentOut, ContextOut).
-infer_sequence_item(definition_node(identifier_node(Name), Annotation, Value),
+infer_sequence_item(definition_node(identifier_node(Name, _), Annotation, Value, _),
                     Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
                     ValueType, EnvironmentOut, ContextOut) :- !,
   Level1 is Level + 1,
@@ -181,18 +181,18 @@ placeholder_referenced(Placeholder, Context) :-
 % ---------------------------------------------------------------------------
 
 % Literals: a constant base type, context unchanged.
-infer(number_node(_), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, number, Context).
-infer(boolean_node(_), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, boolean, Context).
+infer(number_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, number, Context).
+infer(boolean_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, boolean, Context).
 
 % String literal: the result is `string`, but each interpolated `{ expr }`
 % must itself be well-typed, so we still infer through it.
-infer(string_node(Parts), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, string, ContextOut) :-
+infer(string_node(Parts, _), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, string, ContextOut) :-
   infer_string_parts(Parts, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut).
 
 % Variable: look the name up and instantiate its scheme with fresh
 % variables at the current level.  A `forward` binding may only be used
 % inside a function body.
-infer(identifier_node(Name), Level, InsideFunction, Environment, _TypeEnvironment, ContextIn, Type, ContextOut) :-
+infer(identifier_node(Name, _), Level, InsideFunction, Environment, _TypeEnvironment, ContextIn, Type, ContextOut) :-
   ( get_assoc(Name, Environment, Binding) ->
       binding_scheme(Binding, InsideFunction, Name, Scheme),
       instantiate(Scheme, Level, ContextIn, Type, ContextOut)
@@ -203,7 +203,7 @@ infer(identifier_node(Name), Level, InsideFunction, Environment, _TypeEnvironmen
 % its annotation if present; the body is typed with those bound and with
 % `InsideFunction = true`.  A return annotation, if present, is unified
 % against the inferred body type.
-infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body), Level, _InsideFunction,
+infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body, _), Level, _InsideFunction,
       Environment, TypeEnvironment, ContextIn,
       function_type(ParameterTypes, BodyType), ContextOut) :-
   % Explicit generics extend the type environment for this function's
@@ -217,14 +217,14 @@ infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body), Level, 
 % Tuple: infer each member into a field.  A literal is a CLOSED record, so
 % its tail is `closed`.  Positional members get sequential `index` keys;
 % labeled members get `label` keys.  Labels must be unique.
-infer(tuple_node(Members), Level, InsideFunction, Environment, TypeEnvironment,
+infer(tuple_node(Members, _), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, tuple_type(Fields, Tail), ContextOut) :-
   infer_tuple_members(Members, 0, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Fields, SpreadTypes, ContextOut),
   check_unique_labels(Fields, []),
   spread_tail(SpreadTypes, Tail).
 
 % Block: its own lexical scope, behaving like a sequence.
-infer(block_node(Expressions), Level, InsideFunction, Environment, TypeEnvironment,
+infer(block_node(Expressions, _), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, Type, ContextOut) :-
   infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Type, _FinalEnvironment, ContextOut).
 
@@ -232,7 +232,7 @@ infer(block_node(Expressions), Level, InsideFunction, Environment, TypeEnvironme
 % a record having AT LEAST this field (an open row tail), with any
 % mutability.  The open tail is what makes `(p) p.x` row-polymorphic: the
 % target need not be a fully known tuple.
-infer(access_node(Target, Accessor), Level, InsideFunction, Environment, TypeEnvironment,
+infer(access_node(Target, Accessor, _), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, FieldType, ContextOut) :-
   infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
   accessor_key(Accessor, Key),
@@ -243,7 +243,7 @@ infer(access_node(Target, Accessor), Level, InsideFunction, Environment, TypeEnv
 
 % Member assignment `target.member = value`: like access, but the member's
 % mutability is required to be `mutable`, and the value's type must match.
-infer(assignment_node(access_node(Target, Accessor), Value), Level, InsideFunction,
+infer(assignment_node(access_node(Target, Accessor, _), Value, _), Level, InsideFunction,
       Environment, TypeEnvironment, ContextIn, ValueType, ContextOut) :-
   infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
   accessor_key(Accessor, Key),
@@ -257,7 +257,7 @@ infer(assignment_node(access_node(Target, Accessor), Value), Level, InsideFuncti
 % must be boolean, and every arm's result has the match's (shared) type.
 % Patterns are type-consistent with the scrutinee -- there are no union
 % types, so all arms describe the same scrutinee type.
-infer(match_node(Scrutinee, RawArms), Level, InsideFunction, Environment, TypeEnvironment,
+infer(match_node(Scrutinee, RawArms, _), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, ResultType, ContextOut) :-
   infer(Scrutinee, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ScrutineeType, Context1),
   fresh_unification_variable(Context1, Level, ResultType, Context2),
@@ -272,7 +272,7 @@ infer(match_node(Scrutinee, RawArms), Level, InsideFunction, Environment, TypeEn
 
 % A destructuring reached in expression position cannot bind anything
 % visible, so it just contributes the matched value's type.
-infer(destructuring_node(Pattern, Value), Level, InsideFunction, Environment, TypeEnvironment,
+infer(destructuring_node(Pattern, Value, _), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, ValueType, ContextOut) :-
   infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
   type_pattern(Pattern, ValueType, Level, TypeEnvironment, Environment, Context1, _DiscardedEnvironment, ContextOut).
@@ -281,13 +281,13 @@ infer(destructuring_node(Pattern, Value), Level, InsideFunction, Environment, Ty
 % argument is a hole: the call is applied to all positions (holes as fresh
 % variables), and the whole expression becomes a function awaiting the holes,
 % in order.  With no holes this is ordinary application.
-infer(function_call_node(Target, Arguments), Level, InsideFunction, Environment,
+infer(function_call_node(Target, Arguments, _), Level, InsideFunction, Environment,
       TypeEnvironment, ContextIn, ResultType, ContextOut) :-
   infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
   apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut).
 
 % Conditional: the condition must be boolean and the two branches must agree.
-infer(conditional_node(Condition, Then, Else), Level, InsideFunction, Environment,
+infer(conditional_node(Condition, Then, Else, _), Level, InsideFunction, Environment,
       TypeEnvironment, ContextIn, BranchType, ContextOut) :-
   infer(Condition, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ConditionType, Context1),
   unify(ConditionType, boolean, Context1, Context2),
@@ -296,14 +296,14 @@ infer(conditional_node(Condition, Then, Else), Level, InsideFunction, Environmen
   unify(BranchType, ElseType, Context4, ContextOut).
 
 % Unary operator.
-infer(unary_node(Operator, Operand), Level, InsideFunction, Environment, TypeEnvironment,
+infer(unary_node(Operator, Operand, _), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, ResultType, ContextOut) :-
   unary_signature(Operator, Level, OperandType, ResultType),
   infer(Operand, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ActualOperandType, Context1),
   unify(ActualOperandType, OperandType, Context1, ContextOut).
 
 % Binary operator.
-infer(binary_node(Operator, Left, Right), Level, InsideFunction, Environment, TypeEnvironment,
+infer(binary_node(Operator, Left, Right, _), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, ResultType, ContextOut) :-
   infer(Left, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, LeftActual, Context1),
   infer(Right, Level, InsideFunction, Environment, TypeEnvironment, Context1, RightActual, Context2),
@@ -312,13 +312,13 @@ infer(binary_node(Operator, Left, Right), Level, InsideFunction, Environment, Ty
   unify(RightActual, RightExpected, Context4, ContextOut).
 
 % A type declaration reached in expression position carries no value.
-infer(type_declaration_node(_, _, _, _), _Level, _InsideFunction, _Environment, _TypeEnvironment,
+infer(type_declaration_node(_, _, _, _, _), _Level, _InsideFunction, _Environment, _TypeEnvironment,
       Context, tuple_type([], closed), Context).
 
 % A definition reached *outside* a sequence position (e.g. as a function
 % argument): it cannot bind anything visible, so it just contributes the
 % type of its value (still honouring any annotation on it).
-infer(definition_node(_Target, Annotation, Value), Level, InsideFunction, Environment,
+infer(definition_node(_Target, Annotation, Value, _), Level, InsideFunction, Environment,
       TypeEnvironment, ContextIn, ValueType, ContextOut) :-
   infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
   apply_annotation(Annotation, ValueType, TypeEnvironment, Level, Context1, ContextOut).
@@ -393,7 +393,7 @@ apply_known(Parameters, Return, Arguments, Level, InsideFunction, Environment, T
 % `_` is a hole: it consumes its parameter but constrains nothing, and that
 % parameter's type becomes (in order) part of the resulting section's domain.
 check_arguments([], [], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], Context).
-check_arguments([placeholder_node | Arguments], [Parameter | Parameters], Level, InsideFunction, Environment, TypeEnvironment,
+check_arguments([placeholder_node(_) | Arguments], [Parameter | Parameters], Level, InsideFunction, Environment, TypeEnvironment,
                 ContextIn, [Parameter | HoleTypes], ContextOut) :- !,
   check_arguments(Arguments, Parameters, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, ContextOut).
 check_arguments([Argument | Arguments], [Parameter | Parameters], Level, InsideFunction, Environment, TypeEnvironment,
@@ -461,7 +461,7 @@ binding_scheme(forward(Scheme), InsideFunction, Name, Scheme) :-
 infer_tuple_members([], _Index, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], [], Context).
 % A spread `..value`: the value must be a record, and its fields are spliced
 % in.  We collect its type to use as the new record's tail (see spread_tail).
-infer_tuple_members([spread_member(Value) | Members], Index, Level,
+infer_tuple_members([spread_member(Value, _) | Members], Index, Level,
                     InsideFunction, Environment, TypeEnvironment, ContextIn,
                     Fields, [SpreadType | SpreadTypes], ContextOut) :-
   infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, SpreadType, Context1),
@@ -470,7 +470,7 @@ infer_tuple_members([spread_member(Value) | Members], Index, Level,
   fresh_unification_variable(Context1, Level, AssertTail, Context2),
   unify(SpreadType, tuple_type([], AssertTail), Context2, Context3),
   infer_tuple_members(Members, Index, Level, InsideFunction, Environment, TypeEnvironment, Context3, Fields, SpreadTypes, ContextOut).
-infer_tuple_members([tuple_member(Mutability, Label, Annotation, Value) | Members], Index, Level,
+infer_tuple_members([tuple_member(Mutability, Label, Annotation, Value, _) | Members], Index, Level,
                     InsideFunction, Environment, TypeEnvironment, ContextIn,
                     [tuple_field(Mutability, Key, ValueType) | Fields], SpreadTypes, ContextOut) :-
   member_key(Label, Index, Key, NextIndex),
@@ -491,9 +491,10 @@ member_key(positional, Index, index(Index), NextIndex) :-
   NextIndex is Index + 1.
 member_key(labeled(Name), Index, label(Name), Index).
 
-% A member access's surface accessor maps directly to a field key.
-accessor_key(label(Name), label(Name)).
-accessor_key(index(Index), index(Index)).
+% A member access's surface accessor (which carries a span) maps to a field
+% key (the internal tuple-field key, which does not).
+accessor_key(label(Name, _), label(Name)).
+accessor_key(index(Index, _), index(Index)).
 
 % Reject a tuple that labels two members with the same name.
 check_unique_labels([], _).
@@ -508,7 +509,7 @@ check_unique_labels([tuple_field(_, label(Name), _) | Fields], Seen) :-
 % Collect call-argument types in order; a placeholder `_` contributes a fresh
 % variable to BOTH the argument list and the (ordered) hole list.
 infer_call_arguments([], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], [], Context).
-infer_call_arguments([placeholder_node | Arguments], Level, InsideFunction, Environment, TypeEnvironment,
+infer_call_arguments([placeholder_node(_) | Arguments], Level, InsideFunction, Environment, TypeEnvironment,
                      ContextIn, [HoleType | ArgumentTypes], [HoleType | HoleTypes], ContextOut) :- !,
   fresh_unification_variable(ContextIn, Level, HoleType, Context1),
   infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ArgumentTypes, HoleTypes, ContextOut).
@@ -533,7 +534,7 @@ infer_each([E | Es], Level, InsideFunction, Environment, TypeEnvironment, Contex
 % bind the parameter's variables (a plain identifier just binds the whole
 % parameter; a record pattern destructures it).
 bind_parameters([], _Level, _TypeEnvironment, Environment, Context, [], Environment, Context).
-bind_parameters([parameter_node(Pattern, Annotation) | Parameters], Level,
+bind_parameters([parameter_node(Pattern, Annotation, _) | Parameters], Level,
                 TypeEnvironment, Environment, ContextIn,
                 [ParameterType | ParameterTypes], EnvironmentOut, ContextOut) :-
   fresh_unification_variable(ContextIn, Level, ParameterType, Context1),
@@ -547,7 +548,7 @@ bind_parameters([parameter_node(Pattern, Annotation) | Parameters], Level,
 % ---------------------------------------------------------------------------
 
 infer_match_arms([], _ScrutineeType, _ResultType, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context).
-infer_match_arms([match_arm(Pattern, Guard, Result) | Arms], ScrutineeType, ResultType, Level,
+infer_match_arms([match_arm(Pattern, Guard, Result, _Span) | Arms], ScrutineeType, ResultType, Level,
                  InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
   type_pattern(Pattern, ScrutineeType, Level, TypeEnvironment, Environment, ContextIn, ArmEnvironment, Context1),
   apply_guard(Guard, Level, InsideFunction, ArmEnvironment, TypeEnvironment, Context1, Context2),
@@ -565,20 +566,22 @@ apply_guard(guard(Expression), Level, InsideFunction, Environment, TypeEnvironme
 % Expand each arm's alternative patterns into separate single-pattern arms
 % (each `match_arm(Pattern, Guard, Result)`) sharing the guard and result.
 desugar_arms([], []).
-desugar_arms([match_arm(Patterns, Guard, Result) | Rest], Arms) :-
-  desugar_alternatives(Patterns, Guard, Result, ArmsHead),
+desugar_arms([match_arm(Patterns, Guard, Result, Span) | Rest], Arms) :-
+  desugar_alternatives(Patterns, Guard, Result, Span, ArmsHead),
   desugar_arms(Rest, ArmsTail),
   append(ArmsHead, ArmsTail, Arms).
 
-desugar_alternatives([], _Guard, _Result, []).
-desugar_alternatives([Pattern | Patterns], Guard, Result, [match_arm(Pattern, Guard, Result) | Rest]) :-
-  desugar_alternatives(Patterns, Guard, Result, Rest).
+% Each desugared single-pattern arm keeps the original arm's span, so a later
+% error (type mismatch, non-exhaustiveness) can still be located at the arm.
+desugar_alternatives([], _Guard, _Result, _Span, []).
+desugar_alternatives([Pattern | Patterns], Guard, Result, Span, [match_arm(Pattern, Guard, Result, Span) | Rest]) :-
+  desugar_alternatives(Patterns, Guard, Result, Span, Rest).
 
 % Every alternative of an or-pattern must bind exactly the same set of
 % variables, so the shared body sees a consistent binding regardless of which
 % alternative matched.
 check_or_pattern_bindings([]).
-check_or_pattern_bindings([match_arm(Patterns, _Guard, _Result) | Rest]) :-
+check_or_pattern_bindings([match_arm(Patterns, _Guard, _Result, _Span) | Rest]) :-
   ( Patterns = [_] ->
       true
   ; Patterns = [First | Others],
@@ -598,12 +601,12 @@ require_same_bindings([Pattern | Patterns], Set) :-
   ).
 
 % The variables a pattern binds.
-pattern_variables(wildcard_pattern, []).
-pattern_variables(binding_pattern(Name), [Name]).
-pattern_variables(literal_pattern(_), []).
-pattern_variables(constructor_pattern(_Name, SubPatterns), Variables) :-
+pattern_variables(wildcard_pattern(_), []).
+pattern_variables(binding_pattern(Name, _), [Name]).
+pattern_variables(literal_pattern(_, _), []).
+pattern_variables(constructor_pattern(_Name, SubPatterns, _), Variables) :-
   patterns_variables(SubPatterns, Variables).
-pattern_variables(record_pattern(Members), Variables) :-
+pattern_variables(record_pattern(Members, _), Variables) :-
   member_patterns_variables(Members, Variables).
 
 patterns_variables([], []).
@@ -613,11 +616,11 @@ patterns_variables([Pattern | Patterns], Variables) :-
   append(Head, Tail, Variables).
 
 member_patterns_variables([], []).
-member_patterns_variables([positional_member_pattern(SubPattern) | Members], Variables) :-
+member_patterns_variables([positional_member_pattern(SubPattern, _) | Members], Variables) :-
   pattern_variables(SubPattern, Head),
   member_patterns_variables(Members, Tail),
   append(Head, Tail, Variables).
-member_patterns_variables([labeled_member_pattern(_Name, SubPattern) | Members], Variables) :-
+member_patterns_variables([labeled_member_pattern(_Name, SubPattern, _) | Members], Variables) :-
   pattern_variables(SubPattern, Head),
   member_patterns_variables(Members, Tail),
   append(Head, Tail, Variables).
@@ -641,14 +644,14 @@ check_exhaustiveness(Arms, ScrutineeType, TypeEnvironment, Context) :-
   ; true
   ).
 
-has_catch_all([match_arm(Pattern, no_guard, _Result) | _]) :-
-  ( Pattern = wildcard_pattern ; Pattern = binding_pattern(_) ),
+has_catch_all([match_arm(Pattern, no_guard, _Result, _Span) | _]) :-
+  ( Pattern = wildcard_pattern(_) ; Pattern = binding_pattern(_, _) ),
   !.
 has_catch_all([_ | Arms]) :-
   has_catch_all(Arms).
 
 covered_constructors([], []).
-covered_constructors([match_arm(constructor_pattern(Name, _), no_guard, _) | Arms], [Name | Covered]) :- !,
+covered_constructors([match_arm(constructor_pattern(Name, _, _), no_guard, _, _) | Arms], [Name | Covered]) :- !,
   covered_constructors(Arms, Covered).
 covered_constructors([_ | Arms], Covered) :-
   covered_constructors(Arms, Covered).
@@ -665,16 +668,16 @@ missing_constructors([Name | Names], Covered, Missing) :-
 %
 % Constrain `ExpectedType` to match `Pattern`, extending the environment with
 % the pattern's bindings (monomorphic).
-type_pattern(wildcard_pattern, _ExpectedType, _Level, _TypeEnvironment, Environment, Context, Environment, Context).
-type_pattern(binding_pattern(Name), ExpectedType, _Level, _TypeEnvironment, EnvironmentIn, Context, EnvironmentOut, Context) :-
+type_pattern(wildcard_pattern(_), _ExpectedType, _Level, _TypeEnvironment, Environment, Context, Environment, Context).
+type_pattern(binding_pattern(Name, _), ExpectedType, _Level, _TypeEnvironment, EnvironmentIn, Context, EnvironmentOut, Context) :-
   monomorphic_type_scheme(ExpectedType, Scheme),
   put_assoc(Name, EnvironmentIn, defined(Scheme), EnvironmentOut).
-type_pattern(literal_pattern(Node), ExpectedType, _Level, _TypeEnvironment, Environment, ContextIn, Environment, ContextOut) :-
+type_pattern(literal_pattern(Node, _), ExpectedType, _Level, _TypeEnvironment, Environment, ContextIn, Environment, ContextOut) :-
   literal_type(Node, LiteralType),
   unify(ExpectedType, LiteralType, ContextIn, ContextOut).
 % A constructor pattern: the scrutinee must be the constructor's union type,
 % and each sub-pattern matches the corresponding field type.
-type_pattern(constructor_pattern(CtorName, SubPatterns), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
+type_pattern(constructor_pattern(CtorName, SubPatterns, _), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
   instantiate_constructor(CtorName, TypeEnvironment, Level, ContextIn, UnionType, FieldTypes, Context1),
   ( same_length(SubPatterns, FieldTypes) ->
       true
@@ -682,13 +685,13 @@ type_pattern(constructor_pattern(CtorName, SubPatterns), ExpectedType, Level, Ty
   ),
   unify(ExpectedType, UnionType, Context1, Context2),
   type_pattern_each(SubPatterns, FieldTypes, Level, TypeEnvironment, EnvironmentIn, Context2, EnvironmentOut, ContextOut).
-type_pattern(record_pattern(Members), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
+type_pattern(record_pattern(Members, _), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
   type_pattern_members(Members, 0, Level, TypeEnvironment, EnvironmentIn, ContextIn, Fields, EnvironmentOut, Context1),
   unify(ExpectedType, tuple_type(Fields, closed), Context1, ContextOut).
 
-literal_type(number_node(_), number).
-literal_type(boolean_node(_), boolean).
-literal_type(string_node(_), string).
+literal_type(number_node(_, _), number).
+literal_type(boolean_node(_, _), boolean).
+literal_type(string_node(_, _), string).
 
 % Match a list of sub-patterns against a list of (field) types in order.
 type_pattern_each([], [], _Level, _TypeEnvironment, Environment, Context, Environment, Context).
@@ -700,14 +703,14 @@ type_pattern_each([Pattern | Patterns], [Type | Types], Level, TypeEnvironment, 
 % type the sub-pattern is then matched against.  Positional members consume an
 % index; labeled members do not.  The pattern record is closed (exact).
 type_pattern_members([], _Index, _Level, _TypeEnvironment, Environment, Context, [], Environment, Context).
-type_pattern_members([positional_member_pattern(SubPattern) | Members], Index, Level, TypeEnvironment, EnvironmentIn, ContextIn,
+type_pattern_members([positional_member_pattern(SubPattern, _) | Members], Index, Level, TypeEnvironment, EnvironmentIn, ContextIn,
                      [tuple_field(Mutability, index(Index), FieldType) | Fields], EnvironmentOut, ContextOut) :-
   fresh_unification_variable(ContextIn, Level, Mutability, Context1),
   fresh_unification_variable(Context1, Level, FieldType, Context2),
   type_pattern(SubPattern, FieldType, Level, TypeEnvironment, EnvironmentIn, Context2, Environment1, Context3),
   Index1 is Index + 1,
   type_pattern_members(Members, Index1, Level, TypeEnvironment, Environment1, Context3, Fields, EnvironmentOut, ContextOut).
-type_pattern_members([labeled_member_pattern(Name, SubPattern) | Members], Index, Level, TypeEnvironment, EnvironmentIn, ContextIn,
+type_pattern_members([labeled_member_pattern(Name, SubPattern, _) | Members], Index, Level, TypeEnvironment, EnvironmentIn, ContextIn,
                      [tuple_field(Mutability, label(Name), FieldType) | Fields], EnvironmentOut, ContextOut) :-
   fresh_unification_variable(ContextIn, Level, Mutability, Context1),
   fresh_unification_variable(Context1, Level, FieldType, Context2),

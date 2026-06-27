@@ -12,7 +12,7 @@
     `Math.Option`, `Math.Some`, ... -- without naming them one by one.  The
     namespace is the imported file's base name.
 
-    Unlike nested modules (resolved entirely intra-file by `module_expander`),
+    Unlike nested modules (resolved entirely intra-file by the module transformation (`transformation/module.pl`)),
     this needs the dependency's compiled INTERFACE -- which member names exist,
     and their types -- so it runs in the module loader, after the dependency is
     analysed.
@@ -220,18 +220,21 @@ prefix_mono_fields([tuple_field(Mut, Key, Type) | Rest], Exported, Namespace,
 % ---------------------------------------------------------------------------
 
 collapse_namespace_access(Term, Bases, Members, Output) :-
-  ( Term = access_node(_, _),
-    flatten_access(Term, identifier_node(Name), Accessors),
+  ( Term = access_node(_, _, FullSpan),
+    flatten_access(Term, identifier_node(Name, _), Accessors),
     memberchk(Name, Bases)
   ->
-    collapse_path(Name, Accessors, Members, Output)
+    collapse_path(Name, Accessors, Members, FullSpan, Output)
   ; generic_map(collapse_namespace_access(_, Bases, Members, _), Term, Output)
   ).
 
-collapse_path(Prefix, Accessors, Members, Output) :-
+% The collapsed identifier (and any rebuilt trailing field access) reuses the
+% whole access expression's span (`FullSpan`); per-link spans are lost in
+% flattening, but the chain is one source expression.
+collapse_path(Prefix, Accessors, Members, FullSpan, Output) :-
   longest_member(Prefix, Accessors, Members, MemberName, Rest),
   canonical_chars(MemberName, CanonicalName),
-  rebuild_access(identifier_node(CanonicalName), Rest, Output).
+  rebuild_access(identifier_node(CanonicalName, FullSpan), Rest, FullSpan, Output).
 
 % Find the longest label-prefix of `Accessors` that, joined onto `Prefix`, is a
 % known member name.  Falls back to consuming the first label (so an unknown
@@ -239,7 +242,7 @@ collapse_path(Prefix, Accessors, Members, Output) :-
 longest_member(Prefix, Accessors, Members, MemberName, Rest) :-
   longest_member(Prefix, Accessors, Members, none, MemberName, Rest).
 
-longest_member(Current, [label(Label) | More], Members, Best, MemberName, Rest) :-
+longest_member(Current, [label(Label, _) | More], Members, Best, MemberName, Rest) :-
   !,
   append(Current, ['.' | Label], Candidate),
   ( memberchk(Candidate, Members) ->
@@ -258,11 +261,11 @@ longest_member(Current, [], _Members, none, Current, []).
 % ---------------------------------------------------------------------------
 
 rewrite_constructor_tags(Term, Map, Output) :-
-  ( Term = constructor_pattern(Name, SubPatterns)
+  ( Term = constructor_pattern(Name, SubPatterns, Span)
   ->
     ( memberchk(Name - Foreign, Map) -> Name1 = Foreign ; Name1 = Name ),
     rewrite_constructor_tags_list(SubPatterns, Map, SubPatterns1),
-    Output = constructor_pattern(Name1, SubPatterns1)
+    Output = constructor_pattern(Name1, SubPatterns1, Span)
   ; generic_map(rewrite_constructor_tags(_, Map, _), Term, Output)
   ).
 
@@ -275,14 +278,14 @@ rewrite_constructor_tags_list([P | Ps], Map, [P1 | Ps1]) :-
 % Shared helpers
 % ---------------------------------------------------------------------------
 
-flatten_access(access_node(Target, Accessor), Base, Accessors) :- !,
+flatten_access(access_node(Target, Accessor, _Span), Base, Accessors) :- !,
   flatten_access(Target, Base, Inner),
   append(Inner, [Accessor], Accessors).
 flatten_access(Node, Node, []).
 
-rebuild_access(Base, [], Base).
-rebuild_access(Base, [Accessor | Rest], Output) :-
-  rebuild_access(access_node(Base, Accessor), Rest, Output).
+rebuild_access(Base, [], _Span, Base).
+rebuild_access(Base, [Accessor | Rest], Span, Output) :-
+  rebuild_access(access_node(Base, Accessor, Span), Rest, Span, Output).
 
 % Apply a 4-arg rewrite goal (with the first/last args as the per-subterm
 % in/out holes) to every immediate argument of a compound term, leaving atomic

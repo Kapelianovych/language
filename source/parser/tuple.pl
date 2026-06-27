@@ -14,7 +14,8 @@
     irrelevant.  Positional members are bare expressions and their relative
     order is significant.
 
-    Produced AST:
+    Produced AST (each node additionally carries a trailing `span(Start, End)`
+    of source offsets as its last argument -- see `parser/position.pl`):
 
         tuple_node(Members)
 
@@ -36,15 +37,19 @@
   separator//0,
   separators//0
 ]).
+:- use_module(position, [here//1, span_between/3]).
 
 :- meta_predicate(tuple(2, ?, ?, ?)).
 
-tuple(ExpressionFunctor, tuple_node(Members)) -->
+tuple(ExpressionFunctor, tuple_node(Members, Span)) -->
+  here(Start),
   "(",
   separators,
   tuple_members(ExpressionFunctor, Members),
   separators,
-  ")".
+  ")",
+  here(End),
+  { span_between(Start, End, Span) }.
 
 tuple_members(_, []) --> [].
 tuple_members(ExpressionFunctor, [Member | Members]) -->
@@ -65,19 +70,25 @@ tuple_member(ExpressionFunctor, Member) -->
   spread_member(ExpressionFunctor, Member)
   | plain_member(ExpressionFunctor, Member).
 
-spread_member(ExpressionFunctor, spread_member(Value)) -->
+spread_member(ExpressionFunctor, spread_member(Value, Span)) -->
+  here(Start),
   "..",
-  phrase(ExpressionFunctor, Value).
+  phrase(ExpressionFunctor, Value),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 % Labeled is tried first: it only commits once it has seen the `=`.
-plain_member(ExpressionFunctor, tuple_member(Mutability, Label, TypeAnnotation, Value)) -->
+plain_member(ExpressionFunctor, tuple_member(Mutability, Label, TypeAnnotation, Value, Span)) -->
+  here(Start),
   mutability(Mutability),
   (   labeled_member(ExpressionFunctor, Label, TypeAnnotation, Value)
   |   positional_member(ExpressionFunctor, Label, TypeAnnotation, Value)
-  ).
+  ),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 labeled_member(ExpressionFunctor, labeled(Name), TypeAnnotation, Value) -->
-  identifier(identifier_node(Name)),
+  identifier(identifier_node(Name, _)),
   type_annotation(TypeAnnotation),
   separators,
   "=",

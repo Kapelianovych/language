@@ -70,8 +70,8 @@ build_type_environment(program_node(Expressions), InitialEnvironment, TypeEnviro
   build_constructor_bindings(Declarations, TypeEnvironment, ConstructorBindings).
 
 collect_declarations([], []).
-collect_declarations([type_declaration_node(Name, Parameters, Opacity, Body) | Rest],
-                     [type_declaration_node(Name, Parameters, Opacity, Body) | Declarations]) :- !,
+collect_declarations([type_declaration_node(Name, Parameters, Opacity, Body, _) | Rest],
+                     [type_declaration_node(Name, Parameters, Opacity, Body, _) | Declarations]) :- !,
   collect_declarations(Rest, Declarations).
 collect_declarations([_ | Rest], Declarations) :-
   collect_declarations(Rest, Declarations).
@@ -79,13 +79,13 @@ collect_declarations([_ | Rest], Declarations) :-
 register_declarations([], Environment, Environment).
 % A tagged-union declaration: register the (nominal) type AND each of its
 % constructors (so they can be looked up for construction and matching).
-register_declarations([type_declaration_node(Name, Parameters, _Opacity, variant_body(Constructors)) | Rest],
+register_declarations([type_declaration_node(Name, Parameters, _Opacity, variant_body(Constructors), _) | Rest],
                       EnvironmentIn, EnvironmentOut) :- !,
   register_type_name(Name, Parameters, EnvironmentIn),
   put_assoc(Name, EnvironmentIn, type_variant_info(Parameters, Constructors), Environment1),
   register_constructors(Constructors, Name, Parameters, Environment1, Environment2),
   register_declarations(Rest, Environment2, EnvironmentOut).
-register_declarations([type_declaration_node(Name, Parameters, Opacity, Body) | Rest],
+register_declarations([type_declaration_node(Name, Parameters, Opacity, Body, _) | Rest],
                       EnvironmentIn, EnvironmentOut) :-
   register_type_name(Name, Parameters, EnvironmentIn),
   put_assoc(Name, EnvironmentIn, type_declaration_info(Opacity, Parameters, Body), Environment1),
@@ -105,7 +105,7 @@ register_type_name(Name, Parameters, Environment) :-
 % Constructors live under a distinct `constructor_key/1` namespace, so a
 % constructor may share its type's name (e.g. `type Box = Box(number)`).
 register_constructors([], _Union, _Parameters, Environment, Environment).
-register_constructors([constructor(CtorName, FieldTypes) | Rest], Union, Parameters,
+register_constructors([constructor(CtorName, FieldTypes, _) | Rest], Union, Parameters,
                       EnvironmentIn, EnvironmentOut) :-
   ( get_assoc(constructor_key(CtorName), EnvironmentIn, _) ->
       throw(analysis_error(duplicate_constructor(CtorName)))
@@ -118,12 +118,12 @@ register_constructors([constructor(CtorName, FieldTypes) | Rest], Union, Paramet
 % fresh variables it mints are discarded).  Marking the declaration's own
 % name as being expanded catches structural self-cycles.
 validate_declarations([], _).
-validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, variant_body(Constructors)) | Rest], TypeEnvironment) :- !,
+validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, variant_body(Constructors), _) | Rest], TypeEnvironment) :- !,
   empty_context(Context0),
   bind_validation_parameters(Parameters, TypeEnvironment, Context0, ValidationEnvironment, Context1),
   validate_constructor_fields(Constructors, ValidationEnvironment, Context1),
   validate_declarations(Rest, TypeEnvironment).
-validate_declarations([type_declaration_node(Name, Parameters, _Opacity, Body) | Rest], TypeEnvironment) :-
+validate_declarations([type_declaration_node(Name, Parameters, _Opacity, Body, _) | Rest], TypeEnvironment) :-
   empty_context(Context0),
   bind_validation_parameters(Parameters, TypeEnvironment, Context0, ValidationEnvironment, Context1),
   % The body may be higher-kinded (an alias bound to a SECTION), so do not
@@ -133,7 +133,7 @@ validate_declarations([type_declaration_node(Name, Parameters, _Opacity, Body) |
   validate_declarations(Rest, TypeEnvironment).
 
 validate_constructor_fields([], _Environment, _Context).
-validate_constructor_fields([constructor(_Name, FieldTypes) | Rest], Environment, ContextIn) :-
+validate_constructor_fields([constructor(_Name, FieldTypes, _) | Rest], Environment, ContextIn) :-
   convert_field_types(FieldTypes, Environment, 0, ContextIn, _ConvertedFields, Context1),
   validate_constructor_fields(Rest, Environment, Context1).
 
@@ -152,7 +152,7 @@ convert_field_types([FieldExpression | Rest], Environment, Level, ContextIn, [Fi
 % forall p1..pk. (t1 .. tn) -> U<p1 .. pk>; a nullary constructor is just a
 % value of type U<p1 .. pk>.
 build_constructor_bindings([], _TypeEnvironment, []).
-build_constructor_bindings([type_declaration_node(Name, Parameters, _Opacity, variant_body(Constructors)) | Rest],
+build_constructor_bindings([type_declaration_node(Name, Parameters, _Opacity, variant_body(Constructors), _) | Rest],
                            TypeEnvironment, Bindings) :- !,
   constructor_schemes(Constructors, Name, Parameters, TypeEnvironment, ThisBindings),
   build_constructor_bindings(Rest, TypeEnvironment, RestBindings),
@@ -161,7 +161,7 @@ build_constructor_bindings([_ | Rest], TypeEnvironment, Bindings) :-
   build_constructor_bindings(Rest, TypeEnvironment, Bindings).
 
 constructor_schemes([], _Union, _Parameters, _TypeEnvironment, []).
-constructor_schemes([constructor(CtorName, FieldExpressions) | Rest], Union, Parameters, TypeEnvironment,
+constructor_schemes([constructor(CtorName, FieldExpressions, _) | Rest], Union, Parameters, TypeEnvironment,
                     [CtorName - Scheme | Schemes]) :-
   constructor_scheme(Union, Parameters, FieldExpressions, TypeEnvironment, Scheme),
   constructor_schemes(Rest, Union, Parameters, TypeEnvironment, Schemes).
@@ -179,7 +179,7 @@ constructor_scheme(Union, Parameters, FieldExpressions, TypeEnvironment, type_sc
 % Bind each parameter to `quantified_variable(Index)` (the scheme's bound
 % variables) and collect those variables and their ids.
 quantified_parameter_scope([], _Index, Environment, Environment, [], []).
-quantified_parameter_scope([type_parameter(Name, Kind, _Bound) | Rest], Index, EnvironmentIn, EnvironmentOut,
+quantified_parameter_scope([type_parameter(Name, Kind, _Bound, _) | Rest], Index, EnvironmentIn, EnvironmentOut,
                            [quantified_variable(Index) | Variables], [Index | Ids]) :-
   put_assoc(Name, EnvironmentIn, type_parameter_binding(quantified_variable(Index), Kind), Environment1),
   Index1 is Index + 1,
@@ -198,7 +198,7 @@ instantiate_constructor(CtorName, TypeEnvironment, Level, ContextIn, UnionType, 
   ).
 
 fresh_parameter_scope([], Environment, _Level, Context, Environment, [], Context).
-fresh_parameter_scope([type_parameter(Name, Kind, _Bound) | Rest], EnvironmentIn, Level, ContextIn,
+fresh_parameter_scope([type_parameter(Name, Kind, _Bound, _) | Rest], EnvironmentIn, Level, ContextIn,
                       EnvironmentOut, [Fresh | Variables], ContextOut) :-
   fresh_unification_variable(ContextIn, Level, Fresh, Context1),
   put_assoc(Name, EnvironmentIn, type_parameter_binding(Fresh, Kind), Environment1),
@@ -207,12 +207,12 @@ fresh_parameter_scope([type_parameter(Name, Kind, _Bound) | Rest], EnvironmentIn
 %% union_constructor_names(+UnionName, +TypeEnvironment, -Names).
 union_constructor_names(UnionName, TypeEnvironment, Names) :-
   get_assoc(UnionName, TypeEnvironment, type_variant_info(_Parameters, Constructors)),
-  findall(Name, member(constructor(Name, _Fields), Constructors), Names).
+  findall(Name, member(constructor(Name, _Fields, _), Constructors), Names).
 
 % Bind each parameter to a fresh placeholder for validation, after checking
 % its bound is itself well-formed.
 bind_validation_parameters([], Environment, Context, Environment, Context).
-bind_validation_parameters([type_parameter(Name, Kind, Bound) | Rest], EnvironmentIn, ContextIn,
+bind_validation_parameters([type_parameter(Name, Kind, Bound, _) | Rest], EnvironmentIn, ContextIn,
                            EnvironmentOut, ContextOut) :-
   validate_bound(Bound, EnvironmentIn, ContextIn, Context1),
   fresh_unification_variable(Context1, 0, Placeholder, Context2),
@@ -228,7 +228,7 @@ validate_bound(bound(BoundExpression), Environment, ContextIn, ContextOut) :-
 % carrying its declared kind.  A bound, if written, is checked well-formed (a
 % later parameter's bound may mention an earlier one), as in declarations.
 bind_quantifier_parameters([], Environment, Context, Environment, [], Context).
-bind_quantifier_parameters([type_parameter(Name, Kind, Bound) | Rest], EnvironmentIn, ContextIn,
+bind_quantifier_parameters([type_parameter(Name, Kind, Bound, _) | Rest], EnvironmentIn, ContextIn,
                            EnvironmentOut, [Id | Ids], ContextOut) :-
   validate_bound(Bound, EnvironmentIn, ContextIn, Context1),
   fresh_bound_id(Context1, Id, Context2),
@@ -246,7 +246,7 @@ bind_quantifier_parameters([type_parameter(Name, Kind, Bound) | Rest], Environme
 % (e.g. an open record), so references to the parameter carry the bound.
 % A later parameter's bound may mention an earlier one.
 bind_type_parameters([], Environment, _Level, Context, Environment, Context).
-bind_type_parameters([type_parameter(Name, Kind, Bound) | Rest], EnvironmentIn, Level, ContextIn,
+bind_type_parameters([type_parameter(Name, Kind, Bound, _) | Rest], EnvironmentIn, Level, ContextIn,
                      EnvironmentOut, ContextOut) :-
   parameter_monotype(Kind, Bound, EnvironmentIn, Level, ContextIn, MonoType, Context1),
   put_assoc(Name, EnvironmentIn, type_parameter_binding(MonoType, Kind), Environment1),
@@ -292,24 +292,24 @@ convert_proper_each([TypeExpression | Rest], Environment, Expanding, Level, Cont
 % A bare hole `_` is only meaningful as a partial-application argument, where
 % `build_reference` consumes it directly; reaching ordinary conversion means it
 % was written somewhere it cannot be interpreted.
-convert_type(type_hole, _Environment, _Expanding, _Level, _ContextIn, _MonoType, _Kind, _ContextOut) :- !,
+convert_type(type_hole(_), _Environment, _Expanding, _Level, _ContextIn, _MonoType, _Kind, _ContextOut) :- !,
   throw(analysis_error(unexpected_type_hole)).
-convert_type(tuple_type_node(Members, Openness), Environment, Expanding, Level, ContextIn,
+convert_type(tuple_type_node(Members, Openness, _), Environment, Expanding, Level, ContextIn,
              tuple_type(Fields, Tail), 0, ContextOut) :- !,
   convert_members(Members, 0, Environment, Expanding, Level, ContextIn, Fields, Context1),
   tail_for(Openness, Environment, Level, Context1, Tail, ContextOut).
-convert_type(function_type_node(Parameters, Return), Environment, Expanding, Level, ContextIn,
+convert_type(function_type_node(Parameters, Return, _), Environment, Expanding, Level, ContextIn,
              function_type(ParameterTypes, ReturnType), 0, ContextOut) :- !,
   convert_proper_each(Parameters, Environment, Expanding, Level, ContextIn, ParameterTypes, Context1),
   convert_proper(Return, Environment, Expanding, Level, Context1, ReturnType, ContextOut).
 % A quantified type `<A ..> Body` is a proper (kind-0) POLYTYPE.  Each
 % quantifier parameter is bound to a fresh `quantified_variable` so it appears
 % bound in the converted body; the result is a `forall_type`.
-convert_type(quantified_type_node(Parameters, Body), Environment, Expanding, Level, ContextIn,
+convert_type(quantified_type_node(Parameters, Body, _), Environment, Expanding, Level, ContextIn,
              forall_type(BoundIds, BodyType), 0, ContextOut) :- !,
   bind_quantifier_parameters(Parameters, Environment, ContextIn, ScopeEnvironment, BoundIds, Context1),
   convert_proper(Body, ScopeEnvironment, Expanding, Level, Context1, BodyType, ContextOut).
-convert_type(type_name_node(Name, Arguments), Environment, Expanding, Level, ContextIn,
+convert_type(type_name_node(Name, Arguments, _), Environment, Expanding, Level, ContextIn,
              MonoType, Kind, ContextOut) :-
   ( builtin_type(Name, BaseType) ->
       require_no_arguments(Name, Arguments),
@@ -439,9 +439,9 @@ fill_positions([ParameterKind | ParameterKinds], Arguments, Environment, Expandi
                [Slot | Slots], AbstractedIds, ContextOut) :-
   ( Arguments = [Argument | RestArguments] ->
       true
-  ; Argument = type_hole, RestArguments = []        % trailing positions abstract
+  ; Argument = type_hole(synthetic), RestArguments = []  % trailing positions abstract
   ),
-  ( Argument == type_hole ->
+  ( Argument = type_hole(_) ->
       require_proper_hole_position(ParameterKind),
       fresh_bound_id(ContextIn, Id, Context1),
       Slot = quantified_variable(Id),
@@ -485,7 +485,7 @@ apply_alias_extra([Argument | Arguments], BodyMono, BodyKind, Environment, Expan
   ).
 
 has_hole(Arguments) :-
-  memberchk(type_hole, Arguments).
+  memberchk(type_hole(_), Arguments).
 
 zeros(0, []) :- !.
 zeros(N, [0 | Rest]) :-
@@ -511,7 +511,7 @@ convert_arguments([Argument | Arguments], [ExpectedKind | Kinds], Environment, E
   convert_arguments(Arguments, Kinds, Environment, Expanding, Level, Context1, Monos, ContextOut).
 
 parameter_kinds([], []).
-parameter_kinds([type_parameter(_, Kind, _) | Rest], [Kind | Kinds]) :-
+parameter_kinds([type_parameter(_, Kind, _, _) | Rest], [Kind | Kinds]) :-
   parameter_kinds(Rest, Kinds).
 
 parameter_arity(Parameters, Arity) :-
@@ -519,17 +519,17 @@ parameter_arity(Parameters, Arity) :-
 
 % Bounds (only on proper-kind parameters) are proper types.
 enforce_bounds([], [], _Environment, _Level, Context, Context).
-enforce_bounds([type_parameter(_, _Kind, no_bound) | Parameters], [_Argument | Arguments], Environment,
+enforce_bounds([type_parameter(_, _Kind, no_bound, _) | Parameters], [_Argument | Arguments], Environment,
                Level, ContextIn, ContextOut) :-
   enforce_bounds(Parameters, Arguments, Environment, Level, ContextIn, ContextOut).
-enforce_bounds([type_parameter(_, _Kind, bound(BoundExpression)) | Parameters], [Argument | Arguments],
+enforce_bounds([type_parameter(_, _Kind, bound(BoundExpression), _) | Parameters], [Argument | Arguments],
                Environment, Level, ContextIn, ContextOut) :-
   convert_proper(BoundExpression, Environment, [], Level, ContextIn, BoundType, Context1),
   unify(Argument, BoundType, Context1, Context2),
   enforce_bounds(Parameters, Arguments, Environment, Level, Context2, ContextOut).
 
 bind_alias_parameters([], [], Environment, Environment).
-bind_alias_parameters([type_parameter(Name, Kind, _Bound) | Parameters], [Argument | Arguments],
+bind_alias_parameters([type_parameter(Name, Kind, _Bound, _) | Parameters], [Argument | Arguments],
                       EnvironmentIn, EnvironmentOut) :-
   put_assoc(Name, EnvironmentIn, type_parameter_binding(Argument, Kind), Environment1),
   bind_alias_parameters(Parameters, Arguments, Environment1, EnvironmentOut).
@@ -537,7 +537,7 @@ bind_alias_parameters([type_parameter(Name, Kind, _Bound) | Parameters], [Argume
 % A tuple type's members become keyed fields: positional members get
 % sequential `index` keys, labeled members get `label` keys.
 convert_members([], _Index, _Environment, _Expanding, _Level, Context, [], Context).
-convert_members([tuple_type_member(Mutability, Label, TypeExpression) | Members], Index,
+convert_members([tuple_type_member(Mutability, Label, TypeExpression, _) | Members], Index,
                 Environment, Expanding, Level, ContextIn,
                 [tuple_field(Mutability, Key, Type) | Fields], ContextOut) :-
   type_member_key(Label, Index, Key, NextIndex),
@@ -557,7 +557,7 @@ builtin_type("boolean", boolean).
 builtin_type("string", string).
 
 parameter_names([], []).
-parameter_names([type_parameter(Name, _Kind, _Bound) | Parameters], [Name | Names]) :-
+parameter_names([type_parameter(Name, _Kind, _Bound, _) | Parameters], [Name | Names]) :-
   parameter_names(Parameters, Names).
 
 has_duplicate([Element | Rest]) :-

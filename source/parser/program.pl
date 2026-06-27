@@ -54,7 +54,7 @@
             REST OF THIS FILE (as `Math.member`), not export across files.  A
             module is a compile-time namespace: it is not a value, has no type,
             and cannot be passed around.  The whole construct is erased before
-            type-checking by `module_expander.pl`, which lifts each member to a
+            type-checking by `transformation/module.pl`, which lifts each member to a
             top-level definition under a qualified name (`Math.add`) and
             rewrites references accordingly.
 
@@ -76,7 +76,12 @@
 :- use_module(expression, [expression//1]).
 :- use_module(type_expression, [type_expression//1]).
 :- use_module(whitespace, [is_whitespace/1]).
+:- use_module(position, [here//1, span_between/3]).
 
+% `program_node` deliberately keeps arity 1 (no span): a whole-file span is just
+% `span(0, FileLength)` if ever needed, and adding one here would ripple through
+% every program-level consumer (loader, analyser, generator, transformations)
+% for no tooling benefit.  Every ITEM inside carries its own span.
 program(program_node(Items)) -->
   separators,
   program_tail(Items).
@@ -106,18 +111,23 @@ program_item(Item) -->
 % public items are reached as `math.a`, `math.Option`, `math.Some`, etc.  The
 % two forms share the path prefix and split on whether a `:` follows.
 use_declaration(Node) -->
+  here(Start),
   "use",
   separator, % mandatory: separates the keyword from the path
   separators,
   import_path(Path),
-  use_tail(Path, Node).
+  use_tail(Path, Start, Node).
 
-use_tail(Path, use_node(Path, Names)) -->
+use_tail(Path, Start, use_node(Path, Names, Span)) -->
   separators,
   ":",
   separators,
-  import_names(Names).
-use_tail(Path, use_all_node(Path)) --> [].
+  import_names(Names),
+  here(End),
+  { span_between(Start, End, Span) }.
+use_tail(Path, Start, use_all_node(Path, Span)) -->
+  here(End),
+  { span_between(Start, End, Span) }.
 
 % A relative path is a maximal run of path characters (everything up to the
 % `:` separator or surrounding whitespace).  It carries no `.sl` extension.
@@ -140,7 +150,7 @@ path_character(Character) -->
 import_names(Names) -->
   "(",
   separators,
-  identifier(identifier_node(First)),
+  identifier(identifier_node(First, _)),
   import_names_tail(Rest),
   separators,
   ")",
@@ -149,7 +159,7 @@ import_names(Names) -->
 import_names_tail([Name | Rest]) -->
   separator, % mandatory
   separators,
-  identifier(identifier_node(Name)),
+  identifier(identifier_node(Name, _)),
   import_names_tail(Rest).
 import_names_tail([]) --> [].
 
@@ -161,14 +171,17 @@ import_names_tail([]) --> [].
 % `external` (so a foreign binding can be declared once and re-imported), OR a
 % nested `module` (a public submodule, reachable as `Outer.Inner.member` from
 % outside the enclosing module).
-public_item(public_node(Item)) -->
+public_item(public_node(Item, Span)) -->
+  here(Start),
   "public",
   separator, % mandatory
   separators,
   ( external_declaration(Item)
   | module_declaration(Item)
   | expression(Item)
-  ).
+  ),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 % ---------------------------------------------------------------------------
 % Nested modules:  module Name = ( items )
@@ -176,13 +189,14 @@ public_item(public_node(Item)) -->
 
 % A nested module's body is itself a sequence of `program_item`s (so `use`,
 % `public`, `external`, definitions and further `module`s all nest), delimited
-% by parentheses rather than the program's end-of-input.  `module_expander.pl`
+% by parentheses rather than the program's end-of-input.  `transformation/module.pl`
 % later erases this node, lifting each member to a qualified top-level item.
-module_declaration(module_node(Name, Items)) -->
+module_declaration(module_node(Name, Items, Span)) -->
+  here(Start),
   "module",
   separator, % mandatory: separates the keyword from the name
   separators,
-  identifier(identifier_node(Name)),
+  identifier(identifier_node(Name, _)),
   separators,
   "=",
   separators,
@@ -190,7 +204,9 @@ module_declaration(module_node(Name, Items)) -->
   separators,
   module_items(Items),
   separators,
-  ")".
+  ")",
+  here(End),
+  { span_between(Start, End, Span) }.
 
 % Like `program_tail`, but terminated by the closing `)` instead of
 % end-of-input: at `)` every `program_item` alternative fails, so the cons
@@ -209,17 +225,20 @@ module_items([]) --> [].
 %     external NAME : TYPE = "foreignName" from "module"
 % ---------------------------------------------------------------------------
 
-external_declaration(external_node(Name, Type, Source)) -->
+external_declaration(external_node(Name, Type, Source, Span)) -->
+  here(Start),
   "external",
   separator, % mandatory: separates the keyword from the name
   separators,
-  identifier(identifier_node(Name)),
+  identifier(identifier_node(Name, _)),
   separators,
   ":",
   separators,
   type_expression(Type),
   separators,
-  external_source(Source).
+  external_source(Source),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 % Order matters: the combined `= 'name' from 'module'` form is tried before
 % the bare `= 'expr'` form, so the trailing `from` is not left dangling; the

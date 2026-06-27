@@ -1,6 +1,11 @@
-:- module(module_expander, [expand_modules/2]).
+:- module(module_transformation, [expand_modules/2]).
 
-/*  module_expander.pl  --  Erase nested `module Name = ( ... )` declarations.
+/*  transformation/module.pl  --  Erase nested `module Name = ( ... )` declarations.
+
+    This is one of the compiler's source-to-source TRANSFORMATIONS (see the
+    sibling `transformation/macro.pl`).  A transformation rewrites the parsed
+    AST into a simpler AST before type-checking, so that the downstream stages
+    (analyser, generator) never have to know the higher-level construct existed.
 
     Nested modules are a COMPILE-TIME namespacing construct: a module is not a
     value, has no type, and cannot be passed around.  This pass runs between
@@ -94,31 +99,31 @@ expand_modules(program_node(Items), program_node(Output)) :-
 % Item classification (each succeeds for the bare item and its `public` wrapper)
 % ---------------------------------------------------------------------------
 
-value_binder(definition_node(identifier_node(Name), _, _), Name).
-value_binder(public_node(definition_node(identifier_node(Name), _, _)), Name).
-value_binder(external_node(Name, _, _), Name).
-value_binder(public_node(external_node(Name, _, _)), Name).
+value_binder(definition_node(identifier_node(Name, _), _, _, _), Name).
+value_binder(public_node(definition_node(identifier_node(Name, _), _, _, _), _), Name).
+value_binder(external_node(Name, _, _, _), Name).
+value_binder(public_node(external_node(Name, _, _, _), _), Name).
 
 type_binder(Item, Name, Body) :-
-  ( Item = type_declaration_node(Name, _Parameters, _Opacity, Body)
-  ; Item = public_node(type_declaration_node(Name, _Parameters, _Opacity, Body))
+  ( Item = type_declaration_node(Name, _Parameters, _Opacity, Body, _)
+  ; Item = public_node(type_declaration_node(Name, _Parameters, _Opacity, Body, _), _)
   ).
 
-submodule_binder(module_node(Name, _), Name).
-submodule_binder(public_node(module_node(Name, _)), Name).
+submodule_binder(module_node(Name, _, _), Name).
+submodule_binder(public_node(module_node(Name, _, _), _), Name).
 
-submodule_body(module_node(_, Body), Body).
-submodule_body(public_node(module_node(_, Body)), Body).
+submodule_body(module_node(_, Body, _), Body).
+submodule_body(public_node(module_node(_, Body, _), _), Body).
 
-is_public(public_node(_)).
+is_public(public_node(_, _)).
 
 % The only non-defining item a module body may contain.
-allowed_module_item(use_node(_, _)).
+allowed_module_item(use_node(_, _, _)).
 
 % The constructor names a (variant) type-declaration body introduces.
 body_constructor_names(variant_body(Constructors), Names) :-
   !,
-  findall(Name, member(constructor(Name, _Fields), Constructors), Names).
+  findall(Name, member(constructor(Name, _Fields, _), Constructors), Names).
 body_constructor_names(_OtherBody, []).
 
 % ---------------------------------------------------------------------------
@@ -212,33 +217,33 @@ expand_top_items([Item | Rest], Ctx, Output) :-
   expand_top_items(Rest, Ctx, Items2),
   append(Items1, Items2, Output).
 
-expand_top_item(public_node(module_node(Name, Body)), ctx(_, _, _, MS, _, NS), Output) :- !,
+expand_top_item(public_node(module_node(Name, Body, _), _), ctx(_, _, _, MS, _, NS), Output) :- !,
   expand_module_items([Name], Body, true, [], [], [], MS, NS, Output).
-expand_top_item(module_node(Name, Body), ctx(_, _, _, MS, _, NS), Output) :- !,
+expand_top_item(module_node(Name, Body, _), ctx(_, _, _, MS, _, NS), Output) :- !,
   expand_module_items([Name], Body, false, [], [], [], MS, NS, Output).
-expand_top_item(public_node(definition_node(Id, Ann, Value)), Ctx,
-                [public_node(definition_node(Id, Ann1, Value1))]) :- !,
+expand_top_item(public_node(definition_node(Id, Ann, Value, DSpan), PSpan), Ctx,
+                [public_node(definition_node(Id, Ann1, Value1, DSpan), PSpan)]) :- !,
   rewrite_annotation(Ann, Ctx, Ann1),
   rewrite(Value, Ctx, Value1).
-expand_top_item(definition_node(Id, Ann, Value), Ctx,
-                [definition_node(Id, Ann1, Value1)]) :- !,
+expand_top_item(definition_node(Id, Ann, Value, DSpan), Ctx,
+                [definition_node(Id, Ann1, Value1, DSpan)]) :- !,
   rewrite_annotation(Ann, Ctx, Ann1),
   rewrite(Value, Ctx, Value1).
-expand_top_item(destructuring_node(Pattern, Value), Ctx,
-                [destructuring_node(Pattern, Value1)]) :- !,
+expand_top_item(destructuring_node(Pattern, Value, DSpan), Ctx,
+                [destructuring_node(Pattern, Value1, DSpan)]) :- !,
   rewrite(Value, Ctx, Value1).
-expand_top_item(external_node(N, T, S), Ctx, [external_node(N, T1, S)]) :- !,
+expand_top_item(external_node(N, T, S, ESpan), Ctx, [external_node(N, T1, S, ESpan)]) :- !,
   rewrite_type(T, Ctx, T1).
-expand_top_item(public_node(external_node(N, T, S)), Ctx, [public_node(external_node(N, T1, S))]) :- !,
+expand_top_item(public_node(external_node(N, T, S, ESpan), PSpan), Ctx, [public_node(external_node(N, T1, S, ESpan), PSpan)]) :- !,
   rewrite_type(T, Ctx, T1).
 % Top-level type declarations and `use`s pass through unchanged (a top-level
 % type can reference only top-level / imported types, never an intra-file
 % module type, which would need qualified-type syntax the loader handles).
-expand_top_item(type_declaration_node(A, B, C, D), _Ctx, [type_declaration_node(A, B, C, D)]) :- !.
-expand_top_item(public_node(type_declaration_node(A, B, C, D)), _Ctx,
-                [public_node(type_declaration_node(A, B, C, D))]) :- !.
-expand_top_item(use_node(Path, Names), _Ctx, [use_node(Path, Names)]) :- !.
-expand_top_item(use_all_node(Path), _Ctx, [use_all_node(Path)]) :- !.
+expand_top_item(type_declaration_node(A, B, C, D, Span), _Ctx, [type_declaration_node(A, B, C, D, Span)]) :- !.
+expand_top_item(public_node(type_declaration_node(A, B, C, D, Span), PSpan), _Ctx,
+                [public_node(type_declaration_node(A, B, C, D, Span), PSpan)]) :- !.
+expand_top_item(use_node(Path, Names, Span), _Ctx, [use_node(Path, Names, Span)]) :- !.
+expand_top_item(use_all_node(Path, Span), _Ctx, [use_all_node(Path, Span)]) :- !.
 % Any other top-level item is a bare expression: rewrite it in place.
 expand_top_item(Other, Ctx, [Rewritten]) :-
   rewrite(Other, Ctx, Rewritten).
@@ -266,37 +271,40 @@ expand_module_list([Item | Rest], Exported, Ctx, Output) :-
   append(Items1, Items2, Output).
 
 % A value member -> a top-level definition with a qualified name.
+% The lifted identifier keeps the member's ORIGINAL name span (`NSpan`) and the
+% definition keeps its own span (`DSpan`), so the qualified `Math.add` still
+% points at the source `add`.
 expand_module_item(Item, Exported, Ctx, Output) :-
-  ( Item = definition_node(identifier_node(Name), Ann, Value)
-  ; Item = public_node(definition_node(identifier_node(Name), Ann, Value))
+  ( Item = definition_node(identifier_node(Name, NSpan), Ann, Value, DSpan)
+  ; Item = public_node(definition_node(identifier_node(Name, NSpan), Ann, Value, DSpan), _)
   ), !,
   Ctx = ctx(_, _, _, _, Prefix, _),
   append(Prefix, [Name], Seg), join_dotted(Seg, QualifiedName),
   rewrite_annotation(Ann, Ctx, Ann1),
   rewrite(Value, Ctx, Value1),
-  wrap_export(Item, Exported, definition_node(identifier_node(QualifiedName), Ann1, Value1), Output).
+  wrap_export(Item, Exported, definition_node(identifier_node(QualifiedName, NSpan), Ann1, Value1, DSpan), DSpan, Output).
 % A foreign binding -> a top-level external with a qualified name.
 expand_module_item(Item, Exported, Ctx, Output) :-
-  ( Item = external_node(Name, Type, Source)
-  ; Item = public_node(external_node(Name, Type, Source))
+  ( Item = external_node(Name, Type, Source, ESpan)
+  ; Item = public_node(external_node(Name, Type, Source, ESpan), _)
   ), !,
   Ctx = ctx(_, _, _, _, Prefix, _),
   append(Prefix, [Name], Seg), join_dotted(Seg, QualifiedName),
   rewrite_type(Type, Ctx, Type1),
-  wrap_export(Item, Exported, external_node(QualifiedName, Type1, Source), Output).
+  wrap_export(Item, Exported, external_node(QualifiedName, Type1, Source, ESpan), ESpan, Output).
 % A type declaration -> a top-level declaration with the type name AND every
 % constructor name qualified, and field / body type expressions rewritten.
 expand_module_item(Item, Exported, Ctx, Output) :-
   type_binder(Item, Name, Body), !,
-  ( Item = type_declaration_node(Name, Parameters, Opacity, Body)
-  ; Item = public_node(type_declaration_node(Name, Parameters, Opacity, Body))
+  ( Item = type_declaration_node(Name, Parameters, Opacity, Body, TSpan)
+  ; Item = public_node(type_declaration_node(Name, Parameters, Opacity, Body, TSpan), _)
   ),
   Ctx = ctx(_, _, _, _, Prefix, _),
   append(Prefix, [Name], TypeSeg), join_dotted(TypeSeg, QualifiedName),
   rewrite_type_body(Body, Parameters, Prefix, Ctx, Body1),
-  wrap_export(Item, Exported, type_declaration_node(QualifiedName, Parameters, Opacity, Body1), Output).
+  wrap_export(Item, Exported, type_declaration_node(QualifiedName, Parameters, Opacity, Body1, TSpan), TSpan, Output).
 % A `use` is lifted unchanged.
-expand_module_item(use_node(Path, Names), _Exported, _Ctx, [use_node(Path, Names)]) :- !.
+expand_module_item(use_node(Path, Names, Span), _Exported, _Ctx, [use_node(Path, Names, Span)]) :- !.
 % A nested module recurses, narrowing the export flag.
 expand_module_item(Item, Exported, Ctx, Output) :-
   submodule_binder(Item, Name), !,
@@ -308,10 +316,13 @@ expand_module_item(Item, Exported, Ctx, Output) :-
 expand_module_item(Item, _Exported, _Ctx, _) :-
   throw(analysis_error(unsupported_module_item(Item))).
 
-% Wrap a lifted item in `public_node` iff it should leave the file.
-wrap_export(Item, Exported, Lifted, [public_node(Lifted)]) :-
+% Wrap a lifted item in `public_node` iff it should leave the file.  The
+% synthesized wrapper is given the lifted node's own `Span` (the `public_node`
+% span is not used downstream, but keeping it a real span preserves the
+% node-shape invariant).
+wrap_export(Item, Exported, Lifted, Span, [public_node(Lifted, Span)]) :-
   Exported, is_public(Item), !.
-wrap_export(_Item, _Exported, Lifted, [Lifted]).
+wrap_export(_Item, _Exported, Lifted, _Span, [Lifted]).
 
 % Rewrite a type-declaration body, with the declaration's own type parameters
 % shadowing module type names, and constructor names qualified by `Prefix`.
@@ -325,8 +336,8 @@ rewrite_type_body(Body, Parameters, _Prefix, Ctx, Body1) :-
   rewrite_type(Body, Ctx1, Body1).
 
 rewrite_constructors([], _Prefix, _Ctx, []).
-rewrite_constructors([constructor(Name, FieldTypes) | Rest], Prefix, Ctx,
-                     [constructor(QualifiedName, FieldTypes1) | Rest1]) :-
+rewrite_constructors([constructor(Name, FieldTypes, CSpan) | Rest], Prefix, Ctx,
+                     [constructor(QualifiedName, FieldTypes1, CSpan) | Rest1]) :-
   append(Prefix, [Name], Seg), join_dotted(Seg, QualifiedName),
   rewrite_type_list(FieldTypes, Ctx, FieldTypes1),
   rewrite_constructors(Rest, Prefix, Ctx, Rest1).
@@ -335,25 +346,25 @@ rewrite_constructors([constructor(Name, FieldTypes) | Rest], Prefix, Ctx,
 % Reference rewriting over an expression.
 % ---------------------------------------------------------------------------
 
-rewrite(number_node(N), _Ctx, number_node(N)) :- !.
-rewrite(boolean_node(B), _Ctx, boolean_node(B)) :- !.
-rewrite(placeholder_node, _Ctx, placeholder_node) :- !.
+rewrite(number_node(N, S), _Ctx, number_node(N, S)) :- !.
+rewrite(boolean_node(B, S), _Ctx, boolean_node(B, S)) :- !.
+rewrite(placeholder_node(S), _Ctx, placeholder_node(S)) :- !.
 
-rewrite(identifier_node(Name), ctx(VS, _, _, MS, _, _), Output) :- !,
+rewrite(identifier_node(Name, S), ctx(VS, _, _, MS, _, _), Output) :- !,
   ( memberchk(Name - Seg, VS) ->
-      join_dotted(Seg, Qualified), Output = identifier_node(Qualified)
+      join_dotted(Seg, Qualified), Output = identifier_node(Qualified, S)
   ; memberchk(Name - _, MS) ->
       throw(analysis_error(module_used_as_value(Name)))
-  ; Output = identifier_node(Name)
+  ; Output = identifier_node(Name, S)
   ).
 
-rewrite(string_node(Parts), Ctx, string_node(Parts1)) :- !,
+rewrite(string_node(Parts, S), Ctx, string_node(Parts1, S)) :- !,
   rewrite_string_parts(Parts, Ctx, Parts1).
 
 % Lambda: type parameters shadow module types (in parameter / return / body
 % annotations); value parameters shadow members (in the body).
-rewrite(function_node(TypeParameters, Parameters, ReturnAnnotation, Body), Ctx,
-        function_node(TypeParameters, Parameters1, ReturnAnnotation1, Body1)) :- !,
+rewrite(function_node(TypeParameters, Parameters, ReturnAnnotation, Body, S), Ctx,
+        function_node(TypeParameters, Parameters1, ReturnAnnotation1, Body1, S)) :- !,
   type_parameter_names(TypeParameters, TypeNames),
   shrink_types(Ctx, TypeNames, CtxT),
   rewrite_parameters(Parameters, CtxT, Parameters1),
@@ -362,61 +373,61 @@ rewrite(function_node(TypeParameters, Parameters, ReturnAnnotation, Body), Ctx,
   shrink_values(CtxT, Bound, CtxTV),
   rewrite(Body, CtxTV, Body1).
 
-rewrite(function_call_node(Target, Arguments), Ctx,
-        function_call_node(Target1, Arguments1)) :- !,
+rewrite(function_call_node(Target, Arguments, S), Ctx,
+        function_call_node(Target1, Arguments1, S)) :- !,
   rewrite(Target, Ctx, Target1),
   rewrite_arguments(Arguments, Ctx, Arguments1).
 
-rewrite(tuple_node(Members), Ctx, tuple_node(Members1)) :- !,
+rewrite(tuple_node(Members, S), Ctx, tuple_node(Members1, S)) :- !,
   rewrite_tuple_members(Members, Ctx, Members1).
 
-rewrite(access_node(Target, Accessor), Ctx, Output) :- !,
-  rewrite_access(access_node(Target, Accessor), Ctx, Output).
+rewrite(access_node(Target, Accessor, S), Ctx, Output) :- !,
+  rewrite_access(access_node(Target, Accessor, S), Ctx, Output).
 
-rewrite(assignment_node(Access, Value), Ctx, assignment_node(Access1, Value1)) :- !,
+rewrite(assignment_node(Access, Value, S), Ctx, assignment_node(Access1, Value1, S)) :- !,
   rewrite(Access, Ctx, AccessRewritten),
-  ( AccessRewritten = access_node(_, _) ->
+  ( AccessRewritten = access_node(_, _, _) ->
       Access1 = AccessRewritten
   ; throw(analysis_error(cannot_assign_module_member))
   ),
   rewrite(Value, Ctx, Value1).
 
-rewrite(block_node(Expressions), Ctx, block_node(Expressions1)) :- !,
+rewrite(block_node(Expressions, S), Ctx, block_node(Expressions1, S)) :- !,
   block_local_names(Expressions, Locals),
   shrink_values(Ctx, Locals, Ctx1),
   rewrite_list(Expressions, Ctx1, Expressions1).
 
-rewrite(match_node(Scrutinee, Arms), Ctx, match_node(Scrutinee1, Arms1)) :- !,
+rewrite(match_node(Scrutinee, Arms, S), Ctx, match_node(Scrutinee1, Arms1, S)) :- !,
   rewrite(Scrutinee, Ctx, Scrutinee1),
   rewrite_arms(Arms, Ctx, Arms1).
 
-rewrite(conditional_node(C, T, E), Ctx, conditional_node(C1, T1, E1)) :- !,
+rewrite(conditional_node(C, T, E, S), Ctx, conditional_node(C1, T1, E1, S)) :- !,
   rewrite(C, Ctx, C1), rewrite(T, Ctx, T1), rewrite(E, Ctx, E1).
-rewrite(unary_node(Op, E), Ctx, unary_node(Op, E1)) :- !,
+rewrite(unary_node(Op, E, S), Ctx, unary_node(Op, E1, S)) :- !,
   rewrite(E, Ctx, E1).
-rewrite(binary_node(Op, L, R), Ctx, binary_node(Op, L1, R1)) :- !,
+rewrite(binary_node(Op, L, R, S), Ctx, binary_node(Op, L1, R1, S)) :- !,
   rewrite(L, Ctx, L1), rewrite(R, Ctx, R1).
-rewrite(definition_node(Id, Ann, V), Ctx, definition_node(Id, Ann1, V1)) :- !,
+rewrite(definition_node(Id, Ann, V, S), Ctx, definition_node(Id, Ann1, V1, S)) :- !,
   rewrite_annotation(Ann, Ctx, Ann1), rewrite(V, Ctx, V1).
-rewrite(destructuring_node(P, V), Ctx, destructuring_node(P, V1)) :- !,
+rewrite(destructuring_node(P, V, S), Ctx, destructuring_node(P, V1, S)) :- !,
   rewrite(V, Ctx, V1).
-rewrite(type_declaration_node(N, P, O, B), _Ctx, type_declaration_node(N, P, O, B)) :- !.
+rewrite(type_declaration_node(N, P, O, B, S), _Ctx, type_declaration_node(N, P, O, B, S)) :- !.
 
 rewrite_list([], _Ctx, []).
 rewrite_list([E | Es], Ctx, [E1 | Es1]) :-
   rewrite(E, Ctx, E1), rewrite_list(Es, Ctx, Es1).
 
 rewrite_arguments([], _Ctx, []).
-rewrite_arguments([placeholder_node | Rest], Ctx, [placeholder_node | Rest1]) :- !,
+rewrite_arguments([placeholder_node(S) | Rest], Ctx, [placeholder_node(S) | Rest1]) :- !,
   rewrite_arguments(Rest, Ctx, Rest1).
 rewrite_arguments([Argument | Rest], Ctx, [Argument1 | Rest1]) :-
   rewrite(Argument, Ctx, Argument1), rewrite_arguments(Rest, Ctx, Rest1).
 
 rewrite_tuple_members([], _Ctx, []).
-rewrite_tuple_members([spread_member(V) | Rest], Ctx, [spread_member(V1) | Rest1]) :- !,
+rewrite_tuple_members([spread_member(V, S) | Rest], Ctx, [spread_member(V1, S) | Rest1]) :- !,
   rewrite(V, Ctx, V1), rewrite_tuple_members(Rest, Ctx, Rest1).
-rewrite_tuple_members([tuple_member(Mut, Label, Ann, V) | Rest], Ctx,
-                      [tuple_member(Mut, Label, Ann1, V1) | Rest1]) :-
+rewrite_tuple_members([tuple_member(Mut, Label, Ann, V, S) | Rest], Ctx,
+                      [tuple_member(Mut, Label, Ann1, V1, S) | Rest1]) :-
   rewrite_annotation(Ann, Ctx, Ann1),
   rewrite(V, Ctx, V1),
   rewrite_tuple_members(Rest, Ctx, Rest1).
@@ -429,16 +440,16 @@ rewrite_string_parts([string_interpolated_part(E) | Rest], Ctx,
   rewrite(E, Ctx, E1), rewrite_string_parts(Rest, Ctx, Rest1).
 
 rewrite_parameters([], _Ctx, []).
-rewrite_parameters([parameter_node(Pattern, Ann) | Rest], Ctx,
-                   [parameter_node(Pattern, Ann1) | Rest1]) :-
+rewrite_parameters([parameter_node(Pattern, Ann, S) | Rest], Ctx,
+                   [parameter_node(Pattern, Ann1, S) | Rest1]) :-
   rewrite_annotation(Ann, Ctx, Ann1),
   rewrite_parameters(Rest, Ctx, Rest1).
 
 % Each match arm: constructor names in the (or-)patterns are qualified; the
 % pattern's bound variables shadow members in the guard and result.
 rewrite_arms([], _Ctx, []).
-rewrite_arms([match_arm(Patterns, Guard, Result) | Rest], Ctx,
-             [match_arm(Patterns1, Guard1, Result1) | Rest1]) :-
+rewrite_arms([match_arm(Patterns, Guard, Result, S) | Rest], Ctx,
+             [match_arm(Patterns1, Guard1, Result1, S) | Rest1]) :-
   rewrite_patterns(Patterns, Ctx, Patterns1),
   patterns_vars(Patterns, Bound),
   shrink_values(Ctx, Bound, Ctx1),
@@ -459,25 +470,25 @@ rewrite_patterns([Pattern | Rest], Ctx, [Pattern1 | Rest1]) :-
   rewrite_pattern(Pattern, Ctx, Pattern1),
   rewrite_patterns(Rest, Ctx, Rest1).
 
-rewrite_pattern(wildcard_pattern, _Ctx, wildcard_pattern) :- !.
-rewrite_pattern(binding_pattern(Name), _Ctx, binding_pattern(Name)) :- !.
-rewrite_pattern(literal_pattern(Node), Ctx, literal_pattern(Node1)) :- !,
+rewrite_pattern(wildcard_pattern(S), _Ctx, wildcard_pattern(S)) :- !.
+rewrite_pattern(binding_pattern(Name, S), _Ctx, binding_pattern(Name, S)) :- !.
+rewrite_pattern(literal_pattern(Node, S), Ctx, literal_pattern(Node1, S)) :- !,
   rewrite(Node, Ctx, Node1).
-rewrite_pattern(constructor_pattern(Name, SubPatterns), Ctx,
-                constructor_pattern(QualifiedName, SubPatterns1)) :- !,
+rewrite_pattern(constructor_pattern(Name, SubPatterns, S), Ctx,
+                constructor_pattern(QualifiedName, SubPatterns1, S)) :- !,
   Ctx = ctx(_, _, CS, _, _, _),
   ( memberchk(Name - Seg, CS) -> join_dotted(Seg, QualifiedName) ; QualifiedName = Name ),
   rewrite_patterns(SubPatterns, Ctx, SubPatterns1).
-rewrite_pattern(record_pattern(Members), Ctx, record_pattern(Members1)) :- !,
+rewrite_pattern(record_pattern(Members, S), Ctx, record_pattern(Members1, S)) :- !,
   rewrite_pattern_members(Members, Ctx, Members1).
 
 rewrite_pattern_members([], _Ctx, []).
-rewrite_pattern_members([positional_member_pattern(P) | Rest], Ctx,
-                        [positional_member_pattern(P1) | Rest1]) :- !,
+rewrite_pattern_members([positional_member_pattern(P, S) | Rest], Ctx,
+                        [positional_member_pattern(P1, S) | Rest1]) :- !,
   rewrite_pattern(P, Ctx, P1),
   rewrite_pattern_members(Rest, Ctx, Rest1).
-rewrite_pattern_members([labeled_member_pattern(Label, P) | Rest], Ctx,
-                        [labeled_member_pattern(Label, P1) | Rest1]) :-
+rewrite_pattern_members([labeled_member_pattern(Label, P, S) | Rest], Ctx,
+                        [labeled_member_pattern(Label, P1, S) | Rest1]) :-
   rewrite_pattern(P, Ctx, P1),
   rewrite_pattern_members(Rest, Ctx, Rest1).
 
@@ -490,37 +501,37 @@ rewrite_annotation(no_annotation, _Ctx, no_annotation).
 rewrite_annotation(type_annotation(Type), Ctx, type_annotation(Type1)) :-
   rewrite_type(Type, Ctx, Type1).
 
-rewrite_type(type_name_node(Name, Arguments), Ctx, type_name_node(Name1, Arguments1)) :- !,
+rewrite_type(type_name_node(Name, Arguments, S), Ctx, type_name_node(Name1, Arguments1, S)) :- !,
   Ctx = ctx(_, TS, _, _, _, _),
   ( memberchk(Name - Seg, TS) -> join_dotted(Seg, Name1) ; Name1 = Name ),
   rewrite_type_arguments(Arguments, Ctx, Arguments1).
-rewrite_type(tuple_type_node(Members, Openness), Ctx, tuple_type_node(Members1, Openness)) :- !,
+rewrite_type(tuple_type_node(Members, Openness, S), Ctx, tuple_type_node(Members1, Openness, S)) :- !,
   rewrite_type_members(Members, Ctx, Members1).
-rewrite_type(function_type_node(Parameters, Return), Ctx,
-             function_type_node(Parameters1, Return1)) :- !,
+rewrite_type(function_type_node(Parameters, Return, S), Ctx,
+             function_type_node(Parameters1, Return1, S)) :- !,
   rewrite_type_list(Parameters, Ctx, Parameters1),
   rewrite_type(Return, Ctx, Return1).
-rewrite_type(quantified_type_node(Parameters, Body), Ctx,
-             quantified_type_node(Parameters, Body1)) :- !,
+rewrite_type(quantified_type_node(Parameters, Body, S), Ctx,
+             quantified_type_node(Parameters, Body1, S)) :- !,
   type_parameter_names(Parameters, Names),
   shrink_types(Ctx, Names, Ctx1),
   rewrite_type(Body, Ctx1, Body1).
-rewrite_type(type_hole, _Ctx, type_hole) :- !.
+rewrite_type(type_hole(S), _Ctx, type_hole(S)) :- !.
 
 rewrite_type_list([], _Ctx, []).
 rewrite_type_list([T | Ts], Ctx, [T1 | Ts1]) :-
   rewrite_type(T, Ctx, T1), rewrite_type_list(Ts, Ctx, Ts1).
 
 rewrite_type_arguments([], _Ctx, []).
-rewrite_type_arguments([type_hole | Rest], Ctx, [type_hole | Rest1]) :- !,
+rewrite_type_arguments([type_hole(S) | Rest], Ctx, [type_hole(S) | Rest1]) :- !,
   rewrite_type_arguments(Rest, Ctx, Rest1).
 rewrite_type_arguments([Argument | Rest], Ctx, [Argument1 | Rest1]) :-
   rewrite_type(Argument, Ctx, Argument1),
   rewrite_type_arguments(Rest, Ctx, Rest1).
 
 rewrite_type_members([], _Ctx, []).
-rewrite_type_members([tuple_type_member(Mut, Label, Type) | Rest], Ctx,
-                     [tuple_type_member(Mut, Label, Type1) | Rest1]) :-
+rewrite_type_members([tuple_type_member(Mut, Label, Type, S) | Rest], Ctx,
+                     [tuple_type_member(Mut, Label, Type1, S) | Rest1]) :-
   rewrite_type(Type, Ctx, Type1),
   rewrite_type_members(Rest, Ctx, Rest1).
 
@@ -528,46 +539,51 @@ rewrite_type_members([tuple_type_member(Mut, Label, Type) | Rest], Ctx,
 % Qualified value access resolution (`A.B.x`).
 % ---------------------------------------------------------------------------
 
-rewrite_access(Node, ctx(VS, TS, CS, MS, Prefix, NS), Output) :-
-  flatten_access(Node, Base, Accessors),
-  ( Base = identifier_node(Name),
+% `FullSpan` is the span of the whole access expression.  Collapsing a module
+% access chain into a flat qualified identifier (or rebuilding a plain access
+% chain) reuses that span for the synthesized identifier / access nodes -- the
+% per-link spans are lost in flattening, but the whole chain is one source
+% expression, so its span is a faithful location.
+rewrite_access(access_node(Target, Accessor, FullSpan), ctx(VS, TS, CS, MS, Prefix, NS), Output) :-
+  flatten_access(access_node(Target, Accessor, FullSpan), Base, Accessors),
+  ( Base = identifier_node(Name, _),
     \+ memberchk(Name - _, VS),
     memberchk(Name - BaseSeg, MS)
   ->
-    walk_module_path(BaseSeg, Accessors, Prefix, NS, Output)
+    walk_module_path(BaseSeg, Accessors, Prefix, NS, FullSpan, Output)
   ;
     rewrite(Base, ctx(VS, TS, CS, MS, Prefix, NS), Base1),
-    rebuild_access(Base1, Accessors, Output)
+    rebuild_access(Base1, Accessors, FullSpan, Output)
   ).
 
-flatten_access(access_node(Target, Accessor), Base, Accessors) :- !,
+flatten_access(access_node(Target, Accessor, _Span), Base, Accessors) :- !,
   flatten_access(Target, Base, Inner),
   append(Inner, [Accessor], Accessors).
 flatten_access(Node, Node, []).
 
-rebuild_access(Base, [], Base).
-rebuild_access(Base, [Accessor | Rest], Output) :-
-  rebuild_access(access_node(Base, Accessor), Rest, Output).
+rebuild_access(Base, [], _Span, Base).
+rebuild_access(Base, [Accessor | Rest], Span, Output) :-
+  rebuild_access(access_node(Base, Accessor, Span), Rest, Span, Output).
 
-walk_module_path(Prefix, [], _CurrentPrefix, _NS, _) :-
+walk_module_path(Prefix, [], _CurrentPrefix, _NS, _Span, _) :-
   join_dotted(Prefix, Text),
   throw(analysis_error(module_used_as_value(Text))).
-walk_module_path(Prefix, [label(Label) | Rest], CurrentPrefix,
-                 ns(ValueMembers, TypeMembers, Modules, Publics), Output) :- !,
+walk_module_path(Prefix, [label(Label, _) | Rest], CurrentPrefix,
+                 ns(ValueMembers, TypeMembers, Modules, Publics), Span, Output) :- !,
   append(Prefix, [Label], Candidate),
   ( memberchk(Candidate, ValueMembers) ->
       require_accessible(Candidate, CurrentPrefix, Publics, inaccessible_member),
       join_dotted(Candidate, Qualified),
-      rebuild_access(identifier_node(Qualified), Rest, Output)
+      rebuild_access(identifier_node(Qualified, Span), Rest, Span, Output)
   ; memberchk(Candidate, Modules) ->
       require_accessible(Candidate, CurrentPrefix, Publics, inaccessible_module),
       walk_module_path(Candidate, Rest, CurrentPrefix,
-                       ns(ValueMembers, TypeMembers, Modules, Publics), Output)
+                       ns(ValueMembers, TypeMembers, Modules, Publics), Span, Output)
   ;
       join_dotted(Candidate, Text),
       throw(analysis_error(unknown_member(Text)))
   ).
-walk_module_path(Prefix, [index(_) | _], _CurrentPrefix, _NS, _) :-
+walk_module_path(Prefix, [index(_, _) | _], _CurrentPrefix, _NS, _Span, _) :-
   join_dotted(Prefix, Text),
   throw(analysis_error(module_has_no_positional_field(Text))).
 
@@ -600,11 +616,11 @@ remove_keys([Key - Value | Rest], Names, Output) :-
   remove_keys(Rest, Names, Output1).
 
 type_parameter_names([], []).
-type_parameter_names([type_parameter(Name, _Kind, _Bound) | Rest], [Name | Names]) :-
+type_parameter_names([type_parameter(Name, _Kind, _Bound, _) | Rest], [Name | Names]) :-
   type_parameter_names(Rest, Names).
 
 parameters_vars([], []).
-parameters_vars([parameter_node(Pattern, _Annotation) | Rest], Vars) :-
+parameters_vars([parameter_node(Pattern, _Annotation, _) | Rest], Vars) :-
   pattern_vars(Pattern, PatternVars),
   parameters_vars(Rest, RestVars),
   append(PatternVars, RestVars, Vars).
@@ -615,27 +631,27 @@ patterns_vars([Pattern | Rest], Vars) :-
   patterns_vars(Rest, RestVars),
   append(PatternVars, RestVars, Vars).
 
-pattern_vars(wildcard_pattern, []).
-pattern_vars(binding_pattern(Name), [Name]).
-pattern_vars(literal_pattern(_), []).
-pattern_vars(constructor_pattern(_Name, SubPatterns), Vars) :-
+pattern_vars(wildcard_pattern(_), []).
+pattern_vars(binding_pattern(Name, _), [Name]).
+pattern_vars(literal_pattern(_, _), []).
+pattern_vars(constructor_pattern(_Name, SubPatterns, _), Vars) :-
   patterns_vars(SubPatterns, Vars).
-pattern_vars(record_pattern(Members), Vars) :-
+pattern_vars(record_pattern(Members, _), Vars) :-
   pattern_member_vars(Members, Vars).
 
 pattern_member_vars([], []).
 pattern_member_vars([Member | Rest], Vars) :-
-  ( Member = positional_member_pattern(SubPattern)
-  ; Member = labeled_member_pattern(_Label, SubPattern)
+  ( Member = positional_member_pattern(SubPattern, _)
+  ; Member = labeled_member_pattern(_Label, SubPattern, _)
   ),
   pattern_vars(SubPattern, MemberVars),
   pattern_member_vars(Rest, RestVars),
   append(MemberVars, RestVars, Vars).
 
 block_local_names([], []).
-block_local_names([definition_node(identifier_node(Name), _, _) | Rest], [Name | Names]) :- !,
+block_local_names([definition_node(identifier_node(Name, _), _, _, _) | Rest], [Name | Names]) :- !,
   block_local_names(Rest, Names).
-block_local_names([destructuring_node(Pattern, _) | Rest], Names) :- !,
+block_local_names([destructuring_node(Pattern, _, _) | Rest], Names) :- !,
   pattern_vars(Pattern, PatternVars),
   block_local_names(Rest, RestNames),
   append(PatternVars, RestNames, Names).
@@ -649,16 +665,19 @@ block_local_names([_Other | Rest], Names) :-
 dedup_uses(Items, Output) :- dedup_uses(Items, [], Output).
 
 dedup_uses([], _Seen, []).
-dedup_uses([use_node(Path, Names) | Rest], Seen, Output) :- !,
-  ( memberchk(use_node(Path, Names), Seen) -> Output = Output1
-  ; Output = [use_node(Path, Names) | Output1]
+% Dedup on path + imported names only: two identical lifted imports from
+% different module bodies carry DIFFERENT spans, so the node itself is no longer
+% a usable dedup key.  The first occurrence (with its span) is kept.
+dedup_uses([use_node(Path, Names, Span) | Rest], Seen, Output) :- !,
+  ( memberchk(named_use(Path, Names), Seen) -> Output = Output1
+  ; Output = [use_node(Path, Names, Span) | Output1]
   ),
-  dedup_uses(Rest, [use_node(Path, Names) | Seen], Output1).
-dedup_uses([use_all_node(Path) | Rest], Seen, Output) :- !,
-  ( memberchk(use_all_node(Path), Seen) -> Output = Output1
-  ; Output = [use_all_node(Path) | Output1]
+  dedup_uses(Rest, [named_use(Path, Names) | Seen], Output1).
+dedup_uses([use_all_node(Path, Span) | Rest], Seen, Output) :- !,
+  ( memberchk(whole_use(Path), Seen) -> Output = Output1
+  ; Output = [use_all_node(Path, Span) | Output1]
   ),
-  dedup_uses(Rest, [use_all_node(Path) | Seen], Output1).
+  dedup_uses(Rest, [whole_use(Path) | Seen], Output1).
 dedup_uses([Item | Rest], Seen, [Item | Output1]) :-
   dedup_uses(Rest, Seen, Output1).
 

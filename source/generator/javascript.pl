@@ -11,6 +11,10 @@
     --------------------------------------------------------------------
     TRANSLATION OVERVIEW
     --------------------------------------------------------------------
+    (Every AST node carries a trailing `span(Start, End)` of source offsets as
+    its last argument; code generation ignores it -- the patterns below match it
+    with `_`.)
+
     AST node                JavaScript
     ----------------------  --------------------------------------------
     number_node(N)          numeric literal        42
@@ -66,32 +70,33 @@ statements([namespace_import_node(JsPath, Renames) | Expressions]) -->
   statements(Expressions).
 % A foreign (`external`) declaration: bind the name to its JavaScript source,
 % wrapping a function source in a currying shim (see external_definition//3).
-statements([external_node(Name, Type, Source) | Expressions]) -->
+statements([external_node(Name, Type, Source, _) | Expressions]) -->
   external_definition(Name, Type, Source),
   statements(Expressions).
 % A tagged-union declaration emits one `const` per constructor (a curried
 % function building a tagged object, or a value for a nullary constructor).
-statements([type_declaration_node(_, _, _, variant_body(Constructors)) | Expressions]) -->
+statements([type_declaration_node(_, _, _, variant_body(Constructors), _) | Expressions]) -->
   constructor_definitions(Constructors),
   statements(Expressions).
 % Other type declarations (aliases / opaque) are compile-time only.
-statements([type_declaration_node(_, _, _, _) | Expressions]) -->
+statements([type_declaration_node(_, _, _, _, _) | Expressions]) -->
   statements(Expressions).
 % A `public` tagged union exports each of its constructors.
-statements([public_node(type_declaration_node(_, _, _, variant_body(Constructors))) | Expressions]) -->
+statements([public_node(type_declaration_node(_, _, _, variant_body(Constructors), _), _) | Expressions]) -->
   exported_constructor_definitions(Constructors),
   statements(Expressions).
 % A `public` alias / opaque type is compile-time only, like its private form.
-statements([public_node(type_declaration_node(_, _, _, _)) | Expressions]) -->
+statements([public_node(type_declaration_node(_, _, _, _, _), _) | Expressions]) -->
   statements(Expressions).
-% A `public` definition becomes an exported `const`.
-statements([public_node(definition_node(Identifier, Annotation, Value)) | Expressions]) -->
+% A `public` definition becomes an exported `const` (the inner definition keeps
+% its own span `DSpan`; the `public` wrapper's span is not needed by codegen).
+statements([public_node(definition_node(Identifier, Annotation, Value, DSpan), _) | Expressions]) -->
   "export ",
-  statement(definition_node(Identifier, Annotation, Value)),
+  statement(definition_node(Identifier, Annotation, Value, DSpan)),
   "\n",
   statements(Expressions).
 % A `public external` becomes an exported foreign binding.
-statements([public_node(external_node(Name, Type, Source)) | Expressions]) -->
+statements([public_node(external_node(Name, Type, Source, _), _) | Expressions]) -->
   exported_external_definition(Name, Type, Source),
   statements(Expressions).
 statements([Expression | Expressions]) -->
@@ -117,16 +122,16 @@ renamed_specifiers([Foreign - Local, Next | Rest]) -->
 % A statement is either a `const` binding (for a definition) or an expression
 % terminated by a semicolon.  The clauses are mutually exclusive: the last is
 % guarded so it never matches a definition or a (code-free) type declaration.
-statement(definition_node(identifier_node(Name), _Annotation, Value)) -->
+statement(definition_node(identifier_node(Name, _), _Annotation, Value, _)) -->
   "const ", identifier(Name), " = ", expression(Value), ";".
-statement(type_declaration_node(_, _, _, _)) --> [].
+statement(type_declaration_node(_, _, _, _, _)) --> [].
 % A destructuring definition becomes a `const` with a JS destructuring target.
-statement(destructuring_node(Pattern, Value)) -->
+statement(destructuring_node(Pattern, Value, _)) -->
   "const ", js_pattern(Pattern, 0, _), " = ", expression(Value), ";".
 statement(Expression) -->
-  { Expression \= definition_node(_, _, _),
-    Expression \= type_declaration_node(_, _, _, _),
-    Expression \= destructuring_node(_, _) },
+  { Expression \= definition_node(_, _, _, _),
+    Expression \= type_declaration_node(_, _, _, _, _),
+    Expression \= destructuring_node(_, _, _) },
   expression(Expression), ";".
 
 % ---------------------------------------------------------------------------
@@ -135,39 +140,39 @@ statement(Expression) -->
 
 % Numeric literal: reuse Prolog's own number printing, which yields valid
 % JavaScript number syntax for the integers and floats the parser produces.
-expression(number_node(Number)) -->
+expression(number_node(Number, _)) -->
   { number_chars(Number, Chars) },
   chars(Chars).
 
-expression(boolean_node(true)) --> "true".
-expression(boolean_node(false)) --> "false".
+expression(boolean_node(true, _)) --> "true".
+expression(boolean_node(false, _)) --> "false".
 
 % A variable reference.  See identifier//1 for the `$` prefix rationale.
-expression(identifier_node(Name)) -->
+expression(identifier_node(Name, _)) -->
   identifier(Name).
 
 % String literal -> JavaScript template literal, so interpolation maps
 % directly onto `${ ... }`.
-expression(string_node(Parts)) -->
+expression(string_node(Parts, _)) -->
   "`", template_parts(Parts), "`".
 
 % Lambda -> curried arrow function.  A nullary function stays nullary.
 % Type annotations carry no runtime meaning and are dropped here.
-expression(function_node(_TypeParameters, [], _ReturnAnnotation, Body)) -->
+expression(function_node(_TypeParameters, [], _ReturnAnnotation, Body, _)) -->
   "(() => ", arrow_body(Body), ")".
-expression(function_node(_TypeParameters, [Parameter | Parameters], _ReturnAnnotation, Body)) -->
+expression(function_node(_TypeParameters, [Parameter | Parameters], _ReturnAnnotation, Body, _)) -->
   "(", curried_arrows([Parameter | Parameters], Body), ")".
 
 % Application -> curried call: the callee, then one parenthesised argument per
 % argument.  A zero-argument call is emitted as `callee()`.
-expression(function_call_node(Target, Arguments)) -->
-  { \+ member(placeholder_node, Arguments) },
+expression(function_call_node(Target, Arguments, _)) -->
+  { \+ member(placeholder_node(_), Arguments) },
   "(", expression(Target), ")", call_arguments(Arguments).
 % A call with placeholders -> a curried arrow over the holes (in order) whose
 % body applies the callee with the holes filled in:
 %   foo(_ 'x')  ->  ($_h0 => (foo)($_h0)(`x`))
-expression(function_call_node(Target, Arguments)) -->
-  { member(placeholder_node, Arguments) },
+expression(function_call_node(Target, Arguments, _)) -->
+  { member(placeholder_node(_), Arguments) },
   "(", hole_arrows(Arguments, 0, _),
   "(", expression(Target), ")", section_arguments(Arguments, 0, _),
   ")".
@@ -176,23 +181,23 @@ expression(function_call_node(Target, Arguments)) -->
 % (0, 1, ... in positional order, skipping labeled members), labeled members
 % get their name as a string key.  The empty tuple () is the unit value {}.
 % Mutability is a compile-time-only concept and is not reflected at runtime.
-expression(tuple_node(Members)) -->
+expression(tuple_node(Members, _)) -->
   "{", object_body(Members), "}".
 
 % Member access -> bracket indexing, so numeric and unicode-label keys work
 % uniformly: foo.bar -> (foo)["bar"], foo.0 -> (foo)[0].
-expression(access_node(Target, label(Name))) -->
+expression(access_node(Target, label(Name, _), _)) -->
   "(", expression(Target), ")[\"", chars(Name), "\"]".
-expression(access_node(Target, index(Index))) -->
+expression(access_node(Target, index(Index, _), _)) -->
   "(", expression(Target), ")[", number(Index), "]".
 
 % Member assignment -> a JavaScript assignment expression.
-expression(assignment_node(Access, Value)) -->
+expression(assignment_node(Access, Value, _)) -->
   "(", expression(Access), " = ", expression(Value), ")".
 
 % Block -> an immediately-invoked arrow function that runs the inner
 % statements and returns the value of the last expression.
-expression(block_node(Expressions)) -->
+expression(block_node(Expressions, _)) -->
   "(() => { ", block_body(Expressions), " })()".
 
 % Match -> an IIFE binding the scrutinee to `$_match`, then a chain of
@@ -200,7 +205,7 @@ expression(block_node(Expressions)) -->
 % sub-patterns (and guard), and returns its result on a match.  Type-checking
 % guarantees the record shape, so only literals and guards are tested at
 % runtime.  (`$_match` cannot collide: user names never begin with `$_`.)
-expression(match_node(Scrutinee, RawArms)) -->
+expression(match_node(Scrutinee, RawArms, _)) -->
   { desugar_arms(RawArms, Arms) },
   "(($_match) => { ",
   match_arms(Arms),
@@ -209,25 +214,25 @@ expression(match_node(Scrutinee, RawArms)) -->
   ")".
 
 % Conditional -> ternary expression.
-expression(conditional_node(Condition, Then, Else)) -->
+expression(conditional_node(Condition, Then, Else, _)) -->
   "(", expression(Condition), " ? ", expression(Then), " : ", expression(Else), ")".
 
 % Unary operator.
-expression(unary_node(Operator, Operand)) -->
+expression(unary_node(Operator, Operand, _)) -->
   "(", unary_operator(Operator), expression(Operand), ")".
 
 % The pipe `x -> f` feeds `x` to `f`; with currying that is simply `f(x)`.
-expression(binary_node(pipe, Left, Right)) -->
+expression(binary_node(pipe, Left, Right, _)) -->
   "(", expression(Right), ")(", expression(Left), ")".
 % Every other binary operator maps to an infix JavaScript operator.
-expression(binary_node(Operator, Left, Right)) -->
+expression(binary_node(Operator, Left, Right, _)) -->
   { Operator \= pipe },
   "(", expression(Left), " ", binary_operator(Operator), " ", expression(Right), ")".
 
 % A definition reached in expression position (e.g. as a call argument) cannot
 % introduce a visible binding, so we emit only its value -- matching the type
 % checker, which gives such a definition the type of its value.
-expression(definition_node(_Target, _Annotation, Value)) -->
+expression(definition_node(_Target, _Annotation, Value, _)) -->
   expression(Value).
 
 % ---------------------------------------------------------------------------
@@ -244,26 +249,26 @@ curried_arrows([Parameter, Next | Parameters], Body) -->
 % `=> {` after an arrow opens a STATEMENT BLOCK, not an object, so a tuple body
 % must be wrapped in parentheses: `=> ({...})`.  No other expression begins
 % with `{`, so only tuples need this.
-arrow_body(tuple_node(Members)) -->
-  "(", expression(tuple_node(Members)), ")".
+arrow_body(tuple_node(Members, TupleSpan)) -->
+  "(", expression(tuple_node(Members, TupleSpan)), ")".
 arrow_body(Body) -->
-  { Body \= tuple_node(_) },
+  { Body \= tuple_node(_, _) },
   expression(Body).
 
 % A parameter is rendered as its JS binding pattern (parenthesised so a
 % destructuring pattern is a valid arrow-function parameter).
-parameter(parameter_node(Pattern, _Annotation)) -->
+parameter(parameter_node(Pattern, _Annotation, _)) -->
   "(", js_pattern(Pattern, 0, _), ")".
 
 % A pattern as a JS binding target.  `Counter` numbers anonymous holes
 % (wildcards / ignored literals) so they get distinct throwaway names.
-js_pattern(binding_pattern(Name), Counter, Counter) -->
+js_pattern(binding_pattern(Name, _), Counter, Counter) -->
   "$", chars(Name).
-js_pattern(wildcard_pattern, CounterIn, CounterOut) -->
+js_pattern(wildcard_pattern(_), CounterIn, CounterOut) -->
   "$_", number(CounterIn), { CounterOut is CounterIn + 1 }.
-js_pattern(literal_pattern(_), CounterIn, CounterOut) -->
+js_pattern(literal_pattern(_, _), CounterIn, CounterOut) -->
   "$_", number(CounterIn), { CounterOut is CounterIn + 1 }.
-js_pattern(record_pattern(Members), CounterIn, CounterOut) -->
+js_pattern(record_pattern(Members, _), CounterIn, CounterOut) -->
   "{", js_pattern_members(Members, 0, CounterIn, CounterOut), "}".
 
 js_pattern_members([], _Index, Counter, Counter) --> [].
@@ -274,10 +279,10 @@ js_pattern_members([Member, Next | Members], Index, CounterIn, CounterOut) -->
   ", ",
   js_pattern_members([Next | Members], NextIndex, Counter1, CounterOut).
 
-js_pattern_member(positional_member_pattern(SubPattern), Index, NextIndex, CounterIn, CounterOut) -->
+js_pattern_member(positional_member_pattern(SubPattern, _), Index, NextIndex, CounterIn, CounterOut) -->
   number(Index), ": ", js_pattern(SubPattern, CounterIn, CounterOut),
   { NextIndex is Index + 1 }.
-js_pattern_member(labeled_member_pattern(Name, SubPattern), Index, Index, CounterIn, CounterOut) -->
+js_pattern_member(labeled_member_pattern(Name, SubPattern, _), Index, Index, CounterIn, CounterOut) -->
   "\"", chars(Name), "\": ", js_pattern(SubPattern, CounterIn, CounterOut).
 
 % Curried application: `()` for no arguments, otherwise `(a)(b)(c)`.
@@ -294,21 +299,21 @@ argument_applications([Argument | Arguments]) -->
 % matching `$_hN` for each placeholder and the expression for each real
 % argument.  Hole numbering matches between the two passes.
 hole_arrows([], Counter, Counter) --> [].
-hole_arrows([placeholder_node | Arguments], CounterIn, CounterOut) -->
+hole_arrows([placeholder_node(_) | Arguments], CounterIn, CounterOut) -->
   "$_h", number(CounterIn), " => ",
   { Counter1 is CounterIn + 1 },
   hole_arrows(Arguments, Counter1, CounterOut).
 hole_arrows([Argument | Arguments], CounterIn, CounterOut) -->
-  { Argument \= placeholder_node },
+  { Argument \= placeholder_node(_) },
   hole_arrows(Arguments, CounterIn, CounterOut).
 
 section_arguments([], Counter, Counter) --> [].
-section_arguments([placeholder_node | Arguments], CounterIn, CounterOut) -->
+section_arguments([placeholder_node(_) | Arguments], CounterIn, CounterOut) -->
   "($_h", number(CounterIn), ")",
   { Counter1 is CounterIn + 1 },
   section_arguments(Arguments, Counter1, CounterOut).
 section_arguments([Argument | Arguments], CounterIn, CounterOut) -->
-  { Argument \= placeholder_node },
+  { Argument \= placeholder_node(_) },
   "(", expression(Argument), ")",
   section_arguments(Arguments, CounterIn, CounterOut).
 
@@ -322,18 +327,18 @@ block_body([Expression, Next | Expressions]) -->
 % The final element of a block is what the block evaluates to.  A trailing
 % definition is still bound first (so a recursive function can refer to
 % itself) and then returned.
-return_statement(definition_node(identifier_node(Name), _Annotation, Value)) -->
+return_statement(definition_node(identifier_node(Name, _), _Annotation, Value, _)) -->
   "const ", identifier(Name), " = ", expression(Value), "; return ", identifier(Name), ";".
-return_statement(type_declaration_node(_, _, _, _)) -->
+return_statement(type_declaration_node(_, _, _, _, _)) -->
   "return undefined;".
 % A trailing destructuring's bindings cannot be observed, so it just yields
 % the matched value.
-return_statement(destructuring_node(_Pattern, Value)) -->
+return_statement(destructuring_node(_Pattern, Value, _)) -->
   "return ", expression(Value), ";".
 return_statement(Expression) -->
-  { Expression \= definition_node(_, _, _),
-    Expression \= type_declaration_node(_, _, _, _),
-    Expression \= destructuring_node(_, _) },
+  { Expression \= definition_node(_, _, _, _),
+    Expression \= type_declaration_node(_, _, _, _, _),
+    Expression \= destructuring_node(_, _, _) },
   "return ", expression(Expression), ";".
 
 % A tuple object: spreads first, then explicit `key: value` entries, so that
@@ -346,10 +351,10 @@ object_body(Members) -->
   regular_entries(Regulars, 0, AfterSpreads, _).
 
 separate_members([], [], []).
-separate_members([spread_member(Value) | Members], [Value | Spreads], Regulars) :-
+separate_members([spread_member(Value, _) | Members], [Value | Spreads], Regulars) :-
   separate_members(Members, Spreads, Regulars).
-separate_members([tuple_member(Mutability, Label, Annotation, Value) | Members], Spreads,
-                 [tuple_member(Mutability, Label, Annotation, Value) | Regulars]) :-
+separate_members([tuple_member(Mutability, Label, Annotation, Value, MemberSpan) | Members], Spreads,
+                 [tuple_member(Mutability, Label, Annotation, Value, MemberSpan) | Regulars]) :-
   separate_members(Members, Spreads, Regulars).
 
 % `Count` is the number of entries emitted so far, used to place commas.
@@ -368,10 +373,10 @@ regular_entries([Member | Members], Index, CountIn, CountOut) -->
 comma_if(0) --> [].
 comma_if(Count) --> { Count > 0 }, ", ".
 
-regular_entry(tuple_member(_Mutability, positional, _Annotation, Value), Index, NextIndex) -->
+regular_entry(tuple_member(_Mutability, positional, _Annotation, Value, _), Index, NextIndex) -->
   number(Index), ": ", expression(Value),
   { NextIndex is Index + 1 }.
-regular_entry(tuple_member(_Mutability, labeled(Name), _Annotation, Value), Index, Index) -->
+regular_entry(tuple_member(_Mutability, labeled(Name), _Annotation, Value, _), Index, Index) -->
   "\"", chars(Name), "\": ", expression(Value).
 
 % Emit an integer literal.
@@ -407,7 +412,7 @@ escaped_char(Char) -->
 % prefix is applied uniformly to definitions and references, so they match.
 %
 % A QUALIFIED name from a nested module (`Math.add`, produced by
-% `module_expander.pl`) carries `.` separators, which are not legal in a JS
+% `transformation/module.pl`) carries `.` separators, which are not legal in a JS
 % identifier; each is translated to a further `$` (`$Math$add`).  Source
 % identifiers are XID and so contain neither `.` nor `$`, which keeps both the
 % prefix and the translated separators collision-free, and leaves ordinary
@@ -437,17 +442,17 @@ chars([Char | Chars]) -->
 % An or-pattern arm desugars to one single-pattern arm per alternative,
 % sharing the guard and result.
 desugar_arms([], []).
-desugar_arms([match_arm(Patterns, Guard, Result) | Rest], Arms) :-
-  desugar_alternatives(Patterns, Guard, Result, ArmsHead),
+desugar_arms([match_arm(Patterns, Guard, Result, Span) | Rest], Arms) :-
+  desugar_alternatives(Patterns, Guard, Result, Span, ArmsHead),
   desugar_arms(Rest, ArmsTail),
   append(ArmsHead, ArmsTail, Arms).
 
-desugar_alternatives([], _Guard, _Result, []).
-desugar_alternatives([Pattern | Patterns], Guard, Result, [match_arm(Pattern, Guard, Result) | Rest]) :-
-  desugar_alternatives(Patterns, Guard, Result, Rest).
+desugar_alternatives([], _Guard, _Result, _Span, []).
+desugar_alternatives([Pattern | Patterns], Guard, Result, Span, [match_arm(Pattern, Guard, Result, Span) | Rest]) :-
+  desugar_alternatives(Patterns, Guard, Result, Span, Rest).
 
 match_arms([]) --> [].
-match_arms([match_arm(Pattern, Guard, Result) | Arms]) -->
+match_arms([match_arm(Pattern, Guard, Result, _) | Arms]) -->
   "{ ",
   pattern_bindings(Pattern, "$_match"),
   "if (",
@@ -479,7 +484,7 @@ exported_constructor_definitions([Constructor | Constructors]) -->
 % from a module, e.g. `Opt.Some`, becomes `$Opt$Some`), but the runtime `$tag`
 % keeps the dotted qualified name verbatim (a string, where `.` is fine, and
 % kept distinct so sibling modules' same-named constructors don't clash).
-one_constructor_definition(constructor(Name, FieldTypes)) -->
+one_constructor_definition(constructor(Name, FieldTypes, _)) -->
   { length(FieldTypes, Arity) },
   "const ", identifier(Name), " = ", constructor_arrows(Name, Arity, 0), ";\n".
 
@@ -590,9 +595,9 @@ to_js(Type, Value, Result, N0, N) :-
 
 % A function type (looking through a leading quantifier `<A ..>`); fails for
 % any non-function type, which is what keeps data crossing as-is.
-function_form(quantified_type_node(_Parameters, Body), Parameters, Return) :- !,
+function_form(quantified_type_node(_Parameters, Body, _), Parameters, Return) :- !,
   function_form(Body, Parameters, Return).
-function_form(function_type_node(Parameters, Return), Parameters, Return).
+function_form(function_type_node(Parameters, Return, _), Parameters, Return).
 
 % Fresh shim parameter names `$_a<Level>_<Index>`, one per parameter type.
 parameter_names(_Level, _Index, [], []).
@@ -678,13 +683,13 @@ constructor_object_fields(Index, Arity) -->
 % is matched against -- `$_match`, then `[i]` / `["label"]` as we descend.
 
 % Binding declarations: `const $name = <path>;` for each binding sub-pattern.
-pattern_bindings(wildcard_pattern, _Path) --> [].
-pattern_bindings(literal_pattern(_), _Path) --> [].
-pattern_bindings(binding_pattern(Name), Path) -->
+pattern_bindings(wildcard_pattern(_), _Path) --> [].
+pattern_bindings(literal_pattern(_, _), _Path) --> [].
+pattern_bindings(binding_pattern(Name, _), Path) -->
   "const $", chars(Name), " = ", chars(Path), "; ".
-pattern_bindings(record_pattern(Members), Path) -->
+pattern_bindings(record_pattern(Members, _), Path) -->
   record_pattern_bindings(Members, 0, Path).
-pattern_bindings(constructor_pattern(_Name, SubPatterns), Path) -->
+pattern_bindings(constructor_pattern(_Name, SubPatterns, _), Path) -->
   constructor_sub_bindings(SubPatterns, 0, Path).
 
 constructor_sub_bindings([], _Index, _Path) --> [].
@@ -694,11 +699,11 @@ constructor_sub_bindings([SubPattern | SubPatterns], Index, Path) -->
   constructor_sub_bindings(SubPatterns, Index1, Path).
 
 record_pattern_bindings([], _Index, _Path) --> [].
-record_pattern_bindings([positional_member_pattern(SubPattern) | Members], Index, Path) -->
+record_pattern_bindings([positional_member_pattern(SubPattern, _) | Members], Index, Path) -->
   { index_path(Path, Index, SubPath), Index1 is Index + 1 },
   pattern_bindings(SubPattern, SubPath),
   record_pattern_bindings(Members, Index1, Path).
-record_pattern_bindings([labeled_member_pattern(Name, SubPattern) | Members], Index, Path) -->
+record_pattern_bindings([labeled_member_pattern(Name, SubPattern, _) | Members], Index, Path) -->
   { label_path(Path, Name, SubPath) },
   pattern_bindings(SubPattern, SubPath),
   record_pattern_bindings(Members, Index, Path).
@@ -710,13 +715,13 @@ pattern_test(Pattern, Path) -->
   "true",
   pattern_conjuncts(Pattern, Path).
 
-pattern_conjuncts(wildcard_pattern, _Path) --> [].
-pattern_conjuncts(binding_pattern(_), _Path) --> [].
-pattern_conjuncts(literal_pattern(Node), Path) -->
+pattern_conjuncts(wildcard_pattern(_), _Path) --> [].
+pattern_conjuncts(binding_pattern(_, _), _Path) --> [].
+pattern_conjuncts(literal_pattern(Node, _), Path) -->
   " && (", chars(Path), " === ", literal_value(Node), ")".
-pattern_conjuncts(record_pattern(Members), Path) -->
+pattern_conjuncts(record_pattern(Members, _), Path) -->
   record_pattern_conjuncts(Members, 0, Path).
-pattern_conjuncts(constructor_pattern(Name, SubPatterns), Path) -->
+pattern_conjuncts(constructor_pattern(Name, SubPatterns, _), Path) -->
   " && (", chars(Path), "[\"$tag\"] === \"", chars(Name), "\")",
   constructor_sub_conjuncts(SubPatterns, 0, Path).
 
@@ -727,19 +732,19 @@ constructor_sub_conjuncts([SubPattern | SubPatterns], Index, Path) -->
   constructor_sub_conjuncts(SubPatterns, Index1, Path).
 
 record_pattern_conjuncts([], _Index, _Path) --> [].
-record_pattern_conjuncts([positional_member_pattern(SubPattern) | Members], Index, Path) -->
+record_pattern_conjuncts([positional_member_pattern(SubPattern, _) | Members], Index, Path) -->
   { index_path(Path, Index, SubPath), Index1 is Index + 1 },
   pattern_conjuncts(SubPattern, SubPath),
   record_pattern_conjuncts(Members, Index1, Path).
-record_pattern_conjuncts([labeled_member_pattern(Name, SubPattern) | Members], Index, Path) -->
+record_pattern_conjuncts([labeled_member_pattern(Name, SubPattern, _) | Members], Index, Path) -->
   { label_path(Path, Name, SubPath) },
   pattern_conjuncts(SubPattern, SubPath),
   record_pattern_conjuncts(Members, Index, Path).
 
-literal_value(number_node(Number)) --> number(Number).
-literal_value(boolean_node(true)) --> "true".
-literal_value(boolean_node(false)) --> "false".
-literal_value(string_node(Parts)) --> "`", template_parts(Parts), "`".
+literal_value(number_node(Number, _)) --> number(Number).
+literal_value(boolean_node(true, _)) --> "true".
+literal_value(boolean_node(false, _)) --> "false".
+literal_value(string_node(Parts, _)) --> "`", template_parts(Parts), "`".
 
 % Build the JS path for a positional / labeled sub-field.
 index_path(Path, Index, SubPath) :-

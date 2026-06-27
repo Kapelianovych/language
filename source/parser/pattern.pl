@@ -19,7 +19,9 @@
                                 destructures it; members are positional
                                 sub-patterns or `label = sub-pattern`
 
-    Produced AST:
+    Produced AST (every node additionally carries a trailing `span(Start, End)`
+    of source offsets as its last argument -- see `parser/position.pl`; omitted
+    below for brevity):
 
         wildcard_pattern
         binding_pattern(NameCharacters)
@@ -36,11 +38,12 @@
 :- use_module(number_literal, [number_literal//1]).
 :- use_module(boolean_literal, [boolean_literal//1]).
 :- use_module(string_literal, [string_literal//2]).
-:- use_module(identifier, [identifier//1, qualified_identifier//1]).
+:- use_module(identifier, [identifier//1, qualified_identifier//2]).
 :- use_module(separator, [
   separator//0,
   separators//0
 ]).
+:- use_module(position, [here//1, span_between/3, node_span/2]).
 
 :- meta_predicate(pattern(2, ?, ?, ?)).
 :- meta_predicate(record_pattern(2, ?, ?, ?)).
@@ -61,13 +64,16 @@ pattern(ExpressionFunctor, Node) -->
 % (Nullary constructors are matched with empty parens, `None()`, so a bare
 % identifier is unambiguously a binding.)  The name may be QUALIFIED
 % (`Math.Some(v)`) when the constructor comes from a whole-module import.
-constructor_pattern(ExpressionFunctor, constructor_pattern(Name, SubPatterns)) -->
-  qualified_identifier(Name),
+constructor_pattern(ExpressionFunctor, constructor_pattern(Name, SubPatterns, Span)) -->
+  here(Start),
+  qualified_identifier(Name, _),
   "(",
   separators,
   constructor_sub_patterns(ExpressionFunctor, SubPatterns),
   separators,
-  ")".
+  ")",
+  here(End),
+  { span_between(Start, End, Span) }.
 
 constructor_sub_patterns(_, []) --> [].
 constructor_sub_patterns(ExpressionFunctor, [SubPattern | SubPatterns]) -->
@@ -81,24 +87,30 @@ constructor_sub_patterns_tail(ExpressionFunctor, [SubPattern | SubPatterns]) -->
   pattern(ExpressionFunctor, SubPattern),
   constructor_sub_patterns_tail(ExpressionFunctor, SubPatterns).
 
-wildcard_pattern(wildcard_pattern) -->
-  "_".
+wildcard_pattern(wildcard_pattern(Span)) -->
+  here(Start), "_", here(End), { span_between(Start, End, Span) }.
 
-binding_pattern(binding_pattern(Name)) -->
-  identifier(identifier_node(Name)).
+% The binding reuses the identifier's own span directly.
+binding_pattern(binding_pattern(Name, Span)) -->
+  identifier(identifier_node(Name, Span)).
 
-literal_pattern(_, literal_pattern(Node)) -->
-  number_literal(Node)
-  | boolean_literal(Node).
-literal_pattern(ExpressionFunctor, literal_pattern(Node)) -->
-  string_literal(ExpressionFunctor, Node).
+% A literal pattern's span is the span of its literal node.
+literal_pattern(_, literal_pattern(Node, Span)) -->
+  ( number_literal(Node) | boolean_literal(Node) ),
+  { node_span(Node, Span) }.
+literal_pattern(ExpressionFunctor, literal_pattern(Node, Span)) -->
+  string_literal(ExpressionFunctor, Node),
+  { node_span(Node, Span) }.
 
-record_pattern(ExpressionFunctor, record_pattern(Members)) -->
+record_pattern(ExpressionFunctor, record_pattern(Members, Span)) -->
+  here(Start),
   "(",
   separators,
   pattern_members(ExpressionFunctor, Members),
   separators,
-  ")".
+  ")",
+  here(End),
+  { span_between(Start, End, Span) }.
 
 pattern_members(_, []) --> [].
 pattern_members(ExpressionFunctor, [Member | Members]) -->
@@ -119,15 +131,21 @@ pattern_member(ExpressionFunctor, Member) -->
   labeled_member_pattern(ExpressionFunctor, Member)
   | positional_member_pattern(ExpressionFunctor, Member).
 
-labeled_member_pattern(ExpressionFunctor, labeled_member_pattern(Name, SubPattern)) -->
-  identifier(identifier_node(Name)),
+labeled_member_pattern(ExpressionFunctor, labeled_member_pattern(Name, SubPattern, Span)) -->
+  here(Start),
+  identifier(identifier_node(Name, _)),
   separators,
   "=",
   separators,
-  pattern(ExpressionFunctor, SubPattern).
+  pattern(ExpressionFunctor, SubPattern),
+  here(End),
+  { span_between(Start, End, Span) }.
 
-positional_member_pattern(ExpressionFunctor, positional_member_pattern(SubPattern)) -->
-  pattern(ExpressionFunctor, SubPattern).
+positional_member_pattern(ExpressionFunctor, positional_member_pattern(SubPattern, Span)) -->
+  here(Start),
+  pattern(ExpressionFunctor, SubPattern),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 % ---------------------------------------------------------------------------
 % Irrefutable patterns -- used where a match cannot fail and so binds only
@@ -139,12 +157,15 @@ irrefutable_pattern(ExpressionFunctor, Node) -->
   | wildcard_pattern(Node)
   | binding_pattern(Node).
 
-irrefutable_record_pattern(ExpressionFunctor, record_pattern(Members)) -->
+irrefutable_record_pattern(ExpressionFunctor, record_pattern(Members, Span)) -->
+  here(Start),
   "(",
   separators,
   irrefutable_members(ExpressionFunctor, Members),
   separators,
-  ")".
+  ")",
+  here(End),
+  { span_between(Start, End, Span) }.
 
 irrefutable_members(_, []) --> [].
 irrefutable_members(ExpressionFunctor, [Member | Members]) -->
@@ -158,11 +179,17 @@ irrefutable_members_tail(ExpressionFunctor, [Member | Members]) -->
   irrefutable_member(ExpressionFunctor, Member),
   irrefutable_members_tail(ExpressionFunctor, Members).
 
-irrefutable_member(ExpressionFunctor, labeled_member_pattern(Name, SubPattern)) -->
-  identifier(identifier_node(Name)),
+irrefutable_member(ExpressionFunctor, labeled_member_pattern(Name, SubPattern, Span)) -->
+  here(Start),
+  identifier(identifier_node(Name, _)),
   separators,
   "=",
   separators,
-  irrefutable_pattern(ExpressionFunctor, SubPattern).
-irrefutable_member(ExpressionFunctor, positional_member_pattern(SubPattern)) -->
-  irrefutable_pattern(ExpressionFunctor, SubPattern).
+  irrefutable_pattern(ExpressionFunctor, SubPattern),
+  here(End),
+  { span_between(Start, End, Span) }.
+irrefutable_member(ExpressionFunctor, positional_member_pattern(SubPattern, Span)) -->
+  here(Start),
+  irrefutable_pattern(ExpressionFunctor, SubPattern),
+  here(End),
+  { span_between(Start, End, Span) }.

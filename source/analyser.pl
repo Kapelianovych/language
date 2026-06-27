@@ -47,7 +47,7 @@
   convert_annotation_type/6
 ]).
 :- use_module(analyser/infer, [infer_program/6]).
-:- use_module(module_expander, [expand_modules/2]).
+:- use_module('transformation/module', [expand_modules/2]).
 :- use_module(unicode, [xid_start/1, xid_continue/1]).
 
 %% analyse(+AST, -Result).
@@ -115,7 +115,7 @@ constructor_environment([Name - Scheme | Rest], EnvironmentIn, EnvironmentOut) :
 % items) makes every external visible throughout the module, like a constant.
 % Non-`external` items are left for the inference walk.
 seed_externals([], _TypeEnvironment, _Level, Environment, Context, Environment, Context).
-seed_externals([external_node(Name, TypeExpression, Source) | Rest], TypeEnvironment, Level,
+seed_externals([external_node(Name, TypeExpression, Source, _) | Rest], TypeEnvironment, Level,
                EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :- !,
   validate_external_source(Source),
   Level1 is Level + 1,
@@ -163,29 +163,32 @@ js_identifier_continue(Char) :-
 % value names from public definitions, and the full declaration node of each
 % public `type` (its constructors are exported with it).
 normalise_items([], [], [], []).
-normalise_items([use_node(_, _) | Rest], CleanItems, ValueNames, TypeDeclarations) :- !,
+normalise_items([use_node(_, _, _) | Rest], CleanItems, ValueNames, TypeDeclarations) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
 % A whole-module `use ./Math` seeds the environment directly (the loader has
 % already entered every imported member under its qualified name), so like a
 % named `use` it leaves no item behind for inference.
-normalise_items([use_all_node(_) | Rest], CleanItems, ValueNames, TypeDeclarations) :- !,
+normalise_items([use_all_node(_, _) | Rest], CleanItems, ValueNames, TypeDeclarations) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
-normalise_items([public_node(definition_node(identifier_node(Name), Annotation, Value)) | Rest],
-                [definition_node(identifier_node(Name), Annotation, Value) | CleanItems],
+% Unwrapping `public` keeps the inner node's own spans (`NSpan`, `DSpan`, ...),
+% so the lifted item still points at its source.  The `public` wrapper's own
+% span is discarded -- it was only the `public` keyword prefix.
+normalise_items([public_node(definition_node(identifier_node(Name, NSpan), Annotation, Value, DSpan), _) | Rest],
+                [definition_node(identifier_node(Name, NSpan), Annotation, Value, DSpan) | CleanItems],
                 [Name | ValueNames], TypeDeclarations) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
-normalise_items([public_node(type_declaration_node(Name, Parameters, Opacity, Body)) | Rest],
-                [type_declaration_node(Name, Parameters, Opacity, Body) | CleanItems],
+normalise_items([public_node(type_declaration_node(Name, Parameters, Opacity, Body, TSpan), _) | Rest],
+                [type_declaration_node(Name, Parameters, Opacity, Body, TSpan) | CleanItems],
                 ValueNames,
-                [type_declaration_node(Name, Parameters, Opacity, Body) | TypeDeclarations]) :- !,
+                [type_declaration_node(Name, Parameters, Opacity, Body, TSpan) | TypeDeclarations]) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
 % A `public external` exports a value (its name); the external itself stays in
 % the clean items so `seed_externals` binds it and codegen emits it.
-normalise_items([public_node(external_node(Name, Type, Source)) | Rest],
-                [external_node(Name, Type, Source) | CleanItems],
+normalise_items([public_node(external_node(Name, Type, Source, ESpan), _) | Rest],
+                [external_node(Name, Type, Source, ESpan) | CleanItems],
                 [Name | ValueNames], TypeDeclarations) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
-normalise_items([public_node(Other) | _], _, _, _) :- !,
+normalise_items([public_node(Other, _) | _], _, _, _) :- !,
   throw(analysis_error(cannot_export(Other))).
 normalise_items([Item | Rest], [Item | CleanItems], ValueNames, TypeDeclarations) :-
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
@@ -213,7 +216,7 @@ export_values([Name | Names], Environment, [Name - defined(Scheme) | Rest]) :-
 % additionally contributes every constructor's `constructor_key/1` info (a type
 % entry) and its value scheme (a value entry).
 export_types([], _Environment, _TypeEnvironment, [], []).
-export_types([type_declaration_node(Name, _Parameters, _Opacity, Body) | Declarations],
+export_types([type_declaration_node(Name, _Parameters, _Opacity, Body, _) | Declarations],
              Environment, TypeEnvironment, ValueEntries, TypeEntries) :-
   get_assoc(Name, TypeEnvironment, Info),
   export_constructors(Body, Environment, TypeEnvironment, ConstructorValueEntries, ConstructorTypeEntries),
@@ -227,7 +230,7 @@ export_constructors(variant_body(Constructors), Environment, TypeEnvironment,
 export_constructors(_OtherBody, _Environment, _TypeEnvironment, [], []).
 
 export_constructor_list([], _Environment, _TypeEnvironment, [], []).
-export_constructor_list([constructor(CtorName, _Fields) | Rest], Environment, TypeEnvironment,
+export_constructor_list([constructor(CtorName, _Fields, _) | Rest], Environment, TypeEnvironment,
                         [CtorName - defined(CtorScheme) | RestValueEntries],
                         [constructor_key(CtorName) - CtorInfo | RestTypeEntries]) :-
   get_assoc(CtorName, Environment, defined(CtorScheme)),

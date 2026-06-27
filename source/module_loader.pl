@@ -42,7 +42,7 @@
 :- use_module(library(lists)).
 :- use_module(library(assoc)).
 :- use_module(parser, [parse/2]).
-:- use_module(module_expander, [expand_modules/2]).
+:- use_module('transformation/module', [expand_modules/2]).
 :- use_module(namespace_import, [
   namespace_of/2,
   seed_namespace/9,
@@ -119,8 +119,8 @@ force_char_list([Character | Characters], [Character | Forced]) :-
 module_dependencies(program_node(Items), Module, Dependencies) :-
   module_directory(Module, Directory),
   findall(Dependency,
-          ( ( member(use_node(Path, _Names), Items)
-            ; member(use_all_node(Path), Items)
+          ( ( member(use_node(Path, _Names, _), Items)
+            ; member(use_all_node(Path, _), Items)
             ),
             resolve_source_path(Directory, Path, Dependency) ),
           Dependencies).
@@ -166,7 +166,7 @@ resolve_imports(program_node(Items), Directory, Interfaces, SeedValueEnvironment
                        ImportPlan, NamespaceBases, NamespaceMembers, ConstructorTags).
 
 resolve_import_items([], _Directory, _Interfaces, V, T, V, T, [], [], [], []).
-resolve_import_items([use_node(Path, Names) | Rest], Directory, Interfaces, V0, T0, V, T,
+resolve_import_items([use_node(Path, Names, _) | Rest], Directory, Interfaces, V0, T0, V, T,
                      [import_plan(JsSpecifier, RuntimeNames) | Plans], Bases, Members, Tags) :- !,
   resolve_source_path(Directory, Path, Dependency),
   ( get_assoc(Dependency, Interfaces, Interface) ->
@@ -176,7 +176,7 @@ resolve_import_items([use_node(Path, Names) | Rest], Directory, Interfaces, V0, 
   import_names(Names, Path, Interface, V0, T0, V1, T1, RuntimeNames),
   append(Path, ".js", JsSpecifier),
   resolve_import_items(Rest, Directory, Interfaces, V1, T1, V, T, Plans, Bases, Members, Tags).
-resolve_import_items([use_all_node(Path) | Rest], Directory, Interfaces, V0, T0, V, T,
+resolve_import_items([use_all_node(Path, _) | Rest], Directory, Interfaces, V0, T0, V, T,
                      [namespace_plan(JsSpecifier, Renames) | Plans],
                      [Namespace | Bases], Members, Tags) :- !,
   resolve_source_path(Directory, Path, Dependency),
@@ -231,7 +231,7 @@ rewrite_imports(program_node(Items), ImportPlan, program_node(NewItems)) :-
   rewrite_import_items(Items, ImportPlan, NewItems).
 
 rewrite_import_items([], [], []).
-rewrite_import_items([use_node(_, _) | Rest], [import_plan(JsSpecifier, RuntimeNames) | Plans], NewItems) :- !,
+rewrite_import_items([use_node(_, _, _) | Rest], [import_plan(JsSpecifier, RuntimeNames) | Plans], NewItems) :- !,
   ( RuntimeNames == [] ->
       NewItems = NewRest
   ; NewItems = [import_node(JsSpecifier, RuntimeNames) | NewRest]
@@ -239,7 +239,7 @@ rewrite_import_items([use_node(_, _) | Rest], [import_plan(JsSpecifier, RuntimeN
   rewrite_import_items(Rest, Plans, NewRest).
 % A whole-module import becomes a renamed ES import; an empty rename set (the
 % dependency exports no runtime values) is dropped entirely.
-rewrite_import_items([use_all_node(_) | Rest], [namespace_plan(JsSpecifier, Renames) | Plans], NewItems) :- !,
+rewrite_import_items([use_all_node(_, _) | Rest], [namespace_plan(JsSpecifier, Renames) | Plans], NewItems) :- !,
   ( Renames == [] ->
       NewItems = NewRest
   ; NewItems = [namespace_import_node(JsSpecifier, Renames) | NewRest]

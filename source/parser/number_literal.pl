@@ -1,12 +1,17 @@
 :- module(number_literal, [number_literal//1]).
 
 :- use_module(library(dcgs)).
+:- use_module(position, [here//1, span_between/3]).
 
-number_literal(number_node(Number)) -->
-  binary_number_literal(Number)
+number_literal(number_node(Number, Span)) -->
+  here(Start),
+  ( binary_number_literal(Number)
   | octal_number_literal(Number)
   | decimal_number_literal(Number)
-  | hexadecimal_number_literal(Number).
+  | hexadecimal_number_literal(Number)
+  ),
+  here(End),
+  { span_between(Start, End, Span) }.
 
 %% integer_literal(+DigitFunctor, +Radix, -Number, -DigitsCount).
 %
