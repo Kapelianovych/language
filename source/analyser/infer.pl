@@ -1,5 +1,6 @@
 :- module(infer, [
   infer_program/6,
+  infer_program_accumulating/7,
   infer/8
 ]).
 
@@ -82,6 +83,58 @@
 infer_program(program_node(Expressions), TypeEnvironment, InitialEnvironment, ContextIn,
               program_type(LastType, ContextOut), FinalEnvironment) :-
   infer_sequence(Expressions, 0, false, InitialEnvironment, TypeEnvironment, ContextIn, LastType, FinalEnvironment, ContextOut).
+
+%% infer_program_accumulating(+ProgramNode, +TypeEnvironment, +InitialEnvironment,
+%%                            +ContextIn, -Result, -FinalEnvironment, -Errors).
+%
+% Same inference as `infer_program/6` -- the SAME judgement, environment and
+% unifier -- but instead of letting the first `analysis_error` propagate, each
+% TOP-LEVEL item is wrapped so an error is RECORDED (`error_at(Span, Reason)`)
+% and the walk continues with that name left as its forward placeholder.  This
+% is what the LSP/incremental path uses to report errors in several definitions
+% at once; the batch compiler keeps using the throwing `infer_program/6`.
+% (One error per top-level item: a thrown error abandons that item's body.)
+infer_program_accumulating(program_node(Expressions), TypeEnvironment, InitialEnvironment, ContextIn,
+                           program_type(LastType, ContextOut), FinalEnvironment, Errors) :-
+  definition_names(Expressions, Names),
+  prebind_forward(Names, 0, InitialEnvironment, ContextIn, Environment1, Context1),
+  walk_accumulating(Expressions, 0, false, Environment1, TypeEnvironment, Context1,
+                    LastType, FinalEnvironment, ContextOut, [], ReverseErrors),
+  reverse(ReverseErrors, Errors).
+
+walk_accumulating([], _Level, _InsideFunction, Environment, _TypeEnvironment, Context,
+                  tuple_type([], closed), Environment, Context, Errors, Errors).
+walk_accumulating([Expression], Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
+                  ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut) :-
+  try_item(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
+           ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut).
+walk_accumulating([Expression, Next | Rest], Level, InsideFunction, Environment, TypeEnvironment,
+                  ContextIn, ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut) :-
+  try_item(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
+           _Type, Environment1, Context1, ErrorsIn, Errors1),
+  walk_accumulating([Next | Rest], Level, InsideFunction, Environment1, TypeEnvironment,
+                    Context1, ResultType, FinalEnvironment, ContextOut, Errors1, ErrorsOut).
+
+% Infer one top-level item; on an analysis error, record it (with the item's
+% span) and continue from the PRE-item environment/context so later items are
+% still checked.  Reuses the ordinary `infer_sequence_item/9` (same rules).
+try_item(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
+         Type, EnvironmentOut, ContextOut, ErrorsIn, ErrorsOut) :-
+  catch(
+    ( infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironment,
+                          ContextIn, Type, EnvironmentOut, ContextOut),
+      ErrorsOut = ErrorsIn ),
+    analysis_error(Reason),
+    ( EnvironmentOut = Environment, ContextOut = ContextIn, Type = tuple_type([], closed),
+      item_span(Expression, Span),
+      ErrorsOut = [error_at(Span, Reason) | ErrorsIn] )
+  ).
+
+item_span(definition_node(_, _, _, Span), Span) :- !.
+item_span(destructuring_node(_, _, Span), Span) :- !.
+item_span(external_node(_, _, _, Span), Span) :- !.
+item_span(Node, Span) :- Node =.. Args, append(_, [Last], Args), Last = span(_, _), !, Span = Last.
+item_span(_Node, span(0, 0)).
 
 % ---------------------------------------------------------------------------
 % Sequences: programs and blocks  (this is where `let` lives)

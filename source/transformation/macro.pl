@@ -55,10 +55,15 @@
     file establishes the type-check stage only.
 */
 
+% Names in the AST are CHAR lists, and this module compares them against string
+% literals like "parseItem" / "Ast" / "Compiler"; read those literals as chars so
+% the comparisons hold regardless of file load order.
+:- set_prolog_flag(double_quotes, chars).
+
 :- use_module(library(assoc)).
 :- use_module(library(lists)).
 :- use_module('../analyser', [analyse_module/5]).
-:- use_module('../parser', [parse/2]).
+:- use_module('../syntax/lower', [parse_source/2]).
 
 %% check_macros(+ProgramAst).
 %
@@ -422,7 +427,7 @@ bind_parameters([parameter_node(Pattern, _, _) | Parameters], [Value | Values], 
 
 % `parseItem`: parse the text as a program and require exactly one item.
 parse_item(Chars, Node) :-
-  ( parse(Chars, program_node(Items)) -> true ; throw(analysis_error(macro_parse_failed(Chars))) ),
+  ( catch(parse_source(Chars, program_node(Items)), _, fail) -> true ; throw(analysis_error(macro_parse_failed(Chars))) ),
   ( Items = [Node] -> true ; throw(analysis_error(macro_parse_not_single_item(Chars))) ).
 
 % A block: definitions bind sequentially; the block's value is its last

@@ -1,4 +1,4 @@
-:- module(analyser, [analyse/2, analyse_module/5]).
+:- module(analyser, [analyse/2, analyse_module/5, analyse_accumulating/6]).
 
 /*  analyser.pl  --  Type checker entry point.
 
@@ -46,7 +46,7 @@
   build_type_environment/4,
   convert_annotation_type/6
 ]).
-:- use_module(analyser/infer, [infer_program/6]).
+:- use_module(analyser/infer, [infer_program/6, infer_program_accumulating/7]).
 :- use_module('transformation/module', [expand_modules/2]).
 :- use_module(unicode, [xid_start/1, xid_continue/1]).
 
@@ -99,6 +99,91 @@ analyse_module(ProgramAst, SeedValueEnvironment, SeedTypeEnvironment,
   context_substitution(Context, Substitution),
   collect_exports(PublicValueNames, PublicTypeDeclarations, FinalEnvironment, TypeEnvironment,
                   ValueEntries, TypeEntries).
+
+%% analyse_accumulating(+AST, +SeedValueEnv, +SeedTypeEnv, -Errors, -DefinitionTypes, -Interface).
+%
+% The SAME checker as `analyse_module/5` -- identical environment setup and the
+% identical inference rules -- but it ACCUMULATES type errors instead of
+% throwing on the first (via `infer:infer_program_accumulating/7`).  `Errors` is
+% a list of `error_at(Span, Reason)`.  `DefinitionTypes` is `Name - ResolvedType`
+% for each top-level definition (for editor hover).  `Interface` is this module's
+% `module_interface(ValueEntries, TypeEntries)` -- exactly the shape
+% `analyse_module/5` produces -- so the incremental engine can seed an importing
+% file's environment from it (cross-file imports).  This is the single
+% full-coverage checker the LSP / incremental engine uses; the batch compiler
+% keeps `analyse/2` (which throws on the first error).
+%
+% Export collection here is BEST-EFFORT (unlike `collect_exports/6`, which
+% throws): in an editor a module is often mid-edit, so a public name whose body
+% failed to type is simply omitted from the interface rather than aborting the
+% whole analysis.
+analyse_accumulating(ProgramAst, SeedValueEnvironment, SeedTypeEnvironment, Errors, DefinitionTypes,
+                     module_interface(ValueEntries, TypeEntries)) :-
+  expand_modules(ProgramAst, program_node(Items)),
+  normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
+  CleanAST = program_node(CleanItems),
+  build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),
+  constructor_environment(ConstructorBindings, SeedValueEnvironment, ConstructorEnvironment),
+  empty_context(Context0),
+  seed_externals(CleanItems, TypeEnvironment, 0, ConstructorEnvironment, Context0, InitialEnvironment, Context1),
+  infer_program_accumulating(CleanAST, TypeEnvironment, InitialEnvironment, Context1,
+                             program_type(_LastType, Context), FinalEnvironment, Errors),
+  definition_types(CleanItems, FinalEnvironment, Context, DefinitionTypes),
+  collect_exports_best_effort(PublicValueNames, PublicTypeDeclarations, FinalEnvironment, TypeEnvironment,
+                              ValueEntries, TypeEntries).
+
+% Like `collect_exports/6`, but omits any name that is missing or ambiguous
+% rather than throwing (see `analyse_accumulating/6`).
+collect_exports_best_effort(ValueNames, TypeDeclarations, FinalEnvironment, TypeEnvironment,
+                            ValueEntries, TypeEntries) :-
+  export_values_best_effort(ValueNames, FinalEnvironment, ValueValueEntries),
+  export_types_best_effort(TypeDeclarations, FinalEnvironment, TypeEnvironment, TypeValueEntries, TypeEntries),
+  append(ValueValueEntries, TypeValueEntries, ValueEntries).
+
+export_values_best_effort([], _Environment, []).
+export_values_best_effort([Name | Names], Environment, Entries) :-
+  ( get_assoc(Name, Environment, defined(Scheme)),
+    scheme_free_unification_variables(Scheme, []) ->
+      Entries = [Name - defined(Scheme) | Rest]
+  ; Entries = Rest ),
+  export_values_best_effort(Names, Environment, Rest).
+
+export_types_best_effort([], _Environment, _TypeEnvironment, [], []).
+export_types_best_effort([type_declaration_node(Name, _Parameters, _Opacity, Body, _) | Declarations],
+                         Environment, TypeEnvironment, ValueEntries, TypeEntries) :-
+  ( get_assoc(Name, TypeEnvironment, Info) ->
+      export_constructors_best_effort(Body, Environment, TypeEnvironment, ConstructorValueEntries, ConstructorTypeEntries),
+      HeadTypeEntries = [Name - Info | ConstructorTypeEntries]
+  ; ConstructorValueEntries = [], HeadTypeEntries = [] ),
+  export_types_best_effort(Declarations, Environment, TypeEnvironment, RestValueEntries, RestTypeEntries),
+  append(ConstructorValueEntries, RestValueEntries, ValueEntries),
+  append(HeadTypeEntries, RestTypeEntries, TypeEntries).
+
+export_constructors_best_effort(variant_body(Constructors), Environment, TypeEnvironment,
+                                ValueEntries, TypeEntries) :- !,
+  export_constructor_list_best_effort(Constructors, Environment, TypeEnvironment, ValueEntries, TypeEntries).
+export_constructors_best_effort(_OtherBody, _Environment, _TypeEnvironment, [], []).
+
+export_constructor_list_best_effort([], _Environment, _TypeEnvironment, [], []).
+export_constructor_list_best_effort([constructor(CtorName, _Fields, _) | Rest], Environment, TypeEnvironment,
+                                    ValueEntries, TypeEntries) :-
+  ( get_assoc(CtorName, Environment, defined(CtorScheme)),
+    get_assoc(constructor_key(CtorName), TypeEnvironment, CtorInfo) ->
+      ValueEntries = [CtorName - defined(CtorScheme) | RestValueEntries],
+      TypeEntries = [constructor_key(CtorName) - CtorInfo | RestTypeEntries]
+  ; ValueEntries = RestValueEntries, TypeEntries = RestTypeEntries ),
+  export_constructor_list_best_effort(Rest, Environment, TypeEnvironment, RestValueEntries, RestTypeEntries).
+
+% Resolve each top-level definition's generalised scheme to a display monotype.
+definition_types([], _Environment, _Context, []).
+definition_types([definition_node(identifier_node(Name, _), _, _, _) | Rest], Environment, Context,
+                 [Name - Resolved | DefinitionTypes]) :- !,
+  ( get_assoc(Name, Environment, defined(type_scheme(_, Body))) ->
+      fully_resolve(Body, Context, Resolved)
+  ; Resolved = unknown ),
+  definition_types(Rest, Environment, Context, DefinitionTypes).
+definition_types([_Other | Rest], Environment, Context, DefinitionTypes) :-
+  definition_types(Rest, Environment, Context, DefinitionTypes).
 
 % Seed a term environment from the constructor schemes (each a `defined`
 % binding usable anywhere), starting from the imported value environment.

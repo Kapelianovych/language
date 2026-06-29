@@ -7,7 +7,7 @@
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
 :- use_module(library(error)).
-:- use_module(parser, [parse/2]).
+:- use_module('syntax/lower', [parse_source/2]).
 :- use_module(analyser, [analyse/2]).
 :- use_module(generator, [generate/2]).
 :- use_module(module_loader, [compile_program/1]).
@@ -18,7 +18,7 @@
 % Compiles source text into output text.
 compile(Source, Output, AnalysisResult) :-
   once((
-    parse(Source, ParsedAst),
+    parse_source(Source, ParsedAst),
     % Process reader macros (type-check bodies, then expand invocations) before
     % type-checking and generating the resulting program.
     check_macros(ParsedAst),
