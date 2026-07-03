@@ -286,15 +286,27 @@ expand_each([Item | Rest], Table, [Out | Outs]) :-
 
 % Walk a term: expand a macro invocation (then re-expand its result), otherwise
 % recurse structurally.  Atomic terms (and spans) are returned unchanged.
-expand_term(macro_call_node(Name, ArgumentExpressions, Source, _Span), Table, Out) :- !,
-  expand_invocation(Name, ArgumentExpressions, Source, Table, Node),
-  expand_term(Node, Table, Out).
+expand_term(macro_call_node(Name, ArgumentExpressions, Source, Span), Table, Out) :- !,
+  % Attach this invocation's span to any error raised while expanding it, so a
+  % macro diagnostic points at the offending `@invocation` rather than the file
+  % start.  A macro that expands into another keeps the INNERMOST (deepest) span.
+  catch(
+    ( expand_invocation(Name, ArgumentExpressions, Source, Table, Node),
+      expand_term(Node, Table, Out) ),
+    analysis_error(Reason),
+    rethrow_with_span(Span, Reason)
+  ).
 expand_term(Term, Table, Out) :-
   compound(Term), !,
   Term =.. [Functor | Arguments],
   expand_arguments(Arguments, Table, Arguments1),
   Out =.. [Functor | Arguments1].
 expand_term(Atomic, _Table, Atomic).
+
+rethrow_with_span(_Span, at(InnerSpan, Reason)) :- !,
+  throw(analysis_error(at(InnerSpan, Reason))).       % keep the deeper span
+rethrow_with_span(Span, Reason) :-
+  throw(analysis_error(at(Span, Reason))).
 
 expand_arguments([], _Table, []).
 expand_arguments([Argument | Arguments], Table, [Out | Outs]) :-
@@ -685,7 +697,7 @@ resolve_guard(guard(Expression), Resolution, Locals, guard(Expression1)) :-
 resolve_uses(macro_call_node(Name, Arguments, Source, Span), Resolution, Out) :- !,
   ( get_assoc(Name, Resolution, Key) ->
       true
-  ; throw(analysis_error(unknown_macro(Name)))
+  ; throw(analysis_error(at(Span, unknown_macro(Name))))   % point at the `@invocation`
   ),
   resolve_uses_list(Arguments, Resolution, Arguments1),
   Out = macro_call_node(Key, Arguments1, Source, Span).

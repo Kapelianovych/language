@@ -215,6 +215,10 @@ reason_text(unknown_constructor(Name), Msg) :- !,
   name_chars(Name, NC), append("unknown constructor `", NC, P), append(P, "`", Msg).
 reason_text(undeclared_type(Name), Msg) :- !,
   name_chars(Name, NC), append("undeclared type `", NC, P), append(P, "`", Msg).
+reason_text(name_not_exported(Path, Name), Msg) :- !,
+  name_chars(Name, NC), name_chars(Path, PC),
+  append("`", NC, P1), append(P1, "` is not exported by `", P2),
+  append(P2, PC, P3), append(P3, "`", Msg).
 reason_text(occurs_check(_), "cannot construct an infinite type") :- !.
 reason_text(non_exhaustive_match(_, _), "non-exhaustive match") :- !.
 reason_text(Reason, Msg) :-                                % generic fallback
@@ -306,9 +310,15 @@ hover_response(Uri, Line, Char, Result) :-
       hover_contents(Name, Type, Result)
   ; Result = null ).
 
-% Find the definition whose value/name region contains Offset.  We approximate
-% by choosing the definition whose name appears on the cursor's line, then ask
-% the engine for that definition's resolved type (`type_at`).
+% Resolve the definition/type under the cursor.  PRECISE path: `node_at` gives
+% the identifier token the cursor is on (works at a USE site, not only on the
+% definition line); if that name is a known top-level definition, report its
+% type.  FALLBACK: the older line heuristic (the cursor is somewhere on a
+% definition's line but not on its name token -- e.g. on the value).
+definition_at(Path, Offset, Name, Type) :-
+  query(node_at(Path, Offset), found(_Kind, _Span, token(ident, Name, _))),
+  query(type_at(Path, Name), Type),
+  Type \== unknown, !.
 definition_at(Path, Offset, Name, Type) :-
   query(src(Path), Text),
   offset_to_position(Text, Offset, pairs([string("line")-number(Line) | _])),

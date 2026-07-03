@@ -283,11 +283,20 @@ compute(expanded_ast(File), Result) :-
       canonical_chars(File, CanonicalFile),
       parsed_asts(Order, ParsedAsts),
       ( catch(process_macros(Order, ParsedAsts, ExpandedAsts), Reason, Threw = Reason)
-        -> ( nonvar(Threw) -> Result = macro_error(Threw)
+        -> ( nonvar(Threw) -> macro_error_location(Threw, Span, MacroReason),
+                              Result = macro_error(Span, MacroReason)
            ; get_assoc(CanonicalFile, ExpandedAsts, Expanded) -> Result = expanded(Expanded)
-           ; Result = macro_error(macro_expansion_missing) )
-        ;  Result = macro_error(macro_expansion_failed) )
+           ; Result = macro_error(span(0, 0), macro_expansion_missing) )
+        ;  Result = macro_error(span(0, 0), macro_expansion_failed) )
   ; Result = expanded(Ast) ).
+
+% Split a thrown macro error into (Span, Reason).  A macro-invocation error is
+% wrapped `analysis_error(at(Span, Reason))` by `transformation/macro.pl` (so it
+% points at the `@invocation`); a whole-program macro error (e.g. a duplicate
+% macro) is a bare `analysis_error(Reason)` with no span, reported at file start.
+macro_error_location(analysis_error(at(Span, Reason)), Span, Reason) :- !.
+macro_error_location(analysis_error(Reason), span(0, 0), Reason) :- !.
+macro_error_location(Other, span(0, 0), Other).
 
 % --- macro-expansion helpers ----------------------------------------------
 
@@ -362,39 +371,47 @@ ast_has_macros(Term) :-
 % dependency's interface through `query(interface(Dep))` so the dependency edge
 % is recorded (editing a dependency re-checks its importers) and the result is
 % memoised.  Seeding is BEST-EFFORT: a name the dependency does not export is
-% left unseeded and surfaces as an `unbound_variable` in the importer, rather
-% than aborting analysis.  `Bases`/`Members` drive the whole-module-import access
-% collapse (`Namespace.member` -> a flat qualified identifier) below.
-compute(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members)) :-
+% left unseeded (so analysis continues) but is ALSO reported as an
+% `ImportErrors` entry -- `error_at(UseSpan, name_not_exported(Path, Name))` --
+% so the diagnostic points at the `use` and names the module, instead of only
+% surfacing later as a generic `unbound_variable` at each use site.
+% `Bases`/`Members` drive the whole-module-import access collapse
+% (`Namespace.member` -> a flat qualified identifier) below.
+compute(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members, ImportErrors)) :-
   query(program_ast(File), program_node(Items)),
   module_directory(File, Directory),
   empty_assoc(V0), empty_assoc(T0),
-  seed_imports(Items, Directory, V0, T0, SeedValues, SeedTypes, [], Bases, [], Members).
+  seed_imports(Items, Directory, V0, T0, SeedValues, SeedTypes, [], Bases, [], Members, [], ImportErrors).
 
-seed_imports([], _Directory, V, T, V, T, Bases, Bases, Members, Members).
-seed_imports([use_node(Path, Names, _) | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members) :-
+seed_imports([], _Directory, V, T, V, T, Bases, Bases, Members, Members, Errors, Errors).
+seed_imports([use_node(Path, Names, Span) | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members, E0, E) :-
   Path \== "Compiler", !,                       % the compiler-macro import is not a file
   dependency_interface_of(Directory, Path, module_interface(ValueEntries, TypeEntries)),
-  seed_named_imports(Names, ValueEntries, TypeEntries, V0, T0, V1, T1),
-  seed_imports(Rest, Directory, V1, T1, V, T, Bases0, Bases, Members0, Members).
-seed_imports([use_all_node(Path, _) | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members) :- !,
+  seed_named_imports(Names, Path, Span, ValueEntries, TypeEntries, V0, T0, V1, T1, E0, E1),
+  seed_imports(Rest, Directory, V1, T1, V, T, Bases0, Bases, Members0, Members, E1, E).
+seed_imports([use_all_node(Path, _) | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members, E0, E) :- !,
   dependency_interface_of(Directory, Path, Interface),
   namespace_of(Path, Namespace),
   seed_namespace(Namespace, Interface, V0, T0, V1, T1, _Renames, MemberNames, _Tags),
   append(MemberNames, Members0, Members1),
-  seed_imports(Rest, Directory, V1, T1, V, T, [Namespace | Bases0], Bases, Members1, Members).
-seed_imports([_Other | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members) :-
-  seed_imports(Rest, Directory, V0, T0, V, T, Bases0, Bases, Members0, Members).
+  seed_imports(Rest, Directory, V1, T1, V, T, [Namespace | Bases0], Bases, Members1, Members, E0, E).
+seed_imports([_Other | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members, E0, E) :-
+  seed_imports(Rest, Directory, V0, T0, V, T, Bases0, Bases, Members0, Members, E0, E).
 
 % Seed each named import across the value, type and constructor namespaces.  A
-% name absent from the interface is silently skipped (see above).
-seed_named_imports([], _ValueEntries, _TypeEntries, V, T, V, T).
-seed_named_imports([Name | Names], ValueEntries, TypeEntries, V0, T0, V, T) :-
-  ( member(Name - ValueEntry, ValueEntries) -> put_assoc(Name, V0, ValueEntry, V1) ; V1 = V0 ),
-  ( member(Name - TypeEntry, TypeEntries) -> put_assoc(Name, T0, TypeEntry, Ta) ; Ta = T0 ),
+% name in NONE of them is left unseeded and recorded as a `name_not_exported`
+% error at the `use`'s span (see the `import_seeds` note above).
+seed_named_imports([], _Path, _Span, _ValueEntries, _TypeEntries, V, T, V, T, E, E).
+seed_named_imports([Name | Names], Path, Span, ValueEntries, TypeEntries, V0, T0, V, T, E0, E) :-
+  ( member(Name - ValueEntry, ValueEntries) -> put_assoc(Name, V0, ValueEntry, V1), FoundValue = true ; V1 = V0, FoundValue = false ),
+  ( member(Name - TypeEntry, TypeEntries) -> put_assoc(Name, T0, TypeEntry, Ta), FoundType = true ; Ta = T0, FoundType = false ),
   ( member(constructor_key(Name) - ConstructorEntry, TypeEntries) ->
-      put_assoc(constructor_key(Name), Ta, ConstructorEntry, T1) ; T1 = Ta ),
-  seed_named_imports(Names, ValueEntries, TypeEntries, V1, T1, V, T).
+      put_assoc(constructor_key(Name), Ta, ConstructorEntry, T1), FoundConstructor = true ; T1 = Ta, FoundConstructor = false ),
+  ( ( FoundValue == true ; FoundType == true ; FoundConstructor == true ) ->
+      E1 = E0
+  ; E1 = [error_at(Span, name_not_exported(Path, Name)) | E0]
+  ),
+  seed_named_imports(Names, Path, Span, ValueEntries, TypeEntries, V1, T1, V, T, E1, E).
 
 % A dependency's interface, resolved through the query engine.  The
 % `resolving_dependency/1` guard breaks IMPORT CYCLES: if we are already
@@ -420,16 +437,20 @@ dependency_interface_of(Directory, Path, Interface) :-
 compute(analysis(File), analysis(Errors, DefinitionTypes, Interface)) :-
   query(expanded_ast(File), Expansion),
   ( Expansion = expanded(Ast) ->
-      query(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members)),
+      query(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members, ImportErrors)),
       collapse_namespace_access(Ast, Bases, Members, ResolvedAst),
+      % Import errors (a name not exported by a dependency) lead the list, so the
+      % `use`-site diagnostic shows even when the same name later also trips an
+      % `unbound_variable` at its use sites.
       ( catch(analyse_accumulating(ResolvedAst, SeedValues, SeedTypes, Es, Ds, Iface), Reason,
               ( Es = [error_at(span(0, 0), Reason)], Ds = [], Iface = module_interface([], []) ))
-        -> Errors = Es, DefinitionTypes = Ds, Interface = Iface
-        ;  Errors = [error_at(span(0, 0), analysis_failed)], DefinitionTypes = [],
+        -> append(ImportErrors, Es, Errors), DefinitionTypes = Ds, Interface = Iface
+        ;  append(ImportErrors, [error_at(span(0, 0), analysis_failed)], Errors), DefinitionTypes = [],
            Interface = module_interface([], []) )
-  ; % Expansion = macro_error(Reason)
-    Expansion = macro_error(MacroReason),
-    Errors = [error_at(span(0, 0), MacroReason)], DefinitionTypes = [],
+  ; % Expansion = macro_error(Span, Reason) -- Span points at the offending
+    % `@invocation` (file start for a whole-program macro error).
+    Expansion = macro_error(MacroSpan, MacroReason),
+    Errors = [error_at(MacroSpan, MacroReason)], DefinitionTypes = [],
     Interface = module_interface([], []) ).
 
 % A PROJECTION of `analysis` to just the module interface.  Importers depend on
@@ -449,3 +470,93 @@ compute(diagnostics(File), All) :-
 compute(type_at(File, Name), Type) :-
   query(analysis(File), analysis(_, DefinitionTypes, _)),
   ( member(Name - Type, DefinitionTypes) -> true ; Type = unknown ).
+
+% ===========================================================================
+% Node-at-offset -- locate the cursor in the green tree.
+%
+% Given a 0-based character `Offset`, `node_at(File, Offset)` returns
+%
+%     found(EnclosingKind, span(NS, NE), Token)
+%
+% where the ENCLOSING node is the SMALLEST green node whose extent covers the
+% offset (its significant span is span(NS,NE)), and `Token` is the leaf the
+% cursor sits on: `token(Kind, Text, span(TS, TE))`, or `none` when the offset
+% falls in a gap between a node's children.  `none` (the whole result) when the
+% offset lies outside the tree.
+%
+% This is the one piece of infrastructure precise hover, go-to-definition,
+% find-references, selection ranges and document highlight all build on: each is
+% "locate the cursor, then interpret the node/token found".  Descent uses each
+% child's FULL extent (first..last leaf, trivia included) so a click inside
+% whitespace still resolves to the enclosing construct; the reported span is the
+% SIGNIFICANT one (trivia/`missing` excluded), matching the spans `lower`
+% produces elsewhere.
+% ===========================================================================
+compute(node_at(File, Offset), Result) :-
+  query(parse(File), parsed(Tree, _)),
+  ( descend(Tree, Offset, Enclosing, Leaf) ->
+      Enclosing = node(EnclosingKind, _),
+      significant_span(Enclosing, span(NS, NE)),
+      ( Leaf = t(TokenKind, Text, TS, TE) ->
+          Token = token(TokenKind, Text, span(TS, TE))
+      ; Token = none ),
+      Result = found(EnclosingKind, span(NS, NE), Token)
+  ; Result = none ).
+
+% Descend to the smallest node covering Offset.  `Enclosing` is that node;
+% `Leaf` is the covering leaf within it, or `none` if the offset lands in a gap
+% between children.  Fails if this node does not cover the offset at all.
+descend(node(Kind, Children), Offset, Enclosing, Leaf) :-
+  covers(node(Kind, Children), Offset),
+  ( covering_child(Children, Offset, Child) ->
+      ( Child = node(_, _) ->
+          descend(Child, Offset, Enclosing, Leaf)      % a deeper node covers it
+      ; Enclosing = node(Kind, Children), Leaf = Child ) % covering leaf: this node is smallest
+  ; Enclosing = node(Kind, Children), Leaf = none ).     % offset in an inter-child gap
+
+% The first child whose full extent covers Offset.
+covering_child([Child | Rest], Offset, Found) :-
+  ( covers(Child, Offset) -> Found = Child ; covering_child(Rest, Offset, Found) ).
+
+% Half-open [Start, End) cover test over a green term's FULL extent, so a
+% zero-width `missing` leaf [P,P) never covers and adjacent tokens do not both
+% match one offset.
+covers(Green, Offset) :-
+  full_extent(Green, Start, End),
+  Offset >= Start, Offset < End.
+
+% Full extent: earliest leaf start .. latest leaf end (trivia included).  Fails
+% on a term with no leaves (only zero-width leaves collapse to Start == End,
+% which `covers/2` then rejects).
+full_extent(Green, Start, End) :-
+  green_leaves(Green, Leaves),
+  Leaves = [t(_, _, Start, _) | _],
+  last_leaf_end(Leaves, End).
+
+last_leaf_end([t(_, _, _, E)], E) :- !.
+last_leaf_end([_ | Rest], E) :- last_leaf_end(Rest, E).
+
+% Significant span: first..last NON-trivia, NON-`missing` leaf (matches `lower`'s
+% `gspan`).  Falls back to (0,0) when a node has only trivia/missing leaves.
+significant_span(Green, span(Start, End)) :-
+  green_leaves(Green, All),
+  include_significant(All, Significant),
+  ( Significant = [t(_, _, Start, _) | _] ->
+      last_leaf_end(Significant, End)
+  ; Start = 0, End = 0 ).
+
+include_significant([], []).
+include_significant([Leaf | Rest], Out) :-
+  ( significant_leaf(Leaf) -> Out = [Leaf | Out1] ; Out = Out1 ),
+  include_significant(Rest, Out1).
+
+significant_leaf(t(Kind, _, Start, End)) :-
+  Kind \== whitespace, Kind \== comment, Kind \== missing, Start \== End.
+
+% In-order leaves of a green term.
+green_leaves(t(K, Tx, S, E), [t(K, Tx, S, E)]) :- !.
+green_leaves(node(_, Children), Leaves) :- green_leaves_list(Children, Leaves).
+
+green_leaves_list([], []).
+green_leaves_list([Child | Rest], Leaves) :-
+  green_leaves(Child, L1), green_leaves_list(Rest, L2), append(L1, L2, Leaves).

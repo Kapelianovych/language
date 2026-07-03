@@ -27,19 +27,23 @@ This document tracks what is left. Nothing here is a bug; it is depth and breadt
 - **Assessment:** this is the *correct* granularity for a whole-program layer and
   is probably fine to leave. Listed only for completeness.
 
-## 2. LSP feature breadth (today: diagnostics + hover only)
+## 2. LSP feature breadth (today: diagnostics + hover)
 
-### 2.1 Precise node-at-offset query (prerequisite — highest leverage)
-- A query that, given `(File, Offset)`, returns the smallest green-tree node (and
-  its lowered AST node / span) covering that offset.
-- Unlocks exact hover, go-to-definition, find-references, selection ranges, and
-  document highlight in one piece of infrastructure.
-- The green tree already has the spans; this is a focused descent over it.
+### 2.1 Precise node-at-offset query (prerequisite — highest leverage) — DONE
+- `queries:node_at(File, Offset)` returns `found(EnclosingKind, span(NS,NE),
+  Token)` — the smallest green node covering the offset and the leaf the cursor
+  sits on (`token(Kind, Text, span(TS,TE))` or `none`), or `none` when the
+  offset is outside the tree. A focused descent over the green tree's spans.
+- Still unlocks go-to-definition, find-references, selection ranges, and
+  document highlight — each is "call `node_at`, then interpret the result".
 
-### 2.2 Hover precision
-- **Now:** picks the definition whose name is on the cursor's line.
-- **Goal:** use the node-at-offset query (2.1) to report the type of the exact
-  expression/identifier under the cursor.
+### 2.2 Hover precision — PARTLY DONE
+- **Was:** picked the definition whose name is on the cursor's line.
+- **Now:** `node_at` gives the identifier token under the cursor, so hover
+  resolves at a USE site too (not only the definition line); if that name is a
+  top-level definition, its type is shown. Line heuristic kept as a fallback.
+- **Remaining:** per-expression types (the analyser exposes only top-level
+  definition types), so hover over an arbitrary sub-expression is not yet exact.
 
 ### 2.3 Go-to-definition / find-references
 - Resolve an identifier at the cursor to its binder (local, top-level, imported,
@@ -65,16 +69,27 @@ This document tracks what is left. Nothing here is a bug; it is depth and breadt
   edit, so re-lexing/re-parsing can reuse unchanged green-tree spans.
 
 ## 4. Smaller follow-ups
-- **Macro error spans.** Macro errors surface at `span(0,0)` (file start) instead
-  of the offending `@invocation`'s span.
-- **Import error messages.** A name absent from a dependency's interface degrades
-  to a generic `unbound_variable` rather than a tailored "not exported by <module>".
+- **Macro error spans.** — DONE. A macro-invocation error is wrapped
+  `analysis_error(at(Span, Reason))` at the `@invocation` (unknown macro in
+  `resolve_uses`, and interpretation-time errors via the `expand_term` catch,
+  keeping the innermost span for nested macros); `queries` splits that back into
+  `error_at(Span, Reason)`. Whole-program macro errors (e.g. a duplicate macro)
+  still have no invocation site and report at file start.
+- **Import error messages.** — DONE. A name a dependency does not export is now
+  reported as `error_at(useSpan, name_not_exported(Path, Name))` (rendered
+  "`Name` is not exported by `Path`"), threaded out of `import_seeds` and folded
+  into the file's diagnostics. The name is still left unseeded, so it may also
+  surface as an `unbound_variable` at its use sites; suppressing that secondary
+  error would need a placeholder seed and is left as a follow-up.
 
 ## Suggested order
-1. **2.1 node-at-offset** — unlocks 2.2/2.3 and most of 2.4.
-2. **2.2 precise hover** + **2.3 go-to-definition / find-references**.
-3. **3.1 UTF-16** and **4 (spans/messages)** — small, improve real-editor fidelity.
-4. **2.4 document symbols / semantic tokens**, then completion/rename.
-5. **1.1 per-definition granularity** — the largest analyser change; do last,
+1. ~~**2.1 node-at-offset**~~ — DONE. ~~**4 (spans/messages)**~~ — DONE.
+2. **2.3 go-to-definition / find-references** — next; builds on `node_at` (the
+   identifier token under the cursor) plus the existing interface/import machinery.
+3. **3.1 UTF-16 positions** — small, improves real-editor fidelity.
+4. **2.4 document symbols / semantic tokens** (cheap green-tree walks), then
+   completion/rename (need 2.3).
+5. **2.2 exact sub-expression hover** — needs per-node types (see 1.1).
+6. **1.1 per-definition granularity** — the largest analyser change; do last,
    measure first (file-granularity may be fast enough in practice).
-6. **3.2 incremental sync** — only if reparse-per-keystroke proves too slow.
+7. **3.2 incremental sync** — only if reparse-per-keystroke proves too slow.
