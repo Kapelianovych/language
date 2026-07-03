@@ -80,7 +80,7 @@
 
 :- use_module(library(lists)).
 :- use_module('../unicode', [xid_start/1, xid_continue/1]).
-:- use_module('../parser/whitespace', [is_whitespace/1, is_new_line/1]).
+:- use_module(whitespace, [is_whitespace/1, is_new_line/1]).
 
 % ---------------------------------------------------------------------------
 % Entry point.

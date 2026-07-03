@@ -31,8 +31,8 @@
 :- set_prolog_flag(double_quotes, chars).
 
 :- use_module(library(lists)).
-:- use_module('../parser/number_literal', [number_literal//1]).
-:- use_module('../parser/position', [set_input_length/1]).
+:- use_module(number_literal, [number_literal//1]).
+:- use_module(position, [set_input_length/1]).
 :- use_module('lexer',  [tokenize/2]).
 :- use_module('parser', [parse_tokens/3]).
 

@@ -1,4 +1,4 @@
-:- module(module_loader, [compile_program/1]).
+:- module(module_loader, [compile_program/3]).
 
 /*  module_loader.pl  --  Multi-file module loader and build driver.
 
@@ -6,7 +6,8 @@
     module and shadowing it makes user modules fail to load.)
 
     Given an entry `.sl` file, this resolves the whole import graph, type-checks
-    every module in dependency order, and writes one `.js` file per module.
+    every module in dependency order, and RETURNS the generated JavaScript per
+    module -- it performs no filesystem output itself (see compile_program/3).
 
     Pipeline:
 
@@ -21,8 +22,8 @@
                                      `analyse_module`, rewrite `use`/`use_all`
                                      nodes to `import_node`/`namespace_import_node`,
                                      rewrite imported constructor patterns to
-                                     their intrinsic tags, generate JavaScript,
-                                     write `<module>.js`
+                                     their intrinsic tags, generate JavaScript
+                                     (returned to the caller, NOT written here)
 
     A MODULE is identified by its normalised absolute-ish source path (a
     character list).  `use ./math:(..)` in a file `Dir/a.sl` refers to the
@@ -37,17 +38,14 @@
     public entry under a `math.`-qualified local name -- see `namespace_import`.
 */
 
-:- use_module(library(pio)).
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
 :- use_module(library(assoc)).
 :- use_module('syntax/lower', [parse_source/2]).
 :- use_module(module_paths, [
-  read_source_chars/2,
   normalise_path/2,
   module_directory/2,
-  resolve_source_path/3,
-  source_to_js_path/2
+  resolve_source_path/3
 ]).
 :- use_module('transformation/module', [expand_modules/2]).
 :- use_module('transformation/macro_program', [process_macros/3]).
@@ -60,15 +58,45 @@
 :- use_module(analyser, [analyse_module/5]).
 :- use_module(generator, [generate/2]).
 
-%% compile_program(+EntryPath).
+%% compile_program(+EntryPath, +ResolveModule, -CompiledModules).
 %
 % Compiles the module graph rooted at `EntryPath` (a `.sl` source path as a
-% character list), writing a `.js` file beside each module.
-compile_program(EntryPath) :-
+% character list).  `CompiledModules` is a list of `ModulePath - JavaScript`
+% pairs in dependency order (dependencies first), each JavaScript a character
+% list.
+%
+% I/O IS INJECTED / RETURNED, NOT PERFORMED HERE.  This predicate touches the
+% outside world only through `ResolveModule`; it never writes anything.  The
+% split is deliberate (functional core / imperative shell):
+%
+%   * INPUT is a closure because reading happens MID-ALGORITHM: the graph walk
+%     discovers imports while parsing, so the loader must be able to ask for
+%     "the source at Path" at arbitrary points.  `call(ResolveModule, Path,
+%     Chars)` yields the module source as a character list and FAILS if no such
+%     module exists (reported here as `cannot_read_module`).  The batch driver
+%     passes a filesystem reader (`module_paths:read_source_chars/2`); an
+%     editor front-end can pass one that prefers open-buffer contents over
+%     what is on disk; tests can pass an in-memory fixture table.
+%
+%   * OUTPUT is a plain return value because writing has no such constraint:
+%     every artifact exists only once the whole graph has compiled.  Returning
+%     data instead of taking an "emit" closure keeps this predicate pure,
+%     trivially testable, and means a failed compile can never leave PARTIAL
+%     OUTPUT behind -- the caller (`compiler:compile_file/1`) only starts
+%     writing after everything type-checked and generated cleanly.
+%
+%   * CHECK-ONLY MODE therefore needs no flag: a caller that only wants
+%     type-checking calls this and ignores `CompiledModules`.  (Codegen still
+%     runs, but `generate/2` is a cheap emission pass next to inference --
+%     split the loop below only if profiling ever says otherwise.  Note also
+%     that `analyse_module` throws on the FIRST error, so this path yields at
+%     most one diagnostic; rich multi-diagnostic feedback is the job of the
+%     incremental engine in `syntax/queries.pl`, not this batch driver.)
+compile_program(EntryPath, ResolveModule, CompiledModules) :-
   once((
     normalise_path(EntryPath, Entry),
     empty_assoc(Asts0),
-    build_graph(Entry, [], Asts0, [], ParsedAsts, OrderReversed),
+    build_graph(Entry, ResolveModule, [], Asts0, [], ParsedAsts, OrderReversed),
     reverse(OrderReversed, Order),
     % Reader macros are a WHOLE-PROGRAM compile-time layer: collect every
     % module's macros into one table, type-check them together (so a macro may
@@ -77,7 +105,7 @@ compile_program(EntryPath) :-
     % compilation, so cross-file `@name` uses resolve.
     process_macros(Order, ParsedAsts, Asts),
     empty_assoc(Interfaces0),
-    compile_modules(Order, Asts, Interfaces0)
+    compile_modules(Order, Asts, Interfaces0, CompiledModules)
   )).
 
 
@@ -85,37 +113,37 @@ compile_program(EntryPath) :-
 % Dependency graph (depth-first, post-order => dependencies first)
 % ---------------------------------------------------------------------------
 
-% build_graph(+Module, +InProgress, +AstsIn, +OrderIn, -AstsOut, -OrderOut).
+% build_graph(+Module, +ResolveModule, +InProgress, +AstsIn, +OrderIn, -AstsOut, -OrderOut).
 % `InProgress` is the chain of ancestors currently being visited (for cycle
 % detection); `Asts` memoises each module's parsed AST (and marks it done);
 % `Order` accumulates modules with each placed before its dependencies, so the
 % caller reverses it to get dependencies-first order.
-build_graph(Module, _InProgress, AstsIn, OrderIn, AstsOut, OrderOut) :-
+build_graph(Module, _ResolveModule, _InProgress, AstsIn, OrderIn, AstsOut, OrderOut) :-
   get_assoc(Module, AstsIn, _), !,           % already compiled into the graph
   AstsOut = AstsIn,
   OrderOut = OrderIn.
-build_graph(Module, InProgress, AstsIn, OrderIn, AstsOut, OrderOut) :-
-  read_module(Module, Ast),
+build_graph(Module, ResolveModule, InProgress, AstsIn, OrderIn, AstsOut, OrderOut) :-
+  read_module(Module, ResolveModule, Ast),
   module_dependencies(Ast, Module, Dependencies),
-  build_graph_dependencies(Dependencies, [Module | InProgress], AstsIn, OrderIn, Asts1, Order1),
+  build_graph_dependencies(Dependencies, ResolveModule, [Module | InProgress], AstsIn, OrderIn, Asts1, Order1),
   put_assoc(Module, Asts1, Ast, AstsOut),
   OrderOut = [Module | Order1].
 
-build_graph_dependencies([], _InProgress, Asts, Order, Asts, Order).
-build_graph_dependencies([Dependency | Dependencies], InProgress, AstsIn, OrderIn, AstsOut, OrderOut) :-
+build_graph_dependencies([], _ResolveModule, _InProgress, Asts, Order, Asts, Order).
+build_graph_dependencies([Dependency | Dependencies], ResolveModule, InProgress, AstsIn, OrderIn, AstsOut, OrderOut) :-
   ( memberchk(Dependency, InProgress) ->
       throw(analysis_error(import_cycle(Dependency)))
   ; true
   ),
-  build_graph(Dependency, InProgress, AstsIn, OrderIn, Asts1, Order1),
-  build_graph_dependencies(Dependencies, InProgress, Asts1, Order1, AstsOut, OrderOut).
+  build_graph(Dependency, ResolveModule, InProgress, AstsIn, OrderIn, Asts1, Order1),
+  build_graph_dependencies(Dependencies, ResolveModule, InProgress, Asts1, Order1, AstsOut, OrderOut).
 
 % Read and PARSE a module.  Macro expansion and nested-module erasure happen
 % later (in `process_macros`), once the whole graph is known -- a `@name` use
 % may resolve to a macro imported from another file, so expansion is a
 % whole-program pass, not a per-file one.
-read_module(Module, ParsedAst) :-
-  ( read_source_chars(Module, Source) ->
+read_module(Module, ResolveModule, ParsedAst) :-
+  ( call(ResolveModule, Module, Source) ->
       true
   ; throw(analysis_error(cannot_read_module(Module)))
   ),
@@ -149,8 +177,11 @@ use_path_in_item(public_node(Inner, _Span), Path) :-
 % Per-module compilation, in dependency order
 % ---------------------------------------------------------------------------
 
-compile_modules([], _Asts, _Interfaces).
-compile_modules([Module | Rest], Asts, InterfacesIn) :-
+% compile_modules(+Order, +Asts, +Interfaces, -CompiledModules).
+% Each module's JavaScript is paired with its source path and RETURNED, not
+% written -- see the compile_program/3 doc for why the loader stays I/O-free.
+compile_modules([], _Asts, _Interfaces, []).
+compile_modules([Module | Rest], Asts, InterfacesIn, [Module - JavaScript | Compiled]) :-
   get_assoc(Module, Asts, Ast),
   module_directory(Module, Directory),
   resolve_imports(Ast, Directory, InterfacesIn, SeedValueEnvironment, SeedTypeEnvironment,
@@ -165,9 +196,7 @@ compile_modules([Module | Rest], Asts, InterfacesIn) :-
   % tag, not on the local namespace alias.
   rewrite_constructor_tags(CodegenAst0, ConstructorTags, CodegenAst),
   generate(CodegenAst, JavaScript),
-  source_to_js_path(Module, JsPath),
-  phrase_to_file(JavaScript, JsPath),
-  compile_modules(Rest, Asts, Interfaces1).
+  compile_modules(Rest, Asts, Interfaces1, Compiled).
 
 % ---------------------------------------------------------------------------
 % Import resolution: dependency interfaces -> seed environments + a plan that

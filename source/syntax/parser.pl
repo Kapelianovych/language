@@ -335,25 +335,25 @@ constructor_node(Tokens, Rest, node(variant, Children), D0, D) :-
   append(NameCh, ArgCh, Children).
 
 % ===========================================================================
-% module NAME = ( items )
+% module NAME = { items }
 % ===========================================================================
 
 module_declaration(Tokens, Rest, node(module, Children), D0, D) :-
   bump(Tokens, Tokens1, ModuleChildren),          % `module`
   expect_kind(ident, Tokens1, Tokens2, NameChildren, D0, D1),
   expect_punct(eq, Tokens2, Tokens3, EqChildren, D1, D2),
-  expect_punct(open_paren, Tokens3, Tokens4, OpenChildren, D2, D3),
+  expect_punct(open_brace, Tokens3, Tokens4, OpenChildren, D2, D3),
   module_items(Tokens4, Tokens5, BodyChildren, D3, D4),
-  expect_punct(close_paren, Tokens5, Rest, CloseChildren, D4, D),
+  expect_punct(close_brace, Tokens5, Rest, CloseChildren, D4, D),
   append(ModuleChildren, NameChildren, C1),
   append(C1, EqChildren, C2),
   append(C2, OpenChildren, C3),
   append(C3, BodyChildren, C4),
   append(C4, CloseChildren, Children).
 
-% Like `items`, but stops at the closing `)` of the module body.
+% Like `items`, but stops at the closing `}` of the module body.
 module_items(Tokens, Tokens, [], D, D) :-
-  ( peek_punct(Tokens, close_paren) ; peek(Tokens, eof) ), !.
+  ( peek_punct(Tokens, close_brace) ; peek(Tokens, eof) ), !.
 module_items(Tokens, Rest, [Item | Items], D0, D) :-
   item(Tokens, Tokens1, Item, D0, D1), !,
   module_items(Tokens1, Rest, Items, D1, D).

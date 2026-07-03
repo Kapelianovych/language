@@ -1,6 +1,9 @@
 :- module(queries, [
-  init_db/0, set_input/2, query/2,
-  reset_exec_log/0, exec_count/2
+  init_db/0,
+  set_input/2,
+  query/2,
+  reset_exec_log/0,
+  exec_count/2
 ]).
 
 /*  source/syntax/queries.pl  --  Demand-driven (query-based) analysis engine.

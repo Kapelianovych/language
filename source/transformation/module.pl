@@ -1,6 +1,6 @@
 :- module(module_transformation, [expand_modules/2]).
 
-/*  transformation/module.pl  --  Erase nested `module Name = ( ... )` declarations.
+/*  transformation/module.pl  --  Erase nested `module Name = { ... }` declarations.
 
     This is one of the compiler's source-to-source TRANSFORMATIONS (see the
     sibling `transformation/macro.pl`).  A transformation rewrites the parsed
@@ -24,7 +24,7 @@
     WHAT IT DOES
 
       * LIFTING.  Every named member is lifted to a top-level item under its
-        dotted qualified path: inside `module Math = ( add = .. )`, `add`
+        dotted qualified path: inside `module Math = { add = .. }`, `add`
         becomes a top-level definition named "Math.add"; a `type Shape` becomes
         "Math.Shape" and its constructor `Circle` becomes "Math.Circle".
         Members keep source order, so the forward-reference rules the type

@@ -388,7 +388,7 @@ Public :- "public" Separator+ (External | Module | Macro | Expression)
 # keyword (mandatory separator).
 Module :-
 	"module" Separator+ Identifier Separator* "=" Separator*
-	"(" Separator* (ProgramItem Separator*)* ")"
+	"{" Separator* (ProgramItem Separator*)* "}"
 
 # A FOREIGN (JavaScript) IMPORT.  `external` binds a name to a piece of JS with
 # a trusted type ascription -- the one unsafe point of the boundary.  The
