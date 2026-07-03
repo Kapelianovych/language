@@ -3,15 +3,11 @@
 /*  source/syntax/lexer.pl  --  Lossless tokenizer for the LSP front-end.
     ========================================================================
 
-    WHY A NEW SUBSYSTEM (`source/syntax/`)
-
-      The batch compiler's parser (`source/parser/`) is a scannerless,
-      backtracking DCG: great for a one-shot compile, but for an editor we need
+      Scannerless, backtracking DCG is great for a one-shot compile, but for an editor we need
       three different properties -- ERROR RECOVERY (keep a usable tree for
       broken code), a LOSSLESS tree (every byte represented, for formatting /
       incremental reuse), and INCREMENTALITY.  Those are engineering properties
-      of the parser's *shape*, not of the grammar, so we build a separate
-      front-end here and leave the compiler untouched.
+      of the parser's *shape*, not of the grammar.
 
       The pipeline is the classic editor-grade shape:
 

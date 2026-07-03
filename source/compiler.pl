@@ -7,7 +7,7 @@
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
 :- use_module(library(error)).
-:- use_module('syntax/lower', [parse_source/2]).
+:- use_module('syntax/lower', [parse_source/3]).
 :- use_module(analyser, [analyse/2]).
 :- use_module(generator, [generate/2]).
 :- use_module(module_loader, [compile_program/3]).
@@ -17,10 +17,16 @@
 
 %% compile(+Source, -Output, -AnalysisResult).
 %
-% Compiles source text into output text.
+% Compiles source text into output text.  A syntax error is reported as a thrown
+% `analysis_error(syntax_errors(Diagnostics))` rather than a silent failure: the
+% recovering parser turns malformed input into `error_node`s that inference would
+% otherwise bare-fail on, so we refuse the program up front with its diagnostics.
 compile(Source, Output, AnalysisResult) :-
   once((
-    parse_source(Source, ParsedAst),
+    parse_source(Source, ParsedAst, Diagnostics),
+    ( Diagnostics == [] -> true
+    ; throw(analysis_error(syntax_errors(Diagnostics)))
+    ),
     % Process reader macros (type-check bodies, then expand invocations) before
     % type-checking and generating the resulting program.
     check_macros(ParsedAst),

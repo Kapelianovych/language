@@ -349,6 +349,12 @@ rewrite_constructors([constructor(Name, FieldTypes, CSpan) | Rest], Prefix, Ctx,
 rewrite(number_node(N, S), _Ctx, number_node(N, S)) :- !.
 rewrite(boolean_node(B, S), _Ctx, boolean_node(B, S)) :- !.
 rewrite(placeholder_node(S), _Ctx, placeholder_node(S)) :- !.
+% A malformed node (`error_node`, from a syntax error) has nothing to rewrite:
+% pass it through untouched so this pass stays TOTAL.  Deciding that an
+% `error_node` is an error is inference's job (a single decision point), which
+% throws `malformed_syntax` -- caught as an `error_at` diagnostic on the LSP
+% path, or refused up front by the batch compiler's parse-diagnostic gate.
+rewrite(error_node(S), _Ctx, error_node(S)) :- !.
 
 rewrite(identifier_node(Name, S), ctx(VS, _, _, MS, _, _), Output) :- !,
   ( memberchk(Name - Seg, VS) ->
@@ -479,6 +485,7 @@ rewrite_patterns([Pattern | Rest], Ctx, [Pattern1 | Rest1]) :-
   rewrite_pattern(Pattern, Ctx, Pattern1),
   rewrite_patterns(Rest, Ctx, Rest1).
 
+rewrite_pattern(error_node(S), _Ctx, error_node(S)) :- !.   % malformed pattern: pass through (see rewrite/3)
 rewrite_pattern(wildcard_pattern(S), _Ctx, wildcard_pattern(S)) :- !.
 rewrite_pattern(binding_pattern(Name, S), _Ctx, binding_pattern(Name, S)) :- !.
 rewrite_pattern(literal_pattern(Node, S), Ctx, literal_pattern(Node1, S)) :- !,

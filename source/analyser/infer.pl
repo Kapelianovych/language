@@ -364,6 +364,16 @@ infer(binary_node(Operator, Left, Right, _), Level, InsideFunction, Environment,
   unify(LeftActual, LeftExpected, Context3, Context4),
   unify(RightActual, RightExpected, Context4, ContextOut).
 
+% A malformed node the lowerer could not recognise (`error_node`, from a syntax
+% error).  The batch compiler rejects a program with parse diagnostics BEFORE
+% inference, so this is normally unreachable; the clause is here so inference is
+% TOTAL -- an `error_node` that ever reaches it THROWS (which the accumulating
+% LSP checker records as an `error_at` diagnostic) instead of bare-failing and
+% collapsing the whole analysis to a silent `false`.
+infer(error_node(Span), _Level, _InsideFunction, _Environment, _TypeEnvironment,
+      _Context, _ResultType, _ContextOut) :-
+  throw(analysis_error(malformed_syntax(Span))).
+
 % A type declaration reached in expression position carries no value.
 infer(type_declaration_node(_, _, _, _, _), _Level, _InsideFunction, _Environment, _TypeEnvironment,
       Context, tuple_type([], closed), Context).
@@ -767,6 +777,10 @@ missing_constructors([Name | Names], Covered, Missing) :-
 %
 % Constrain `ExpectedType` to match `Pattern`, extending the environment with
 % the pattern's bindings (monomorphic).
+% A malformed pattern (`error_node`, from a syntax error) throws so pattern
+% typing stays TOTAL, mirroring the `infer(error_node, ..)` guard above.
+type_pattern(error_node(Span), _ExpectedType, _Level, _TypeEnvironment, _Environment, _Context, _EnvironmentOut, _ContextOut) :-
+  throw(analysis_error(malformed_syntax(Span))).
 type_pattern(wildcard_pattern(_), _ExpectedType, _Level, _TypeEnvironment, Environment, Context, Environment, Context).
 type_pattern(binding_pattern(Name, _), ExpectedType, _Level, _TypeEnvironment, EnvironmentIn, Context, EnvironmentOut, Context) :-
   monomorphic_type_scheme(ExpectedType, Scheme),

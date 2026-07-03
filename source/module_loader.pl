@@ -41,7 +41,7 @@
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
 :- use_module(library(assoc)).
-:- use_module('syntax/lower', [parse_source/2]).
+:- use_module('syntax/lower', [parse_source/3]).
 :- use_module(module_paths, [
   normalise_path/2,
   module_directory/2,
@@ -147,7 +147,13 @@ read_module(Module, ResolveModule, ParsedAst) :-
       true
   ; throw(analysis_error(cannot_read_module(Module)))
   ),
-  parse_source(Source, ParsedAst).
+  parse_source(Source, ParsedAst, Diagnostics),
+  % A syntax error anywhere in the graph aborts the build with the offending
+  % module and its diagnostics -- otherwise the `error_node`s the recovering
+  % parser emits would reach inference and bare-fail with no explanation.
+  ( Diagnostics == [] -> true
+  ; throw(analysis_error(syntax_errors(Module, Diagnostics)))
+  ).
 
 % Dependency scanning runs on the PARSED AST (nested modules not yet lifted), so
 % it descends into `module` bodies to find their `use`s.  The builtin `Compiler`
