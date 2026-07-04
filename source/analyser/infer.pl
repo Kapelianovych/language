@@ -57,9 +57,11 @@
   unify/4,
   subsume/5,
   instantiate_forall/5,
+  instantiate_forall_positional/6,
   skolemize_forall/6,
   generalize/5,
   instantiate/5,
+  instantiate_positional/6,
   monomorphic_type_scheme/2
 ]).
 :- use_module(operators, [
@@ -330,6 +332,32 @@ infer(destructuring_node(Pattern, Value, _), Level, InsideFunction, Environment,
   infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
   type_pattern(Pattern, ValueType, Level, TypeEnvironment, Environment, Context1, _DiscardedEnvironment, ContextOut).
 
+% Explicit TYPE APPLICATION at a call site: `foo<number>(1)` fixes the
+% callee's type parameters positionally; a hole (`bar<_ boolean>(..)`) and
+% every omitted trailing position stay inferred.  Polymorphism has two shapes
+% here: a LET-BOUND name carries a type_scheme, whose quantifier list is
+% positional (see generalize/5); any other polymorphic value -- e.g. a rank-N
+% annotated parameter -- resolves to a forall_type, whose bound ids are in
+% annotation source order.  Supplying more arguments than there are
+% quantifiers, or type-applying a monomorphic value, is an error.
+infer(type_application_node(Target, TypeArguments, _), Level, InsideFunction, Environment,
+      TypeEnvironment, ContextIn, Type, ContextOut) :-
+  convert_type_arguments(TypeArguments, TypeEnvironment, Level, ContextIn, Provided, Context1),
+  ( Target = identifier_node(Name, _),
+    get_assoc(Name, Environment, Binding),
+    binding_scheme(Binding, InsideFunction, Name, type_scheme(QuantifiedIds, SchemeBody)),
+    QuantifiedIds \== [] ->
+      check_type_argument_count(QuantifiedIds, Provided),
+      instantiate_positional(type_scheme(QuantifiedIds, SchemeBody), Provided, Level, Context1, Type, ContextOut)
+  ; infer(Target, Level, InsideFunction, Environment, TypeEnvironment, Context1, TargetType, Context2),
+    resolve_head(TargetType, Context2, Resolved),
+    ( Resolved = forall_type(BoundIds, _) ->
+        check_type_argument_count(BoundIds, Provided),
+        instantiate_forall_positional(Resolved, Provided, Level, Context2, Type, ContextOut)
+    ; throw(analysis_error(type_arguments_on_monomorphic_value))
+    )
+  ).
+
 % Application, with partial application and argument PLACEHOLDERS.  A `_`
 % argument is a hole: the call is applied to all positions (holes as fresh
 % variables), and the whole expression becomes a function awaiting the holes,
@@ -444,6 +472,24 @@ apply_annotation(no_annotation, _InferredType, _TypeEnvironment, _Level, Context
 apply_annotation(type_annotation(TypeExpression), InferredType, TypeEnvironment, Level, ContextIn, ContextOut) :-
   convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, AnnotatedType, Context1),
   unify(AnnotatedType, InferredType, Context1, ContextOut).
+
+% Convert each explicit type argument of a type application; a hole `_`
+% becomes a fresh variable, i.e. that position is inferred like an omitted
+% trailing one.
+convert_type_arguments([], _TypeEnvironment, _Level, Context, [], Context).
+convert_type_arguments([type_hole(_) | Rest], TypeEnvironment, Level, ContextIn, [Fresh | Types], ContextOut) :- !,
+  fresh_unification_variable(ContextIn, Level, Fresh, Context1),
+  convert_type_arguments(Rest, TypeEnvironment, Level, Context1, Types, ContextOut).
+convert_type_arguments([TypeExpression | Rest], TypeEnvironment, Level, ContextIn, [Type | Types], ContextOut) :-
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, Type, Context1),
+  convert_type_arguments(Rest, TypeEnvironment, Level, Context1, Types, ContextOut).
+
+check_type_argument_count(Quantifiers, Provided) :-
+  length(Quantifiers, Arity),
+  length(Provided, Given),
+  ( Given =< Arity -> true
+  ; throw(analysis_error(too_many_type_arguments(Given, Arity)))
+  ).
 
 % ---------------------------------------------------------------------------
 % Application: bidirectional, with partial application and placeholders

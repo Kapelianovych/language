@@ -222,20 +222,31 @@ lower_expr(node(binary, Ch), binary_node(Op, Left, Right, Span)) :- !,
   binary_op_token(Ch, Op),
   lower_expr(LeftGreen, Left), lower_expr(RightGreen, Right),
   gspan(node(binary, Ch), Span).
+% The accessor leaf is an ident (`t.key` -> a labeled field) or a number
+% (`t.0` -> a positional field, keyed by its index).
 lower_expr(node(access, Ch), access_node(Target, Accessor, Span)) :- !,
   child_nodes(Ch, [TargetGreen]),
   lower_expr(TargetGreen, Target),
-  child_token(Ch, ident, t(ident, Name, NS, NE)),
-  Accessor = label(Name, span(NS, NE)),
+  ( child_token(Ch, ident, t(ident, Name, NS, NE)) ->
+      Accessor = label(Name, span(NS, NE))
+  ; child_token(Ch, number, t(number, Text, NS, NE)),
+      number_value(Text, Index),
+      Accessor = index(Index, span(NS, NE)) ),
   gspan(node(access, Ch), Span).
+% A call's sub-nodes are the callee, an optional `type_args` node (explicit
+% type arguments: `foo<number>(1)`), then the value arguments.  Explicit type
+% arguments wrap the callee in a `type_application_node`, so the call itself
+% stays an ordinary application of the (now specialised) callee.
 lower_expr(node(call, Ch), function_call_node(Target, Args, Span)) :- !,
-  child_nodes(Ch, [TargetGreen | ArgGreens]),
-  lower_expr(TargetGreen, Target),
-  maplist_lower_expr(ArgGreens, Args),
-  gspan(node(call, Ch), Span).
+  child_nodes(Ch, [TargetGreen | Rest]),
+  lower_expr(TargetGreen, Target0),
+  gspan(node(call, Ch), Span),
+  ( Rest = [node(type_args, ACh) | ArgGreens] ->
+      lower_type_arguments(ACh, TypeArguments),
+      Target = type_application_node(Target0, TypeArguments, Span)
+  ; ArgGreens = Rest, Target = Target0 ),
+  maplist_lower_expr(ArgGreens, Args).
 lower_expr(node(group, Ch), Node) :- !, lower_group(node(group, Ch), Node).
-lower_expr(node(paren, Ch), Node) :- !,          % single parenthesised expr
-  child_nodes(Ch, [Inner]), lower_expr(Inner, Node).
 lower_expr(node(block, Ch), block_node(Exprs, Span)) :- !,
   child_nodes(Ch, ExprGreens),
   maplist_lower_item(ExprGreens, Exprs),          % block items may be definitions
@@ -266,9 +277,9 @@ maplist_lower_expr([], []).
 maplist_lower_expr([G | Gs], [A | As]) :- lower_expr(G, A), maplist_lower_expr(Gs, As).
 
 % --- operators: token kind -> AST operator name -------------------------------
-unary_op_token(Ch, Op) :- ( child_token(Ch, '!', _) -> Op = boolean_negation
-                          ; child_token(Ch, '-', _) -> Op = number_negation
-                          ; Op = bit_invertion ).
+unary_op_token(Ch, Op) :- ( child_token(Ch, '!!', _) -> Op = bit_invertion
+                          ; child_token(Ch, '!', _) -> Op = boolean_negation
+                          ; Op = number_negation ).
 
 binary_op_token(Ch, Op) :-
   member(t(K, _, _, _), Ch), binary_name(K, Op), !.
@@ -295,7 +306,13 @@ lower_group(node(group, Ch), tuple_node(Members, Span)) :-
 maplist_lower_member([], []).
 maplist_lower_member([G | Gs], [M | Ms]) :- lower_member(G, M), maplist_lower_member(Gs, Ms).
 
-% A member node:  [ (mutable|readonly)? EXPR (: TYPE)? ].  EXPR is either a bare
+% A spread node `..expr` splices another record's fields in; its only
+% sub-node is the spread value.
+lower_member(node(spread, Ch), spread_member(Value, Span)) :- !,
+  child_nodes(Ch, [ValueGreen]),
+  lower_expr(ValueGreen, Value),
+  gspan(node(spread, Ch), Span).
+% A member node:  [ mutable? EXPR (: TYPE)? ].  EXPR is either a bare
 % value (positional) or a `definition` node `name = value` (labeled).
 lower_member(node(member, Ch), tuple_member(Mut, Kind, Annotation, Value, Span)) :-
   ( child_token(Ch, ident, t(ident, [m,u,t,a,b,l,e], _, _)) -> Mut = mutable ; Mut = readonly ),
@@ -336,13 +353,31 @@ lower_pattern(Green, Pat) :- lower_match_pattern(Green, Pat).
 maplist_lower_pat_member([], []).
 maplist_lower_pat_member([G | Gs], [M | Ms]) :- lower_pat_member(G, M), maplist_lower_pat_member(Gs, Ms).
 
-lower_pat_member(node(member, Ch), positional_member_pattern(Pat, Span)) :-
-  child_nodes(Ch, [ValueGreen]),
-  green_to_binding(ValueGreen, Pat),
-  gspan(node(member, Ch), Span).
+% An irrefutable-pattern member (grammar: IrrefutablePatternMember :-
+% Identifier "=" IrrefutablePattern | IrrefutablePattern).  These greens come
+% from the EXPRESSION parser -- a destructuring LHS and function parameters
+% are parsed as tuples -- so a labeled member arrives as a `definition` node
+% (`x = subpattern`) and a positional one as a bare value.
+lower_pat_member(node(member, Ch), Member) :-
+  child_nodes(Ch, ValueGreens0), exclude_type_node(ValueGreens0, [ValueGreen]),
+  gspan(node(member, Ch), Span),
+  ( ValueGreen = node(definition, DCh) ->
+      child_nodes(DCh, DNodes),
+      definition_parts(DNodes, NameG, _Annotation, SubG),
+      NameG = node(identifier, NCh), child_token(NCh, ident, t(ident, Name, _, _)),
+      green_to_irrefutable(SubG, Sub),
+      Member = labeled_member_pattern(Name, Sub, Span)
+  ; green_to_irrefutable(ValueGreen, Pat),
+      Member = positional_member_pattern(Pat, Span) ).
 
-green_to_binding(node(identifier, Ch), binding_pattern(Name, Span)) :-
+% The expression greens that read as irrefutable patterns: an identifier
+% binds, a `_` placeholder ignores, and a nested group destructures further.
+green_to_irrefutable(node(identifier, Ch), binding_pattern(Name, Span)) :-
   child_token(Ch, ident, t(ident, Name, _, _)), gspan(node(identifier, Ch), Span).
+green_to_irrefutable(node(placeholder, Ch), wildcard_pattern(Span)) :-
+  gspan(node(placeholder, Ch), Span).
+green_to_irrefutable(node(group, Ch), Pattern) :-
+  lower_pattern(node(group, Ch), Pattern).
 
 % ===========================================================================
 % Functions.   ( params ) : returntype  body
@@ -353,28 +388,36 @@ lower_function(node(function, Ch), function_node(TypeParameters, Params, ReturnA
   ( Nodes0 = [node(type_params, PCh) | Nodes] ->
       lower_type_params(node(type_params, PCh), TypeParameters)
   ; Nodes = Nodes0, TypeParameters = [] ),
-  % Nodes = [ param-members... , ReturnType, Body ].  The members come from the
-  % parameter `( ... )`; then the return type node, then the body expression.
+  % Nodes = [ param-members... , ReturnType?, Body ].  The members come from
+  % the parameter `( ... )`; then the optional return type node, then the body.
   partition_function(Nodes, ParamMembers, ReturnType, BodyGreen),
   maplist_lower_param(ParamMembers, Params),
-  ReturnAnnotation = type_annotation(ReturnTypeAst), lower_type(ReturnType, ReturnTypeAst),
+  ( ReturnType == no_return_type ->
+      ReturnAnnotation = no_annotation
+  ; ReturnAnnotation = type_annotation(ReturnTypeAst), lower_type(ReturnType, ReturnTypeAst) ),
   lower_expr(BodyGreen, Body),
   gspan(node(function, Ch), Span).
 
 % The function node's children (sub-nodes) are the parameter members, then the
-% return-type node, then the body.  Parameter members are `member` nodes; the
-% return type is a type node; the body is whatever follows.
+% return-type node (absent in the annotation-free form `(n) n`), then the body.
+% Parameter members are `member` nodes; the return type is a type node; the
+% body is whatever follows.
 partition_function(Nodes, ParamMembers, ReturnType, Body) :-
   append(ParamMembers, [ReturnType, Body], Nodes),
   forall_member_node(ParamMembers),
   is_type_node(ReturnType), !.
+partition_function(Nodes, ParamMembers, no_return_type, Body) :-
+  append(ParamMembers, [Body], Nodes),
+  forall_member_node(ParamMembers), !.
 
 forall_member_node([]).
 forall_member_node([node(member, _) | Ms]) :- forall_member_node(Ms).
 
+% A parameter is an irrefutable pattern -- a name, a `_` wildcard, or a
+% destructuring group -- with an optional `: type` annotation.
 lower_param(node(member, Ch), parameter_node(Pattern, Annotation, Span)) :-
-  child_nodes(Ch, ValueGreens0), exclude_type_node(ValueGreens0, [NameGreen]),
-  green_to_binding(NameGreen, Pattern),
+  child_nodes(Ch, ValueGreens0), exclude_type_node(ValueGreens0, [PatternGreen]),
+  green_to_irrefutable(PatternGreen, Pattern),
   member_annotation(Ch, Annotation),
   gspan(node(member, Ch), Span).
 
@@ -402,9 +445,15 @@ lower_arm(node(arm, Ch), match_arm(Patterns, Guard, Result, Span)) :-
   gspan(node(arm, Ch), Span).
 
 lower_match_pattern(node(wildcard_pattern, Ch), wildcard_pattern(Span)) :- !, gspan(node(wildcard_pattern, Ch), Span).
+% The literal leaf is a number, a string, or one of the boolean idents
+% (`true`/`false` -- the parser wraps them in a literal_pattern node exactly
+% because they are literals, never bindings).
 lower_match_pattern(node(literal_pattern, Ch), literal_pattern(Lit, Span)) :- !,
   ( child_token(Ch, number, t(number, Text, NS, NE)) -> number_value(Text, V), Lit = number_node(V, span(NS, NE))
-  ; child_token(Ch, string, t(string, Text, SS, SE)) -> string_parts(Text, Parts), Lit = string_node(Parts, span(SS, SE)) ),
+  ; child_token(Ch, string, t(string, Text, SS, SE)) -> string_parts(Text, Parts), Lit = string_node(Parts, span(SS, SE))
+  ; child_token(Ch, ident, t(ident, Name, BS, BE)) ->
+      ( Name == [t,r,u,e] -> Lit = boolean_node(true, span(BS, BE))
+      ; Lit = boolean_node(false, span(BS, BE)) ) ),
   gspan(node(literal_pattern, Ch), Span).
 lower_match_pattern(node(binding_pattern, Ch), binding_pattern(Name, Span)) :- !,
   child_token(Ch, ident, t(ident, Name, _, _)), gspan(node(binding_pattern, Ch), Span).
@@ -418,16 +467,25 @@ lower_match_pattern(node(constructor_pattern, Ch), constructor_pattern(Name, Sub
   gspan(node(constructor_pattern, Ch), Span).
 lower_match_pattern(node(tuple_pattern, Ch), record_pattern(Members, Span)) :- !,
   child_nodes(Ch, SubGreens),
-  maplist_lower_positional(SubGreens, Members),
+  maplist_lower_tuple_member(SubGreens, Members),
   gspan(node(tuple_pattern, Ch), Span).
 lower_match_pattern(Green, error_node(Span)) :- gspan(Green, Span).
 
 maplist_lower_match_pattern([], []).
 maplist_lower_match_pattern([G | Gs], [P | Ps]) :- lower_match_pattern(G, P), maplist_lower_match_pattern(Gs, Ps).
 
-maplist_lower_positional([], []).
-maplist_lower_positional([G | Gs], [positional_member_pattern(P, Span) | Ps]) :-
-  lower_match_pattern(G, P), gspan(G, Span), maplist_lower_positional(Gs, Ps).
+% A record-pattern member is labeled (`(x = p)`, a `labeled_pattern` node
+% holding the field name and sub-pattern) or a bare pattern matching the next
+% positional field.
+maplist_lower_tuple_member([], []).
+maplist_lower_tuple_member([node(labeled_pattern, MCh) | Gs], [labeled_member_pattern(Name, Sub, Span) | Ms]) :- !,
+  child_token(MCh, ident, t(ident, Name, _, _)),
+  child_nodes(MCh, [SubG]),
+  lower_match_pattern(SubG, Sub),
+  gspan(node(labeled_pattern, MCh), Span),
+  maplist_lower_tuple_member(Gs, Ms).
+maplist_lower_tuple_member([G | Gs], [positional_member_pattern(P, Span) | Ms]) :-
+  lower_match_pattern(G, P), gspan(G, Span), maplist_lower_tuple_member(Gs, Ms).
 
 % ===========================================================================
 % Reader-macro helpers.

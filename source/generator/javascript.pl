@@ -168,6 +168,11 @@ expression(function_node(_TypeParameters, [], _ReturnAnnotation, Body, _)) -->
 expression(function_node(_TypeParameters, [Parameter | Parameters], _ReturnAnnotation, Body, _)) -->
   "(", curried_arrows([Parameter | Parameters], Body), ")".
 
+% Explicit type arguments (`foo<number>(1)`) are a compile-time-only
+% instantiation; at runtime the specialised callee IS the callee.
+expression(type_application_node(Target, _TypeArguments, _)) -->
+  expression(Target).
+
 % Application -> curried call: the callee, then one parenthesised argument per
 % argument.  A zero-argument call is emitted as `callee()`.
 expression(function_call_node(Target, Arguments, _)) -->

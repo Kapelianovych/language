@@ -8,8 +8,10 @@
   subsume/5,
   skolemize_forall/6,
   instantiate_forall/5,
+  instantiate_forall_positional/6,
   generalize/5,
   instantiate/5,
+  instantiate_positional/6,
   monomorphic_type_scheme/2,
   scheme_free_unification_variables/2,
   context_substitution/2
@@ -477,10 +479,18 @@ occurs_check_and_adjust_levels_list(Id, MaxLevel, [Type | Types], ContextIn, Con
 % ---------------------------------------------------------------------------
 
 %% generalize(+Type, +OuterLevel, +Context, -Scheme, -Context).
+%
+% The quantifiers are ordered by ASCENDING variable id, i.e. by creation
+% order.  This makes the scheme's quantifier list positional: a function's
+% explicitly declared type parameters (`<A B>(..)`) mint their variables, in
+% declaration order, before any variable of the parameter list or body, so
+% they come out first and in source order -- which is what lets a call site
+% supply explicit type arguments positionally (see instantiate_positional).
 generalize(Type, OuterLevel, Context, type_scheme(QuantifiedIds, Body), Context) :-
   fully_resolve(Type, Context, Resolved),
   collect_unification_variable_ids(Resolved, [], AllIds),
-  include_generalizable(AllIds, OuterLevel, Context, QuantifiedIds),
+  include_generalizable(AllIds, OuterLevel, Context, Generalizable),
+  sort(Generalizable, QuantifiedIds),
   abstract_quantified_variables(Resolved, QuantifiedIds, Body).
 
 %% scheme_free_unification_variables(+Scheme, -Ids).
@@ -574,6 +584,28 @@ instantiate(type_scheme(QuantifiedIds, Body), Level, ContextIn, Type, ContextOut
   fresh_quantified_mapping(QuantifiedIds, Level, ContextIn, Mapping, ContextOut),
   substitute_quantified_variables(Body, Mapping, Type).
 
+%% instantiate_positional(+Scheme, +Provided, +Level, +ContextIn, -Type, -ContextOut).
+%
+% Instantiate with EXPLICIT type arguments: the first k quantifiers (in the
+% scheme's positional order -- see generalize/5) are replaced by the k
+% provided types; every remaining quantifier gets a fresh variable as in
+% instantiate/5, so trailing arguments may be omitted and are then inferred.
+% (An argument hole `_` is converted to a fresh variable by the caller, so it
+% arrives here as an ordinary type.)  The caller checks k does not exceed the
+% quantifier count.
+instantiate_positional(type_scheme(QuantifiedIds, Body), Provided, Level, ContextIn, Type, ContextOut) :-
+  positional_quantified_mapping(QuantifiedIds, Provided, Level, ContextIn, Mapping, ContextOut),
+  substitute_quantified_variables(Body, Mapping, Type).
+
+positional_quantified_mapping([], _, _Level, Context, [], Context).
+positional_quantified_mapping([Quantified | Rest], [], Level, ContextIn,
+                              [Quantified - Fresh | Mapping], ContextOut) :-
+  fresh_unification_variable(ContextIn, Level, Fresh, Context1),
+  positional_quantified_mapping(Rest, [], Level, Context1, Mapping, ContextOut).
+positional_quantified_mapping([Quantified | Rest], [Provided | Others], Level, ContextIn,
+                              [Quantified - Provided | Mapping], ContextOut) :-
+  positional_quantified_mapping(Rest, Others, Level, ContextIn, Mapping, ContextOut).
+
 fresh_quantified_mapping([], _, Context, [], Context).
 fresh_quantified_mapping([Quantified | Rest], Level, ContextIn,
                          [Quantified - Fresh | Mapping], ContextOut) :-
@@ -632,6 +664,15 @@ substitute_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping,
 % (as-yet-unknown) type, e.g. applying a polymorphic function.
 instantiate_forall(forall_type(BoundIds, Body), Level, ContextIn, OpenedType, ContextOut) :-
   fresh_quantified_mapping(BoundIds, Level, ContextIn, Mapping, ContextOut),
+  substitute_quantified_variables(Body, Mapping, OpenedType).
+
+%% instantiate_forall_positional(+ForallType, +Provided, +Level, +ContextIn, -OpenedType, -ContextOut).
+%
+% Open a polytype with EXPLICIT type arguments bound positionally to its
+% first bound variables (a `forall_type` keeps its bound ids in source
+% order); the rest are opened fresh, exactly as in instantiate_positional/6.
+instantiate_forall_positional(forall_type(BoundIds, Body), Provided, Level, ContextIn, OpenedType, ContextOut) :-
+  positional_quantified_mapping(BoundIds, Provided, Level, ContextIn, Mapping, ContextOut),
   substitute_quantified_variables(Body, Mapping, OpenedType).
 
 %% skolemize_forall(+BoundIds, +Body, +Level, +ContextIn, -SkolemBody, -ContextOut).

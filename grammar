@@ -156,9 +156,16 @@ Primary :-
 	| Block
 	| Identifier
 
+# A call may carry explicit TYPE ARGUMENTS: `foo<number>(1)`.  They bind the
+# callee's type parameters POSITIONALLY; a hole `_` and every omitted
+# trailing position are inferred (`bar<_ boolean>(_ true)`).  Since `<` also
+# compares, the type-argument form is recognised only when a `<`, a
+# well-formed argument list, its matching `>` and an immediately following
+# `(` are all present -- anything else reads as a comparison.  (The one true
+# ambiguity, `a < b > (c)`, reads as a call of `a` with type argument `b`.)
 PostfixOperator :-
 	"." Accessor
-	| "(" Separator* (CallArgument (Separator+ CallArgument)*)* Separator* ")"
+	| TypeArguments? "(" Separator* (CallArgument (Separator+ CallArgument)*)* Separator* ")"
 
 # A `_` argument is a placeholder (hole): a call with holes evaluates to a
 # function awaiting those arguments, in order.  e.g. `foo(_ 'x')` has the
@@ -172,7 +179,11 @@ Assignment :- Separator* "=" Separator* Expression
 
 Unary :- UnaryOperator Separator* Expression
 
-UnaryOperator :- "-" | "!" | "~"
+# `!!` is bit inversion (JS `~`); it must be lexed before `!`, like the other
+# doubled operators.  `~` itself is not an operator: it always introduces an
+# Unquote (see the reader macros below), which is recognised at the atom level
+# before unary parsing.
+UnaryOperator :- "-" | "!" | "!!"
 
 Binary :-
 	BaseExpression
@@ -220,6 +231,10 @@ Destructuring :- IrrefutableRecordPattern Separator* "=" Separator* Expression
 # `|`-separated alternative patterns (an OR-PATTERN; all alternatives must
 # bind the same variables), an optional guard, and a result.  In this
 # (union-free) form every pattern is consistent with the scrutinee's type.
+# Inside a guard or result the binary `|` operator is unavailable at the top
+# level (a `|` there always starts the next pattern/arm); wrap a boolean-or
+# as `{ a | b }` or `(a | b)`.  All other operators, including the
+# lower-precedence pipe `->`, work unwrapped.
 Match :-
 	"match" Separator+ Postfix
 	(Separator* "|" Separator* MatchArm)+
@@ -253,7 +268,7 @@ DeclarationBody :- Opaque? VariantBody | TypeExpression
 VariantBody :- "|"? Constructor (Separator* "|" Separator* Constructor)*
 
 Constructor :-
-	Identifier ("(" Separator* TypeExpression (Separator+ TypeExpression)* Separator* ")")?
+	Identifier ("(" Separator* (TypeExpression (Separator+ TypeExpression)* Separator*)? ")")?
 
 Opaque :- "opaque" Separator+
 
@@ -439,8 +454,9 @@ Macro :- "macro" Separator+ Identifier Separator* "=" Separator*
 # and with `source` = the RAW SOURCE TEXT of the single Expression that follows
 # (`log('tick')`).  The following expression is parsed only to delimit it; its
 # verbatim characters become the `source` string, which the macro re-parses with
-# `Compiler.parseItem`.  `@` is used nowhere else.
-MacroInvocation :- "@" Identifier
+# `Compiler.parseItem`.  `@` is used nowhere else.  The name may be QUALIFIED
+# (`@Math.inc`) for a macro from a whole-module import or a nested module.
+MacroInvocation :- "@" QualifiedName
                    "(" Separator* (Expression (Separator+ Expression)*)? Separator* ")"
                    Separator* Expression
 

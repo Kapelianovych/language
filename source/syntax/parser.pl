@@ -24,7 +24,7 @@
 
     SOFT KEYWORDS
         `use`, `public`, `external`, `module`, `type`, `if`, `else`, `match`,
-        `mutable`, `readonly` all lex as ordinary `ident` tokens, so they are
+        `mutable` all lex as ordinary `ident` tokens, so they are
         recognised by their TEXT (`keyword/2`) at the positions where they take
         on meaning, and otherwise parse as plain identifiers.
 
@@ -67,6 +67,7 @@ punct(backtick,    '`').    % quasiquote
 punct(tilde,       '~').    % unquote
 punct(open_angle,  '<').    % type parameters / arguments
 punct(close_angle, '>').    % (`<`/`>` also lex as comparison operators)
+punct(shift_right, '>>').   % may hide two closing `>`s (see close_angle)
 
 skip_trivia([t(K, Tx, S, E) | Ts], [t(K, Tx, S, E) | Trivia], Rest) :-
   trivia_kind(K), !,
@@ -402,14 +403,53 @@ postfix_expression(Tokens, Rest, Node, D0, D) :-
 postfix_chain(Acc, Tokens, Rest, Node, D0, D) :-
   ( postfixable(Acc), peek_punct(Tokens, dot) ->
       bump(Tokens, Tokens1, DotChildren),
-      expect_kind(ident, Tokens1, Tokens2, NameChildren, D0, D1),
+      accessor(Tokens1, Tokens2, NameChildren, D0, D1),
       append([Acc | DotChildren], NameChildren, Children),
       postfix_chain(node(access, Children), Tokens2, Rest, Node, D1, D)
   ; postfixable(Acc), peek_punct(Tokens, open_paren) ->
       argument_list(Tokens, Tokens1, ArgChildren, D0, D1),
       postfix_chain(node(call, [Acc | ArgChildren]), Tokens1, Rest, Node, D1, D)
+  ; postfixable(Acc), peek_punct(Tokens, open_angle), type_application_ahead(Tokens) ->
+      % A call with explicit TYPE ARGUMENTS:  foo<number>(1).  The green call
+      % node carries the `type_args` node between the callee and the argument
+      % tokens.
+      type_arguments(Tokens, Tokens1, TypeArgsNode, D0, D1),
+      argument_list(Tokens1, Tokens2, ArgChildren, D1, D2),
+      postfix_chain(node(call, [Acc, TypeArgsNode | ArgChildren]), Tokens2, Rest, Node, D2, D)
   ; Node = Acc, Rest = Tokens, D0 = D
   ).
+
+% After a value, `x < y` is normally a comparison, so `<` commits to type
+% arguments only when a conservative forward scan proves the closed shape
+% `< ... > (`: only tokens that can occur inside type arguments are allowed
+% (names, `_`, `.`, `:`, parens, nested angles), angle depth is tracked (a
+% `>>` token closes two levels -- the lexer fuses adjacent `>`s), and the
+% token after the matching close must open the call's argument list.  Any
+% other token -- a number, a string, an operator -- proves a comparison and
+% the scan fails without consuming anything.  The one true ambiguity,
+% `a < b > (c)`, is resolved as a call of `a` with type argument `b`; a
+% chained comparison there is ill-typed anyway (its left operand is boolean).
+type_application_ahead(Tokens) :-
+  skip_trivia(Tokens, _, [t(K0, _, _, _) | After]),
+  punct(open_angle, K0),
+  type_application_scan(After, 1, AfterClose),
+  skip_trivia(AfterClose, _, [t(K1, _, _, _) | _]),
+  punct(open_paren, K1).
+
+type_application_scan(Tokens, 0, Tokens) :- !.
+type_application_scan([t(K, _, _, _) | Ts], Depth, Rest) :-
+  ( trivia_kind(K)        -> Depth1 = Depth
+  ; K == ident            -> Depth1 = Depth
+  ; K == underscore       -> Depth1 = Depth
+  ; punct(dot, K)         -> Depth1 = Depth
+  ; punct(colon, K)       -> Depth1 = Depth
+  ; punct(open_paren, K)  -> Depth1 = Depth
+  ; punct(close_paren, K) -> Depth1 = Depth
+  ; punct(open_angle, K)  -> Depth1 is Depth + 1
+  ; punct(close_angle, K) -> Depth1 is Depth - 1
+  ; punct(shift_right, K) -> Depth1 is Depth - 2, Depth1 >= 0
+  ),
+  type_application_scan(Ts, Depth1, Rest).
 
 % A `.access`/`(call)` may follow a value atom but NOT a statement-like atom: a
 % block / if / match / quasiquote / function-literal is not directly postfixed.
@@ -419,6 +459,24 @@ postfix_chain(Acc, Tokens, Rest, Node, D0, D) :-
 % is still callable through a name or a parenthesised sub-expression.)
 postfixable(node(Kind, _)) :-
   \+ member(Kind, [block, conditional, match, quote, unquote, function]).
+
+% Accessor :- Identifier | DecimalDigit+ (grammar).  A numeric accessor names
+% a positional tuple member: `t.0`.  The lexer knows nothing about access
+% chains, so in `t.0.1` it reads `0.1` as ONE float token; the accessor is
+% only the leading digit run, so the token is SPLIT there and the remainder is
+% pushed back as a fresh `.` token plus number token for the next chain step
+% to consume.  The split halves' texts concatenate to the original token's
+% text, so the tree stays lossless.
+accessor(Tokens, Rest, Children, D0, D) :-
+  ( peek(Tokens, number) ->
+      skip_trivia(Tokens, Trivia, [t(number, Text, S, E) | After]),
+      ( append(Digits, ['.' | Frac], Text) ->
+          length(Digits, DL), Mid is S + DL, AfterDot is Mid + 1,
+          append(Trivia, [t(number, Digits, S, Mid)], Children),
+          Rest = [t('.', ['.'], Mid, AfterDot), t(number, Frac, AfterDot, E) | After]
+      ; append(Trivia, [t(number, Text, S, E)], Children), Rest = After ),
+      D0 = D
+  ; expect_kind(ident, Tokens, Rest, Children, D0, D) ).
 
 argument_list(Tokens, Rest, Children, D0, D) :-
   bump(Tokens, Tokens1, OpenChildren),            % `(`
@@ -469,6 +527,31 @@ infix_loop(MinPrec, Left, Tokens, Rest, Node, D0, D) :-
   ; Node = Left, Rest = Tokens, D0 = D
   ).
 
+% Match-arm expressions.  Inside an arm the `|` token is an ARM/ALTERNATIVE
+% separator, so the binary boolean-or operator is not available at the arm's
+% top level -- if `|` were parsed as an operator there, an arm result would
+% swallow the pattern of the next arm.  Precedence alone cannot express this:
+% the pipe `->` sits BELOW `|` in the operator table, so any minimum
+% precedence that excludes `|` also (wrongly) excludes `->`.  These variants
+% therefore run the ordinary precedence climb with the single `|` operator
+% masked out; every delimited sub-expression (parens, block, call arguments)
+% is parsed by predicates that call expression/6 directly, so `|` becomes an
+% operator again inside `{ a | b }` or `(a | b)` within an arm.
+arm_expression(MinPrec, Tokens, Rest, Node, D0, D) :-
+  unary_expression(Tokens, Tokens1, Left, D0, D1),
+  arm_infix_loop(MinPrec, Left, Tokens1, Rest, Node, D1, D).
+
+arm_infix_loop(MinPrec, Left, Tokens, Rest, Node, D0, D) :-
+  peek(Tokens, Kind),
+  ( binary_operator(Kind, Prec, Assoc), Prec >= MinPrec, \+ punct(bar, Kind) ->
+      bump(Tokens, Tokens1, OpChildren),
+      ( Assoc == left -> NextMin is Prec + 1 ; NextMin = Prec ),
+      arm_expression(NextMin, Tokens1, Tokens2, Right, D0, D1),
+      append([Left | OpChildren], [Right], Children),
+      arm_infix_loop(MinPrec, node(binary, Children), Tokens2, Rest, Node, D1, D)
+  ; Node = Left, Rest = Tokens, D0 = D
+  ).
+
 % `: Type =` -- the annotation half of an annotated definition, ending just
 % after the `=`.  Fails WITHOUT consuming (all bindings undone) when the shape
 % is not present, so the caller can fall back to plain operator parsing.
@@ -482,7 +565,7 @@ definition_annotation(Tokens, Rest, Children, D0, D) :-
 
 % ===========================================================================
 % Atoms (including the keyword expressions `if` and `match`, and the `(...)`
-% form which is a tuple/record OR a function literal when followed by `:`).
+% form which is a tuple/record OR a function literal -- see paren_or_function).
 % ===========================================================================
 
 atom_expression(Tokens, Rest, Node, D0, D) :-
@@ -545,10 +628,10 @@ match_arms(Tokens, Rest, [node(arm, ArmChildren) | More], D0, D) :-
   arm_alternatives(T2, T3, AltChildren, D1, D2),
   arm_guard(T3, T4, GuardChildren, D2, D3),
   expect_punct(arrow, T4, T5, ArrowCh, D3, D4),
-  % Result parsed above precedence 2 so it does NOT consume the `|` that
-  % separates the next arm (the binary-or operator and the arm separator share
-  % the `|` token; in a match arm the separator wins).
-  expression(3, T5, T6, Result, D4, D5),
+  % The result is an arm_expression: the `|` operator is masked so the `|`
+  % that separates the next arm is left unconsumed (see arm_expression).
+  % Above 0 so a following `=` is not swallowed either.
+  arm_expression(1, T5, T6, Result, D4, D5),
   append(BarCh, [Pat], C1), append(C1, AltChildren, C2),
   append(C2, GuardChildren, C3), append(C3, ArrowCh, C4),
   append(C4, [Result], ArmChildren),
@@ -568,12 +651,12 @@ arm_alternatives(Tokens, Rest, Children, D0, D) :-
 
 % An optional guard:  `if CONDITION` between the patterns and the `=>`.  The
 % `if` keyword and the condition are wrapped in one `guard` node so the
-% lowerer can tell the condition apart from the result expression.  Parsed
-% above precedence 2 for the same `|`-sharing reason as the result.
+% lowerer can tell the condition apart from the result expression.  Parsed as
+% an arm_expression for the same `|`-masking reason as the result.
 arm_guard(Tokens, Rest, GuardNodes, D0, D) :-
   ( keyword(Tokens, "if") ->
       bump(Tokens, T1, IfCh),
-      expression(3, T1, Rest, Condition, D0, D),
+      arm_expression(1, T1, Rest, Condition, D0, D),
       append(IfCh, [Condition], GuardChildren),
       GuardNodes = [node(guard, GuardChildren)]
   ; GuardNodes = [], Rest = Tokens, D0 = D ).
@@ -590,6 +673,11 @@ pattern(Tokens, Rest, Node, D0, D) :-
   ( peek(Tokens, underscore) -> bump(Tokens, Rest, Ch), Node = node(wildcard_pattern, Ch), D0 = D
   ; peek(Tokens, number) -> bump(Tokens, Rest, Ch), Node = node(literal_pattern, Ch), D0 = D
   ; peek(Tokens, string) -> bump(Tokens, Rest, Ch), Node = node(literal_pattern, Ch), D0 = D
+  ; ( keyword(Tokens, "true") ; keyword(Tokens, "false") ) ->
+      % `true`/`false` lex as plain idents but denote BOOLEAN LITERALS, in
+      % patterns as everywhere else; checked before the general ident branch
+      % because reading them as bindings would make the arm match anything.
+      bump(Tokens, Rest, Ch), Node = node(literal_pattern, Ch), D0 = D
   ; peek(Tokens, ident)  ->
       qualified_type_name(Tokens, T1, NameCh),
       ( peek_punct(T1, open_paren) ->
@@ -606,7 +694,7 @@ pattern(Tokens, Rest, Node, D0, D) :-
       )
   ; peek_punct(Tokens, open_paren) ->
       bump(Tokens, T1, OpenCh),
-      pattern_sequence(T1, T2, SubCh, D0, D1),
+      pattern_member_sequence(T1, T2, SubCh, D0, D1),
       expect_punct(close_paren, T2, Rest, CloseCh, D1, D),
       append(OpenCh, SubCh, C1), append(C1, CloseCh, Children),
       Node = node(tuple_pattern, Children)
@@ -615,11 +703,12 @@ pattern(Tokens, Rest, Node, D0, D) :-
       D0 = [diagnostic(At, At, expected_pattern) | D]
   ).
 
+% Sub-patterns of a CONSTRUCTOR pattern: positional only (a constructor's
+% fields are matched in order, they have no labels).
 pattern_sequence(Tokens, Tokens, [], D, D) :-
   ( peek_punct(Tokens, close_paren) ; peek(Tokens, eof) ), !.
 pattern_sequence(Tokens, Rest, [Pat | Pats], D0, D) :-
-  ( peek(Tokens, number) ; peek(Tokens, string) ; peek(Tokens, ident)
-  ; peek(Tokens, underscore) ; peek_punct(Tokens, open_paren) ), !,
+  pattern_starts(Tokens), !,
   pattern(Tokens, Tokens1, Pat, D0, D1),
   pattern_sequence(Tokens1, Rest, Pats, D1, D).
 pattern_sequence(Tokens, Rest, [node(error, Err) | Pats], D0, D) :-
@@ -628,16 +717,51 @@ pattern_sequence(Tokens, Rest, [node(error, Err) | Pats], D0, D) :-
   pattern_sequence(Tokens1, Rest, Pats, D1, D),
   D0 = [diagnostic(At, At, unexpected_token) | D1].
 
+% Members of a RECORD pattern:  PatternMember :- Identifier "=" Pattern |
+% Pattern (grammar).  `(x = p)` matches field x against p; a bare pattern
+% matches the next positional field.  A member is labeled exactly when an
+% identifier's NEXT significant token is `=` -- a bare binding is never
+% followed by `=` inside the parens, so two tokens of lookahead decide.
+pattern_member_sequence(Tokens, Tokens, [], D, D) :-
+  ( peek_punct(Tokens, close_paren) ; peek(Tokens, eof) ), !.
+pattern_member_sequence(Tokens, Rest, [node(labeled_pattern, MemberCh) | Members], D0, D) :-
+  labeled_pattern_ahead(Tokens), !,
+  bump(Tokens, T1, LabelCh),                       % the field name
+  bump(T1, T2, EqCh),                              % `=`
+  pattern(T2, T3, Sub, D0, D1),
+  append(LabelCh, EqCh, C1), append(C1, [Sub], MemberCh),
+  pattern_member_sequence(T3, Rest, Members, D1, D).
+pattern_member_sequence(Tokens, Rest, [Pat | Pats], D0, D) :-
+  pattern_starts(Tokens), !,
+  pattern(Tokens, Tokens1, Pat, D0, D1),
+  pattern_member_sequence(Tokens1, Rest, Pats, D1, D).
+pattern_member_sequence(Tokens, Rest, [node(error, Err) | Pats], D0, D) :-
+  offset(Tokens, At),
+  bump(Tokens, Tokens1, Err),
+  pattern_member_sequence(Tokens1, Rest, Pats, D1, D),
+  D0 = [diagnostic(At, At, unexpected_token) | D1].
+
+pattern_starts(Tokens) :-
+  ( peek(Tokens, number) ; peek(Tokens, string) ; peek(Tokens, ident)
+  ; peek(Tokens, underscore) ; peek_punct(Tokens, open_paren) ).
+
+labeled_pattern_ahead(Tokens) :-
+  skip_trivia(Tokens, _, [t(ident, _, _, _) | AfterIdent]),
+  skip_trivia(AfterIdent, _, [t(Kind, _, _, _) | _]),
+  punct(eq, Kind).
+
 % ===========================================================================
 % Parenthesised form: tuple / record literal, OR a function literal when the
-% closing `)` is followed by `: returntype body`.
+% closing `)` is followed by `: returntype body` -- or (annotation-free form)
+% when every member is parameter-shaped and an expression follows.
 %
-%   (a + b)                 -> paren
+%   (a + b)                 -> tuple
 %   (10 20)  (x = 1 y = 2)  -> tuple / record (space-separated members)
 %   (a: number b: number): number  BODY   -> function
+%   (n) n                   -> function (grammar: TypeAnnotation? is optional)
 %
 % Members are space-separated; a member may carry a `: type` annotation and an
-% optional `mutable`/`readonly` prefix.
+% optional `mutable` prefix, or be a `..value` spread.
 % ===========================================================================
 
 paren_or_function(Tokens, Rest, Node, D0, D) :-
@@ -655,28 +779,84 @@ paren_or_function(Tokens, Rest, Node, D0, D) :-
       append(F1, [RetType], F2),
       append(F2, [Body], Children),
       Node = node(function, Children)
+  ; parameter_members(MemberChildren), function_body_follows(T3) ->
+      % Annotation-free function literal: `(n) n`.  The grammar is
+      % whitespace-insensitive, so a parameter-shaped `(...)` followed by an
+      % expression is genuinely ambiguous between a tuple and an independent
+      % next expression versus one function literal; the language resolves
+      % the ambiguity in favour of the function.  Committing requires BOTH
+      % conditions: members that are valid parameters (so `(a + b)`,
+      % `(x = 1)`, `(10 20)` stay tuples) and a following expression starter
+      % (so a trailing `(..)` at end of block, `(a).f`, `(a) = v` stay
+      % tuples).
+      expression(0, T3, Rest, Body, D2, D),
+      append(GroupChildren, [Body], Children),
+      Node = node(function, Children)
   ; Node = node(group, GroupChildren), Rest = T3, D2 = D ).
 
+% Every member is parameter-shaped: an irrefutable pattern with an optional
+% `: type` annotation.  A `mutable` prefix, a spread, a literal, a labeled
+% member (`x = 1`) or any compound expression rules the form a tuple.
+parameter_members([]).
+parameter_members([node(member, [Value | _]) | Ms]) :-
+  parameter_value(Value),
+  parameter_members(Ms).
+
+% The expression shapes that read as irrefutable patterns: a name, a `_`
+% wildcard, or a parenthesised destructuring of such shapes.  Labeled members
+% inside a nested group are NOT accepted even though a labeled destructuring
+% is grammatical: `(x = a)` is exactly a record literal, so treating it as a
+% parameter would flip record values into functions whenever an expression
+% follows; a labeled destructuring parameter needs the return-annotated
+% function form, whose `:` commits unambiguously.
+parameter_value(node(identifier, _)).
+parameter_value(node(placeholder, _)).
+parameter_value(node(group, Ch)) :-
+  member_nodes(Ch, Members),
+  parameter_members(Members).
+
+% The sub-NODES of a green child list (skips leaf tokens).
+member_nodes([], []).
+member_nodes([node(K, C) | Xs], [node(K, C) | Ns]) :- !, member_nodes(Xs, Ns).
+member_nodes([_Leaf | Xs], Ns) :- member_nodes(Xs, Ns).
+
+% Can the token after `)` begin the function body?  Any expression starter
+% counts EXCEPT one that could equally continue the group as a binary
+% operator: `(a) - b` stays a subtraction on the group, not a function whose
+% body is `-b`.
+function_body_follows(Tokens) :-
+  peek(Tokens, Kind),
+  starts_expression(Tokens, Kind),
+  \+ binary_operator(Kind, _, _).
+
 % A function literal with leading generics:  <A ..> ( params ) : Ret  Body
+% (the `: Ret` annotation is optional, as in the bare form).
 % The `<...>` makes it unambiguously a function (not a comparison), so -- unlike
-% the bare `(...)` form -- no `(...):` lookahead is needed to commit.
+% the bare `(...)` form -- no lookahead is needed to commit.
 generic_function(Tokens, Rest, node(function, Children), D0, D) :-
   type_parameters(Tokens, T1, Params, D0, D1),
   expect_punct(open_paren, T1, T2, OpenCh, D1, D2),
   member_sequence(T2, T3, MemberChildren, D2, D3),
   expect_punct(close_paren, T3, T4, CloseCh, D3, D4),
-  expect_punct(colon, T4, T5, ColonCh, D4, D5),
-  type_expression(T5, T6, RetType, D5, D6),
-  expression(0, T6, Rest, Body, D6, D),
+  ( peek_punct(T4, colon) ->
+      bump(T4, T5, ColonCh),
+      type_expression(T5, T6, RetType, D4, D5),
+      append(ColonCh, [RetType], AnnCh)
+  ; T6 = T4, D5 = D4, AnnCh = [] ),
+  expression(0, T6, Rest, Body, D5, D),
   append([Params | OpenCh], MemberChildren, C1),
   append(C1, CloseCh, C2),
-  append(C2, ColonCh, C3),
-  append(C3, [RetType, Body], Children).
+  append(C2, AnnCh, C3),
+  append(C3, [Body], Children).
 
 member_sequence(Tokens, Tokens, [], D, D) :-
   ( peek_punct(Tokens, close_paren) ; peek(Tokens, eof) ), !.
 member_sequence(Tokens, Rest, [Member | Members], D0, D) :-
-  ( keyword(Tokens, "mutable") ; keyword(Tokens, "readonly")
+  peek_punct(Tokens, dot), !,
+  spread_member(Tokens, Tokens1, Member, D0, D1),
+  member_sequence(Tokens1, Rest, Members, D1, D).
+member_sequence(Tokens, Rest, [Member | Members], D0, D) :-
+  ( keyword(Tokens, "mutable")
   ; peek(Tokens, Kind), starts_expression(Tokens, Kind) ; keyword_expr(Tokens) ), !,
   member_item(Tokens, Tokens1, Member, D0, D1),
   member_sequence(Tokens1, Rest, Members, D1, D).
@@ -686,8 +866,19 @@ member_sequence(Tokens, Rest, [node(error, Err) | Members], D0, D) :-
   member_sequence(Tokens1, Rest, Members, D1, D),
   D0 = [diagnostic(At, At, unexpected_token) | D1].
 
+% A spread member `..expr` splices another record's fields into this tuple
+% (grammar: Spread :- ".." Expression).  The lexer has no `..` token, so it
+% arrives as two `.` tokens.  The value is parsed above precedence 0 because
+% `=` inside a tuple introduces a labeled member, never a definition inside a
+% spread value.
+spread_member(Tokens, Rest, node(spread, Children), D0, D) :-
+  bump(Tokens, T1, Dot1),
+  expect_punct(dot, T1, T2, Dot2, D0, D1),
+  expression(1, T2, Rest, Value, D1, D),
+  append(Dot1, Dot2, C1), append(C1, [Value], Children).
+
 member_item(Tokens, Rest, node(member, Children), D0, D) :-
-  ( ( keyword(Tokens, "mutable") ; keyword(Tokens, "readonly") ) ->
+  ( keyword(Tokens, "mutable") ->
       bump(Tokens, T1, ModCh)
   ; ModCh = [], T1 = Tokens ),
   % expression(0) so a record binding `x = 1` is parsed whole (as a `definition`
@@ -760,18 +951,18 @@ split_close(t(_, ['>', C | Cs], Start, End), t('>', ['>'], Start, Mid), t(RestKi
   Mid is Start + 1,
   atom_chars(RestKind, [C | Cs]).
 
+% A function type is formed only by `parenthesized_type`'s own `: ReturnType`
+% suffix -- the return annotation belongs to a parenthesised parameter list
+% (grammar: ParenthesizedType), so `number: string` is NOT a type.  A `:`
+% after a named type is deliberately left unconsumed: in every position where
+% a type expression appears (a labeled member, an annotated definition, a
+% variant field) the surrounding form owns the next `:` or diagnoses it.
 type_expression(Tokens, Rest, Node, D0, D) :-
   ( peek_punct(Tokens, open_angle) ->                 % quantified (polymorphic)
       type_parameters(Tokens, T1, Params, D0, D1),
       type_expression(T1, Rest, Body, D1, D),
       Node = node(quantified_type, [Params, Body])
-  ; type_atom(Tokens, T1, Atom, D0, D1),
-    ( peek_punct(T1, colon) ->                         % function type:  (..) : Ret
-        bump(T1, T2, ColonCh),
-        type_expression(T2, Rest, Result, D1, D),
-        append([Atom | ColonCh], [Result], Children),
-        Node = node(function_type, Children)
-    ; Node = Atom, Rest = T1, D1 = D ) ).
+  ; type_atom(Tokens, Rest, Node, D0, D) ).
 
 type_atom(Tokens, Rest, Node, D0, D) :-
   ( peek(Tokens, ident) -> type_reference(Tokens, Rest, Node, D0, D)
@@ -844,7 +1035,7 @@ parenthesized_type(Tokens, Rest, Node, D0, D) :-
 type_member_seq(Tokens, Tokens, [], D, D) :-
   ( peek_punct(Tokens, close_paren) ; peek_punct(Tokens, dot) ; peek(Tokens, eof) ), !.
 type_member_seq(Tokens, Rest, [Member | Members], D0, D) :-
-  ( keyword(Tokens, "mutable") ; keyword(Tokens, "readonly") ; type_starts(Tokens) ), !,
+  ( keyword(Tokens, "mutable") ; type_starts(Tokens) ), !,
   type_member(Tokens, T1, Member, D0, D1),
   type_member_seq(T1, Rest, Members, D1, D).
 type_member_seq(Tokens, Rest, [node(error, Err) | Members], D0, D) :-
@@ -855,7 +1046,7 @@ type_member_seq(Tokens, Rest, [node(error, Err) | Members], D0, D) :-
 % Mutability? (Identifier ":" Type | Type).  Mutability and the label are kept
 % in their own wrapper nodes so the lowerer can read them unambiguously.
 type_member(Tokens, Rest, node(type_member, Children), D0, D) :-
-  ( ( keyword(Tokens, "mutable") ; keyword(Tokens, "readonly") ) ->
+  ( keyword(Tokens, "mutable") ->
       bump(Tokens, T1, ModCh), Mod = [node(mutability, ModCh)]
   ; Mod = [], T1 = Tokens ),
   ( labeled_member(T1) ->
@@ -1026,9 +1217,9 @@ unquote(Tokens, Rest, node(unquote, Children), D0, D) :-
 
 unary_operator('-').
 unary_operator('!').
-% NOTE: `~` is NOT a unary operator here -- it introduces an UNQUOTE
-% (`~x` / `~(e)`), handled in atom_expression.  (The batch grammar likewise
-% tries unquote before the unary `~`, so `~x` always reads as an unquote.)
+unary_operator('!!').          % bit inversion
+% NOTE: `~` is NOT a unary operator -- it introduces an UNQUOTE (`~x` /
+% `~(e)`), handled in atom_expression; bit inversion is spelled `!!`.
 
 binary_operator('*',  12, left).
 binary_operator('/',  12, left).

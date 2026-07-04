@@ -295,7 +295,7 @@ scan_interpolation([C | Cs], [C | Out], Rest) :-               % ordinary char
 
 operators([
   % two-character (must precede their one-character prefixes)
-  "<<", ">>", "&&", "^^", "||", "<=", ">=", "==", "!=", "->", "=>",
+  "<<", ">>", "&&", "^^", "||", "<=", ">=", "==", "!=", "!!", "->", "=>",
   % one-character operators
   "*", "/", "+", "-", "<", ">", "&", "^", "|", "!", "~",
   % punctuation / structural

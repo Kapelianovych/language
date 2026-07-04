@@ -411,6 +411,13 @@ rewrite(function_call_node(Target, Arguments, S), Ctx,
   rewrite(Target, Ctx, Target1),
   rewrite_arguments(Arguments, Ctx, Arguments1).
 
+% Explicit type arguments may reference module types, so they are rewritten
+% like any other type expressions.
+rewrite(type_application_node(Target, TypeArguments, S), Ctx,
+        type_application_node(Target1, TypeArguments1, S)) :- !,
+  rewrite(Target, Ctx, Target1),
+  rewrite_type_list(TypeArguments, Ctx, TypeArguments1).
+
 rewrite(tuple_node(Members, S), Ctx, tuple_node(Members1, S)) :- !,
   rewrite_tuple_members(Members, Ctx, Members1).
 

@@ -368,6 +368,10 @@ eval(function_call_node(Target, Arguments, _), Environment, Table, Value) :-
   eval(Target, Environment, Table, Function),
   eval_each(Arguments, Environment, Table, ArgumentValues),
   apply_function(Function, ArgumentValues, Table, Value).
+% Explicit type arguments carry no runtime meaning; the specialised value is
+% the target value.
+eval(type_application_node(Target, _TypeArguments, _), Environment, Table, Value) :-
+  eval(Target, Environment, Table, Value).
 eval(conditional_node(Condition, Then, Else, _), Environment, Table, Value) :-
   eval(Condition, Environment, Table, bool(Boolean)),
   ( Boolean == true -> eval(Then, Environment, Table, Value)
