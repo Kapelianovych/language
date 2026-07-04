@@ -387,9 +387,17 @@ maplist_lower_param([G | Gs], [P | Ps]) :- lower_param(G, P), maplist_lower_para
 maplist_lower_arm([], []).
 maplist_lower_arm([G | Gs], [A | As]) :- lower_arm(G, A), maplist_lower_arm(Gs, As).
 
-lower_arm(node(arm, Ch), match_arm([Pattern], no_guard, Result, Span)) :-
-  child_nodes(Ch, [PatGreen, ResultGreen]),
-  lower_match_pattern(PatGreen, Pattern),
+% An arm's sub-nodes are [PATTERN.. GUARD? RESULT]: one or more alternative
+% patterns, an optional `guard` node (the `if` condition), then the result.
+lower_arm(node(arm, Ch), match_arm(Patterns, Guard, Result, Span)) :-
+  child_nodes(Ch, ChildNodes),
+  append(PatternsAndGuard, [ResultGreen], ChildNodes),
+  ( append(PatGreens, [node(guard, GCh)], PatternsAndGuard) ->
+      child_nodes(GCh, [ConditionGreen]),
+      lower_expr(ConditionGreen, Condition),
+      Guard = guard(Condition)
+  ; PatGreens = PatternsAndGuard, Guard = no_guard ),
+  maplist_lower_match_pattern(PatGreens, Patterns),
   lower_expr(ResultGreen, Result),
   gspan(node(arm, Ch), Span).
 
@@ -454,6 +462,24 @@ lower_external(node(external, Ch), external_node(Name, Type, Source, Span)) :-
   external_source(Ch, Source),
   gspan(node(external, Ch), Span).
 
+% The source (see the grammar's ExternalSource):
+%   = 'name' from 'mod'  -> js_module(Mod, named(Name))   renamed module import
+%   from 'mod'           -> js_module(Mod, default)        import of the same name
+%   = 'expr'             -> js_expression(Expr)            JS expression
+%   (nothing)            -> js_global                      ambient global
+% The string leaves are direct children (the type's strings, if any, live
+% inside its sub-node), so their order is the source order.
+external_source(Ch, Source) :-
+  member(t(ident, "from", _, _), Ch), !,
+  findall(Text, member(t(string, Text, _, _), Ch), Strings),
+  ( Strings = [NameText, ModuleText] ->
+      string_raw(NameText, Foreign), string_raw(ModuleText, Module),
+      Source = js_module(Module, named(Foreign))
+  ; Strings = [ModuleText] ->
+      string_raw(ModuleText, Module),
+      Source = js_module(Module, default)
+  ; Source = js_global          % `from` with its string missing (parse error)
+  ).
 external_source(Ch, js_expression(Js)) :-
   child_token(Ch, '=', _), child_token(Ch, string, t(string, Text, _, _)), !,
   string_raw(Text, Js).

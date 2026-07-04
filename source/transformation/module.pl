@@ -297,15 +297,21 @@ expand_module_item(Item, Exported, Ctx, Output) :-
   rewrite_annotation(Ann, Ctx, Ann1),
   rewrite(Value, Ctx, Value1),
   wrap_export(Item, Exported, definition_node(identifier_node(QualifiedName, NSpan), Ann1, Value1, DSpan), DSpan, Output).
-% A foreign binding -> a top-level external with a qualified name.
+% A foreign binding -> a top-level external with a qualified name.  A
+% `js_global` source means "the JS global NAMED LIKE the external" and a
+% `js_module(_, default)` import "the export NAMED LIKE the external", so in
+% both the original name must be frozen into the source BEFORE qualification
+% -- else the generator would emit the qualified name (`Nullish.undefined`,
+% `import { M.sep }`) as the JS expression / import binding.
 expand_module_item(Item, Exported, Ctx, Output) :-
   ( Item = external_node(Name, Type, Source, ESpan)
   ; Item = public_node(external_node(Name, Type, Source, ESpan), _)
   ), !,
   Ctx = ctx(_, _, _, _, Prefix, _),
   append(Prefix, [Name], Seg), join_dotted(Seg, QualifiedName),
+  freeze_external_name(Source, Name, Source1),
   rewrite_type(Type, Ctx, Type1),
-  wrap_export(Item, Exported, external_node(QualifiedName, Type1, Source, ESpan), ESpan, Output).
+  wrap_export(Item, Exported, external_node(QualifiedName, Type1, Source1, ESpan), ESpan, Output).
 % A type declaration -> a top-level declaration with the type name AND every
 % constructor name qualified, and field / body type expressions rewritten.
 expand_module_item(Item, Exported, Ctx, Output) :-
@@ -329,6 +335,12 @@ expand_module_item(Item, Exported, Ctx, Output) :-
   expand_module_items(Seg, Body, Exported1, VS, TS, CS, MS, NS, Output).
 expand_module_item(Item, _Exported, _Ctx, _) :-
   throw(analysis_error(unsupported_module_item(Item))).
+
+% Sources whose JS reference is IMPLIED by the external's declared name get
+% that name frozen in before qualification (see the external clause above).
+freeze_external_name(js_global, Name, js_expression(Name)) :- !.
+freeze_external_name(js_module(Module, default), Name, js_module(Module, named(Name))) :- !.
+freeze_external_name(Source, _Name, Source).
 
 % Wrap a lifted item in `public_node` iff it should leave the file.  The
 % synthesized wrapper is given the lifted node's own `Span` (the `public_node`

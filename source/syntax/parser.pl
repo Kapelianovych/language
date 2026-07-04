@@ -529,7 +529,7 @@ if_expression(Tokens, Rest, node(conditional, Children), D0, D) :-
     append(C2, [t(missing, [], At, At)], Children),
     Rest = T3, D2 = [diagnostic(At, At, expected(else)) | D] ).
 
-% match SCRUTINEE  (| PATTERN => RESULT)+
+% match SCRUTINEE  (| PATTERN (| PATTERN)* (if GUARD)? => RESULT)+
 match_expression(Tokens, Rest, node(match, Children), D0, D) :-
   bump(Tokens, T1, MatchCh),
   % The scrutinee is parsed at the postfix level so it never consumes a `|`.
@@ -542,14 +542,41 @@ match_arms(Tokens, Rest, [node(arm, ArmChildren) | More], D0, D) :-
   peek_punct(Tokens, bar), !,
   bump(Tokens, T1, BarCh),
   pattern(T1, T2, Pat, D0, D1),
-  expect_punct(arrow, T2, T3, ArrowCh, D1, D2),
+  arm_alternatives(T2, T3, AltChildren, D1, D2),
+  arm_guard(T3, T4, GuardChildren, D2, D3),
+  expect_punct(arrow, T4, T5, ArrowCh, D3, D4),
   % Result parsed above precedence 2 so it does NOT consume the `|` that
   % separates the next arm (the binary-or operator and the arm separator share
   % the `|` token; in a match arm the separator wins).
-  expression(3, T3, T4, Result, D2, D3),
-  append(BarCh, [Pat], C1), append(C1, ArrowCh, C2), append(C2, [Result], ArmChildren),
-  match_arms(T4, Rest, More, D3, D).
+  expression(3, T5, T6, Result, D4, D5),
+  append(BarCh, [Pat], C1), append(C1, AltChildren, C2),
+  append(C2, GuardChildren, C3), append(C3, ArrowCh, C4),
+  append(C4, [Result], ArmChildren),
+  match_arms(T6, Rest, More, D5, D).
 match_arms(Rest, Rest, [], D, D).
+
+% OR-pattern alternatives:  every `|` BEFORE the arm's `=>` separates another
+% pattern of the SAME arm; a `|` starts the NEXT arm only after a result
+% expression has been consumed (the result stops before `|`, see above).
+arm_alternatives(Tokens, Rest, Children, D0, D) :-
+  ( peek_punct(Tokens, bar) ->
+      bump(Tokens, T1, BarCh),
+      pattern(T1, T2, Pat, D0, D1),
+      arm_alternatives(T2, Rest, MoreChildren, D1, D),
+      append(BarCh, [Pat | MoreChildren], Children)
+  ; Children = [], Rest = Tokens, D0 = D ).
+
+% An optional guard:  `if CONDITION` between the patterns and the `=>`.  The
+% `if` keyword and the condition are wrapped in one `guard` node so the
+% lowerer can tell the condition apart from the result expression.  Parsed
+% above precedence 2 for the same `|`-sharing reason as the result.
+arm_guard(Tokens, Rest, GuardNodes, D0, D) :-
+  ( keyword(Tokens, "if") ->
+      bump(Tokens, T1, IfCh),
+      expression(3, T1, Rest, Condition, D0, D),
+      append(IfCh, [Condition], GuardChildren),
+      GuardNodes = [node(guard, GuardChildren)]
+  ; GuardNodes = [], Rest = Tokens, D0 = D ).
 
 % ===========================================================================
 % Patterns (match arms):
