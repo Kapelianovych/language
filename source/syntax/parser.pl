@@ -442,6 +442,21 @@ expression_sequence(Closer, Tokens, Rest, [node(error, Err) | Items], D0, D) :-
 
 keyword_expr(Tokens) :- ( keyword(Tokens, "if") ; keyword(Tokens, "match") ).
 
+% An ANNOTATED definition:  name : Type = value  (grammar: `Definition :-
+% Identifier TypeAnnotation? "=" Expression`).  Tried speculatively where a
+% definition may start (`=` is available only at precedence 0): the `: Type`
+% commits only when an `=` follows it, so a parameter/member annotation
+% `name: type` with no `=` is still left unconsumed for member_item's `:`
+% branch, and a stray `:` still diagnoses as an unexpected token.  Only a bare
+% identifier takes an annotation (an access LHS is an assignment, a group LHS
+% a destructuring -- neither is annotated in the grammar).
+infix_loop(MinPrec, Left, Tokens, Rest, Node, D0, D) :-
+  MinPrec =< 0,
+  Left = node(identifier, _),
+  definition_annotation(Tokens, Tokens1, AnnChildren, D0, D1), !,
+  expression(0, Tokens1, Tokens2, Right, D1, D2),      % `=` is right-associative
+  append([Left | AnnChildren], [Right], Children),
+  infix_loop(MinPrec, node(definition, Children), Tokens2, Rest, Node, D2, D).
 infix_loop(MinPrec, Left, Tokens, Rest, Node, D0, D) :-
   peek(Tokens, Kind),
   ( binary_operator(Kind, Prec, Assoc), Prec >= MinPrec ->
@@ -453,6 +468,17 @@ infix_loop(MinPrec, Left, Tokens, Rest, Node, D0, D) :-
       infix_loop(MinPrec, node(NodeKind, Children), Tokens2, Rest, Node, D1, D)
   ; Node = Left, Rest = Tokens, D0 = D
   ).
+
+% `: Type =` -- the annotation half of an annotated definition, ending just
+% after the `=`.  Fails WITHOUT consuming (all bindings undone) when the shape
+% is not present, so the caller can fall back to plain operator parsing.
+definition_annotation(Tokens, Rest, Children, D0, D) :-
+  peek_punct(Tokens, colon),
+  bump(Tokens, T1, ColonCh),
+  type_expression(T1, T2, TypeNode, D0, D),
+  peek_punct(T2, eq),
+  bump(T2, Rest, EqCh),
+  append(ColonCh, [TypeNode | EqCh], Children).
 
 % ===========================================================================
 % Atoms (including the keyword expressions `if` and `match`, and the `(...)`

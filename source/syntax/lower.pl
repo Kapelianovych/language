@@ -141,12 +141,13 @@ module_body_nodes(Ch, BodyNodes) :- child_nodes(Ch, BodyNodes).
 % Definitions:  LHS = RHS  ->  definition / assignment / destructuring.
 % ---------------------------------------------------------------------------
 lower_definition(node(definition, Ch), Node) :-
-  child_nodes(Ch, [LhsGreen, RhsGreen]),
+  child_nodes(Ch, ChildNodes),
+  definition_parts(ChildNodes, LhsGreen, Annotation, RhsGreen),
   lower_expr(RhsGreen, Rhs),
   gspan(node(definition, Ch), Span),
   ( LhsGreen = node(identifier, _) ->
       lower_expr(LhsGreen, IdNode),
-      Node = definition_node(IdNode, no_annotation, Rhs, Span)
+      Node = definition_node(IdNode, Annotation, Rhs, Span)
   ; LhsGreen = node(access, _) ->
       lower_expr(LhsGreen, AccessNode),
       Node = assignment_node(AccessNode, Rhs, Span)
@@ -154,8 +155,14 @@ lower_definition(node(definition, Ch), Node) :-
       lower_pattern(LhsGreen, Pattern),
       Node = destructuring_node(Pattern, Rhs, Span)
   ; lower_expr(LhsGreen, IdNode),              % fallback
-      Node = definition_node(IdNode, no_annotation, Rhs, Span)
+      Node = definition_node(IdNode, Annotation, Rhs, Span)
   ).
+
+% A definition's sub-nodes are [LHS, RHS] (bare) or [LHS, TYPE, RHS] when the
+% parser committed a `name : Type = value` annotated definition.
+definition_parts([LhsGreen, RhsGreen], LhsGreen, no_annotation, RhsGreen).
+definition_parts([LhsGreen, TypeGreen, RhsGreen], LhsGreen, type_annotation(Type), RhsGreen) :-
+  lower_type(TypeGreen, Type).
 
 % ---------------------------------------------------------------------------
 % Imports.
@@ -292,15 +299,19 @@ maplist_lower_member([G | Gs], [M | Ms]) :- lower_member(G, M), maplist_lower_me
 % value (positional) or a `definition` node `name = value` (labeled).
 lower_member(node(member, Ch), tuple_member(Mut, Kind, Annotation, Value, Span)) :-
   ( child_token(Ch, ident, t(ident, [m,u,t,a,b,l,e], _, _)) -> Mut = mutable ; Mut = readonly ),
-  member_annotation(Ch, Annotation),
   child_nodes(Ch, ValueGreens0),
   exclude_type_node(ValueGreens0, [ValueGreen]),
   ( ValueGreen = node(definition, DCh) ->
-      child_nodes(DCh, [NameG, ValG]),
+      child_nodes(DCh, DNodes),
+      % A labeled member's `name : Type = value` annotation lives INSIDE the
+      % definition node; fall back to a member-level `: Type` otherwise.
+      definition_parts(DNodes, NameG, DefAnnotation, ValG),
+      ( DefAnnotation = type_annotation(_) -> Annotation = DefAnnotation
+      ; member_annotation(Ch, Annotation) ),
       NameG = node(identifier, NCh), child_token(NCh, ident, t(ident, Label, _, _)),
       Kind = labeled(Label),
       lower_expr(ValG, Value)
-  ; Kind = positional, lower_expr(ValueGreen, Value) ),
+  ; Kind = positional, member_annotation(Ch, Annotation), lower_expr(ValueGreen, Value) ),
   gspan(node(member, Ch), Span).
 
 member_annotation(Ch, type_annotation(Type)) :-
