@@ -123,6 +123,12 @@ validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, varian
   bind_validation_parameters(Parameters, TypeEnvironment, Context0, ValidationEnvironment, Context1),
   validate_constructor_fields(Constructors, ValidationEnvironment, Context1),
   validate_declarations(Rest, TypeEnvironment).
+% A bodyless (abstract FFI) declaration has no body to validate; its parameter
+% bounds are still checked.
+validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, no_body, _) | Rest], TypeEnvironment) :- !,
+  empty_context(Context0),
+  bind_validation_parameters(Parameters, TypeEnvironment, Context0, _ValidationEnvironment, _Context1),
+  validate_declarations(Rest, TypeEnvironment).
 validate_declarations([type_declaration_node(Name, Parameters, _Opacity, Body, _) | Rest], TypeEnvironment) :-
   empty_context(Context0),
   bind_validation_parameters(Parameters, TypeEnvironment, Context0, ValidationEnvironment, Context1),

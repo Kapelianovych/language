@@ -81,6 +81,11 @@ statements([type_declaration_node(_, _, _, variant_body(Constructors), _) | Expr
 % Other type declarations (aliases / opaque) are compile-time only.
 statements([type_declaration_node(_, _, _, _, _) | Expressions]) -->
   statements(Expressions).
+% A `public opaque` tagged union is abstract: no importer can name its
+% constructors, so they are emitted module-local, like a private union's.
+statements([public_node(type_declaration_node(_, _, opaque, variant_body(Constructors), _), _) | Expressions]) -->
+  constructor_definitions(Constructors),
+  statements(Expressions).
 % A `public` tagged union exports each of its constructors.
 statements([public_node(type_declaration_node(_, _, _, variant_body(Constructors), _), _) | Expressions]) -->
   exported_constructor_definitions(Constructors),

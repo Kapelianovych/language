@@ -267,10 +267,13 @@ from_clause(Tokens, Rest, Children, D0, D) :-
   ; Children = [], Rest = Tokens, D0 = D ).
 
 % ===========================================================================
-% type NAME TypeParameters? = DeclarationBody
-%   DeclarationBody :- VariantBody | "opaque"? TypeExpression
+% type NAME TypeParameters? ("=" DeclarationBody)?
+%   DeclarationBody :- "opaque"? VariantBody | TypeExpression
 %   VariantBody     :- "|"? Constructor ("|" Constructor)*
 %   Constructor     :- Identifier ("(" TypeExpression+ ")")?
+%
+% A declaration WITHOUT `= body` is an ABSTRACT (FFI) type: nominal, with no
+% constructors anywhere -- its values arrive only through `external`s.
 % ===========================================================================
 
 type_declaration(Tokens, Rest, node(type_declaration, Children), D0, D) :-
@@ -280,8 +283,10 @@ type_declaration(Tokens, Rest, node(type_declaration, Children), D0, D) :-
       type_parameters(Tokens2, Tokens3, ParamsNode, D0, D1a),
       ParamPart = [ParamsNode]
   ; ParamPart = [], Tokens3 = Tokens2, D0 = D1a ),
-  expect_punct(eq, Tokens3, Tokens4, EqChildren, D1, D2),
-  type_body(Tokens4, Rest, BodyChildren, D2, D),
+  ( peek_punct(Tokens3, eq) ->
+      bump(Tokens3, Tokens4, EqChildren),
+      type_body(Tokens4, Rest, BodyChildren, D1, D)
+  ; EqChildren = [], BodyChildren = [], Rest = Tokens3, D1 = D ),
   append(TypeChildren, NameChildren, C1),
   append(C1, ParamPart, C2),
   append(C2, EqChildren, C3),
@@ -289,15 +294,24 @@ type_declaration(Tokens, Rest, node(type_declaration, Children), D0, D) :-
 
 % A variant body when it starts with `|`, or is a single constructor written
 % with a field list (`Wrap(number)`), or a bare constructor followed by `|`
-% (`Red | Green`).  Otherwise the body is an (optionally `opaque`) alias type.
-% `opaque` is checked FIRST: it is the opacity marker of an alias body, never a
-% constructor name, so `type X = opaque (..)` must not be read as a variant whose
-% first constructor is `opaque(..)`.
+% (`Red | Green`).  Otherwise the body is an alias type.  A variant body may
+% be prefixed with `opaque`, making the type ABSTRACT (constructors stay
+% private to the enclosing module / file).  `opaque` before an ALIAS body is
+% RETIRED (declare a bodyless `type Name` instead) and diagnosed, but still
+% consumed so the rest of the declaration parses.  `opaque` is checked FIRST:
+% it is an opacity marker, never a constructor name, so `type X = opaque (..)`
+% must not be read as a variant whose first constructor is `opaque(..)`.
 type_body(Tokens, Rest, Children, D0, D) :-
   ( keyword(Tokens, "opaque") ->
       bump(Tokens, T1, OpaqueCh),
-      type_expression(T1, Rest, TypeNode, D0, D),
-      Children = [node(opaque, OpaqueCh), TypeNode]
+      ( variant_lookahead(T1) ->
+          variants(T1, Rest, VariantChildren, D0, D),
+          Children = [node(opaque, OpaqueCh) | VariantChildren]
+      ; offset(T1, At),
+        D0 = [diagnostic(At, At, opaque_alias_removed) | D1],
+        type_expression(T1, Rest, TypeNode, D1, D),
+        Children = [node(opaque, OpaqueCh), TypeNode]
+      )
   ; variant_lookahead(Tokens) ->
       variants(Tokens, Rest, Children, D0, D)
   ; type_expression(Tokens, Rest, TypeNode, D0, D),
@@ -512,7 +526,11 @@ match_arms(Tokens, Rest, [node(arm, ArmChildren) | More], D0, D) :-
 match_arms(Rest, Rest, [], D, D).
 
 % ===========================================================================
-% Patterns (match arms):  _ | NUMBER | STRING | Name | Ctor(subpattern*) | (pat*)
+% Patterns (match arms):
+%   _ | NUMBER | STRING | Name | QualifiedName(subpattern*) | (pat*)
+% A constructor pattern's name may be QUALIFIED (`math.Some(v)`, for a
+% whole-module import's or a nested module's constructor); a BINDING is always
+% a single identifier, so a dotted name not followed by `(...)` is diagnosed.
 % ===========================================================================
 
 pattern(Tokens, Rest, Node, D0, D) :-
@@ -520,14 +538,19 @@ pattern(Tokens, Rest, Node, D0, D) :-
   ; peek(Tokens, number) -> bump(Tokens, Rest, Ch), Node = node(literal_pattern, Ch), D0 = D
   ; peek(Tokens, string) -> bump(Tokens, Rest, Ch), Node = node(literal_pattern, Ch), D0 = D
   ; peek(Tokens, ident)  ->
-      bump(Tokens, T1, NameCh),
+      qualified_type_name(Tokens, T1, NameCh),
       ( peek_punct(T1, open_paren) ->
           bump(T1, T2, OpenCh),
           pattern_sequence(T2, T3, SubCh, D0, D1),
           expect_punct(close_paren, T3, Rest, CloseCh, D1, D),
           append(NameCh, OpenCh, C1), append(C1, SubCh, C2), append(C2, CloseCh, Children),
           Node = node(constructor_pattern, Children)
-      ; Node = node(binding_pattern, NameCh), Rest = T1, D0 = D )
+      ; \+ member(t('.', _, _, _), NameCh) ->
+          Node = node(binding_pattern, NameCh), Rest = T1, D0 = D
+      ; offset(T1, At),
+        Node = node(error, [t(missing, [], At, At)]), Rest = T1,
+        D0 = [diagnostic(At, At, expected_constructor_pattern) | D]
+      )
   ; peek_punct(Tokens, open_paren) ->
       bump(Tokens, T1, OpenCh),
       pattern_sequence(T1, T2, SubCh, D0, D1),

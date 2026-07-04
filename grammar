@@ -230,13 +230,20 @@ MatchArm :-
 
 # A `type` declaration introduces a named type, which is one of:
 #  * a TAGGED UNION (variant / sum type): a `|`-separated list of constructors;
-#  * a STRUCTURAL alias for a type expression (default); or
-#  * a NOMINAL type when the body is prefixed with `opaque`.
+#  * a STRUCTURAL alias for a type expression; or
+#  * an ABSTRACT (FFI) type, when the declaration has NO `= body` at all:
+#    nominal, with no constructors anywhere -- its values arrive only through
+#    `external`s (`type Element` + `external query: (string): Element`).
+# `opaque` on a VARIANT body also makes the type ABSTRACT: the type name is
+# still exportable with `public`, but the constructors stay private to the
+# enclosing module (or file), so outside code can only build and inspect
+# values through the functions the module exposes.  (`opaque` before an alias
+# body is retired; declare a bodyless type instead.)
 TypeDeclaration :-
-	"type" Separator+ Identifier TypeParameters? Separator*
-	"=" Separator* DeclarationBody
+	"type" Separator+ Identifier TypeParameters?
+	(Separator* "=" Separator* DeclarationBody)?
 
-DeclarationBody :- VariantBody | Opaque? TypeExpression
+DeclarationBody :- Opaque? VariantBody | TypeExpression
 
 # A body is a variant when it has a leading `|`, two or more constructors, or
 # a single constructor written with a field list `Name(...)` (this last rule
@@ -371,7 +378,8 @@ ImportNames :- "(" Separator* Identifier (Separator+ Identifier)* Separator* ")"
 
 # An EXPORT.  `public` prefixes a definition, `type` declaration, `external`, or
 # nested `module` to expose it to importers; everything else is module-private.
-# Exporting a tagged-union type exports its constructors too; exporting an
+# Exporting a tagged-union type exports its constructors too (unless the union
+# is `opaque` -- then only the type name is exported); exporting an
 # `external` lets a foreign binding be declared once and imported elsewhere; a
 # top-level `public module` exports its public members (reached by importers via
 # a whole-module `use`).  `public` is a soft keyword.

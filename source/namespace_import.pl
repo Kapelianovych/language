@@ -116,13 +116,16 @@ prefix_constructor_info(variant_constructor(Union, Parameters, FieldExpressions)
 prefix_type_info(type_variant_info(Parameters, Constructors), Exported, Namespace,
                  type_variant_info(Parameters, Constructors1)) :- !,
   prefix_variant_constructors(Constructors, Exported, Namespace, Constructors1).
+% A bodyless (abstract FFI) declaration has no body to re-qualify.
+prefix_type_info(type_declaration_info(Opacity, Parameters, no_body), _Exported, _Namespace,
+                 type_declaration_info(Opacity, Parameters, no_body)) :- !.
 prefix_type_info(type_declaration_info(Opacity, Parameters, Body), Exported, Namespace,
                  type_declaration_info(Opacity, Parameters, Body1)) :-
   prefix_surface(Body, Exported, Namespace, Body1).
 
 prefix_variant_constructors([], _Exported, _Namespace, []).
-prefix_variant_constructors([constructor(Name, FieldExpressions) | Rest], Exported, Namespace,
-                            [constructor(Name1, FieldExpressions1) | Rest1]) :-
+prefix_variant_constructors([constructor(Name, FieldExpressions, Span) | Rest], Exported, Namespace,
+                            [constructor(Name1, FieldExpressions1, Span) | Rest1]) :-
   prefix_constructor_name(Name, Namespace, Name1),
   maplist_surface(FieldExpressions, Exported, Namespace, FieldExpressions1),
   prefix_variant_constructors(Rest, Exported, Namespace, Rest1).
@@ -142,30 +145,30 @@ maplist_surface([Type | Types], Exported, Namespace, [Type1 | Types1]) :-
   prefix_surface(Type, Exported, Namespace, Type1),
   maplist_surface(Types, Exported, Namespace, Types1).
 
-prefix_surface(type_name_node(Name, Arguments), Exported, Namespace, type_name_node(Name1, Arguments1)) :- !,
+prefix_surface(type_name_node(Name, Arguments, Span), Exported, Namespace, type_name_node(Name1, Arguments1, Span)) :- !,
   prefix_type_name(Name, Exported, Namespace, Name1),
   prefix_surface_arguments(Arguments, Exported, Namespace, Arguments1).
-prefix_surface(tuple_type_node(Members, Openness), Exported, Namespace, tuple_type_node(Members1, Openness)) :- !,
+prefix_surface(tuple_type_node(Members, Openness, Span), Exported, Namespace, tuple_type_node(Members1, Openness, Span)) :- !,
   prefix_surface_members(Members, Exported, Namespace, Members1).
-prefix_surface(function_type_node(Parameters, Return), Exported, Namespace,
-               function_type_node(Parameters1, Return1)) :- !,
+prefix_surface(function_type_node(Parameters, Return, Span), Exported, Namespace,
+               function_type_node(Parameters1, Return1, Span)) :- !,
   maplist_surface(Parameters, Exported, Namespace, Parameters1),
   prefix_surface(Return, Exported, Namespace, Return1).
-prefix_surface(quantified_type_node(Parameters, Body), Exported, Namespace,
-               quantified_type_node(Parameters, Body1)) :- !,
+prefix_surface(quantified_type_node(Parameters, Body, Span), Exported, Namespace,
+               quantified_type_node(Parameters, Body1, Span)) :- !,
   prefix_surface(Body, Exported, Namespace, Body1).
-prefix_surface(type_hole, _Exported, _Namespace, type_hole) :- !.
+prefix_surface(type_hole(Span), _Exported, _Namespace, type_hole(Span)) :- !.
 
 prefix_surface_arguments([], _Exported, _Namespace, []).
-prefix_surface_arguments([type_hole | Rest], Exported, Namespace, [type_hole | Rest1]) :- !,
+prefix_surface_arguments([type_hole(Span) | Rest], Exported, Namespace, [type_hole(Span) | Rest1]) :- !,
   prefix_surface_arguments(Rest, Exported, Namespace, Rest1).
 prefix_surface_arguments([Argument | Rest], Exported, Namespace, [Argument1 | Rest1]) :-
   prefix_surface(Argument, Exported, Namespace, Argument1),
   prefix_surface_arguments(Rest, Exported, Namespace, Rest1).
 
 prefix_surface_members([], _Exported, _Namespace, []).
-prefix_surface_members([tuple_type_member(Mut, Label, Type) | Rest], Exported, Namespace,
-                       [tuple_type_member(Mut, Label, Type1) | Rest1]) :-
+prefix_surface_members([tuple_type_member(Mut, Label, Type, Span) | Rest], Exported, Namespace,
+                       [tuple_type_member(Mut, Label, Type1, Span) | Rest1]) :-
   prefix_surface(Type, Exported, Namespace, Type1),
   prefix_surface_members(Rest, Exported, Namespace, Rest1).
 

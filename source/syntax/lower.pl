@@ -389,8 +389,11 @@ lower_match_pattern(node(literal_pattern, Ch), literal_pattern(Lit, Span)) :- !,
   gspan(node(literal_pattern, Ch), Span).
 lower_match_pattern(node(binding_pattern, Ch), binding_pattern(Name, Span)) :- !,
   child_token(Ch, ident, t(ident, Name, _, _)), gspan(node(binding_pattern, Ch), Span).
+% The constructor name may be QUALIFIED (`math.Some`); its ident / `.` leaves
+% are direct children (subpatterns are nested nodes), so concatenating them
+% yields the dotted name.
 lower_match_pattern(node(constructor_pattern, Ch), constructor_pattern(Name, Subs, Span)) :- !,
-  child_token(Ch, ident, t(ident, Name, _, _)),
+  qualified_name_text(Ch, Name),
   child_nodes(Ch, SubGreens),
   maplist_lower_match_pattern(SubGreens, Subs),
   gspan(node(constructor_pattern, Ch), Span).
@@ -450,13 +453,20 @@ lower_type_declaration(node(type_declaration, Ch), type_declaration_node(Name, P
   ( member(node(type_params, PCh), Ch) -> lower_type_params(node(type_params, PCh), Parameters)
   ; Parameters = [] ),
   ( member(node(variant, _), Ch) ->
-      % `Opacity` is unused for a variant body (it is always nominal).
-      Opacity = transparent,
+      % A variant is nominal either way; `opaque` on a variant makes the type
+      % ABSTRACT: its constructors stay private to the enclosing module / file.
+      ( member(node(opaque, _), Ch) -> Opacity = opaque ; Opacity = transparent ),
       findall(Ctor, ( member(node(variant, VCh), Ch), lower_constructor(VCh, Ctor) ), Ctors),
       Body = variant_body(Ctors)
-  ; member(node(opaque, _), Ch) ->
-      Opacity = opaque, body_type_node(Ch, TypeGreen), lower_type(TypeGreen, Body)
-  ; Opacity = transparent, body_type_node(Ch, TypeGreen), lower_type(TypeGreen, Body) ),
+  ; body_type_node(Ch, TypeGreen) ->
+      % An alias body.  (`opaque` before an alias is RETIRED and diagnosed by
+      % the parser, but a mid-edit tree still lowers -- as nominal, its old
+      % meaning -- so the rest of the file stays analysable.)
+      ( member(node(opaque, _), Ch) -> Opacity = opaque ; Opacity = transparent ),
+      lower_type(TypeGreen, Body)
+  ; % No body at all: an ABSTRACT (FFI) type -- nominal, with no constructors
+    % anywhere; its values arrive only through `external`s.
+    Opacity = opaque, Body = no_body ),
   gspan(node(type_declaration, Ch), Span).
 
 % The alias body type node: the sole type node among the declaration's children

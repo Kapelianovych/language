@@ -57,6 +57,15 @@
         descendants.  A qualified access that crosses into a module from
         outside is checked against this rule.
 
+        An `opaque` variant type is ABSTRACT: even under `public type` its
+        constructors are NOT public -- only the type name is.  Outside code can
+        hold and pass values of the type but can neither construct them nor
+        match on them: both the qualified expression `Math.Circle(..)` and the
+        qualified constructor pattern `Math.Circle(..)` resolve through the
+        namespace walk and are rejected as inaccessible members, and a bare
+        `Circle` only resolves through the constructor substitution, which
+        reaches just the module and its descendants.
+
       * EXPORT.  A top-level `public module` (and, transitively, the `public`
         members of `public` submodules) is EXPORTED from the file: such members
         are lifted wrapped in `public_node`, so the analyser collects them into
@@ -150,7 +159,9 @@ collect_item(Item, Prefix, ns(V, T, Mod, P), ns(V2, T2, Mod, P2)) :-
   qualify_each(ConstructorNames, Prefix, ConstructorSegs),
   append(ConstructorSegs, V, V2),
   T2 = [TypeSeg | T],
-  ( is_public(Item) -> append(ConstructorSegs, P1, P2) ; P2 = P1 ).
+  % An `opaque` type is ABSTRACT: its constructors stay private to the module
+  % (and its descendants) even when the type itself is public.
+  ( is_public(Item), \+ opaque_type(Item) -> append(ConstructorSegs, P1, P2) ; P2 = P1 ).
 collect_item(Item, Prefix, ns(V, T, Mod, P), ns([Seg | V], T, Mod, P1)) :-
   Prefix \== [],
   value_binder(Item, Name), !,
@@ -164,6 +175,9 @@ collect_item(Item, Prefix, NS, NS) :-
 
 publics_if(Item, Seg, P, [Seg | P]) :- is_public(Item), !.
 publics_if(_Item, _Seg, P, P).
+
+opaque_type(type_declaration_node(_, _, opaque, _, _)).
+opaque_type(public_node(Declaration, _)) :- opaque_type(Declaration).
 
 qualify_each([], _Prefix, []).
 qualify_each([Name | Names], Prefix, [Seg | Segs]) :-
@@ -326,6 +340,7 @@ wrap_export(_Item, _Exported, Lifted, _Span, [Lifted]).
 
 % Rewrite a type-declaration body, with the declaration's own type parameters
 % shadowing module type names, and constructor names qualified by `Prefix`.
+rewrite_type_body(no_body, _Parameters, _Prefix, _Ctx, no_body) :- !.
 rewrite_type_body(variant_body(Constructors), Parameters, Prefix, Ctx, variant_body(Constructors1)) :- !,
   type_parameter_names(Parameters, ParameterNames),
   shrink_types(Ctx, ParameterNames, Ctx1),
@@ -493,10 +508,46 @@ rewrite_pattern(literal_pattern(Node, S), Ctx, literal_pattern(Node1, S)) :- !,
 rewrite_pattern(constructor_pattern(Name, SubPatterns, S), Ctx,
                 constructor_pattern(QualifiedName, SubPatterns1, S)) :- !,
   Ctx = ctx(_, _, CS, _, _, _),
-  ( memberchk(Name - Seg, CS) -> join_dotted(Seg, QualifiedName) ; QualifiedName = Name ),
+  ( memberchk(Name - Seg, CS) ->
+      join_dotted(Seg, QualifiedName)
+  ; split_dotted(Name, Segments), Segments = [_, _ | _] ->
+      resolve_pattern_path(Segments, S, Ctx, Name, QualifiedName)
+  ; QualifiedName = Name
+  ),
   rewrite_patterns(SubPatterns, Ctx, SubPatterns1).
 rewrite_pattern(record_pattern(Members, S), Ctx, record_pattern(Members1, S)) :- !,
   rewrite_pattern_members(Members, Ctx, Members1).
+
+% A DOTTED constructor pattern (`Geometry.Circle(..)`).  When its base names an
+% intra-file module (and is not shadowed by a value), resolve it through the
+% namespace exactly like a qualified value access -- inheriting the same
+% accessibility checks, so a private member or an `opaque` type's constructor
+% is rejected from outside its module.  Any other base is left as written: a
+% whole-module import's constructor (`shapes.Circle`) is resolved against the
+% seeded interface by the analyser, and an unknown name surfaces there too.
+resolve_pattern_path([Base | Labels], Span, ctx(VS, _, _, MS, Prefix, NS), Original, Qualified) :-
+  ( \+ memberchk(Base - _, VS),
+    memberchk(Base - BaseSeg, MS) ->
+      label_accessors(Labels, Span, Accessors),
+      walk_module_path(BaseSeg, Accessors, Prefix, NS, Span, Output),
+      ( Output = identifier_node(Qualified, _) ->
+          true
+      ; % The path resolved to a member with labels LEFT OVER (`M.point.x`):
+        % a field access is not a constructor.
+        throw(analysis_error(unknown_member(Original)))
+      )
+  ; Qualified = Original
+  ).
+
+label_accessors([], _Span, []).
+label_accessors([Label | Labels], Span, [label(Label, Span) | Accessors]) :-
+  label_accessors(Labels, Span, Accessors).
+
+% Split a dotted name into its segments (`"A.B.c"` -> ["A", "B", "c"]).
+split_dotted(Chars, [Segment | Segments]) :-
+  append(Segment, ['.' | Rest], Chars), !,
+  split_dotted(Rest, Segments).
+split_dotted(Chars, [Chars]).
 
 rewrite_pattern_members([], _Ctx, []).
 rewrite_pattern_members([positional_member_pattern(P, S) | Rest], Ctx,

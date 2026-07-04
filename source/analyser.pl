@@ -149,10 +149,14 @@ export_values_best_effort([Name | Names], Environment, Entries) :-
   export_values_best_effort(Names, Environment, Rest).
 
 export_types_best_effort([], _Environment, _TypeEnvironment, [], []).
-export_types_best_effort([type_declaration_node(Name, _Parameters, _Opacity, Body, _) | Declarations],
+export_types_best_effort([type_declaration_node(Name, _Parameters, Opacity, Body, _) | Declarations],
                          Environment, TypeEnvironment, ValueEntries, TypeEntries) :-
   ( get_assoc(Name, TypeEnvironment, Info) ->
-      export_constructors_best_effort(Body, Environment, TypeEnvironment, ConstructorValueEntries, ConstructorTypeEntries),
+      ( Opacity == opaque ->
+          % An abstract type crosses the file boundary as its name alone.
+          ConstructorValueEntries = [], ConstructorTypeEntries = []
+      ; export_constructors_best_effort(Body, Environment, TypeEnvironment, ConstructorValueEntries, ConstructorTypeEntries)
+      ),
       HeadTypeEntries = [Name - Info | ConstructorTypeEntries]
   ; ConstructorValueEntries = [], HeadTypeEntries = [] ),
   export_types_best_effort(Declarations, Environment, TypeEnvironment, RestValueEntries, RestTypeEntries),
@@ -299,12 +303,17 @@ export_values([Name | Names], Environment, [Name - defined(Scheme) | Rest]) :-
 
 % Each exported type contributes its `TypeEnvironment` info; a tagged union
 % additionally contributes every constructor's `constructor_key/1` info (a type
-% entry) and its value scheme (a value entry).
+% entry) and its value scheme (a value entry) -- unless the union is `opaque`
+% (abstract): then only the type name crosses the file boundary, so importers
+% can annotate with the type but neither construct nor match its values.
 export_types([], _Environment, _TypeEnvironment, [], []).
-export_types([type_declaration_node(Name, _Parameters, _Opacity, Body, _) | Declarations],
+export_types([type_declaration_node(Name, _Parameters, Opacity, Body, _) | Declarations],
              Environment, TypeEnvironment, ValueEntries, TypeEntries) :-
   get_assoc(Name, TypeEnvironment, Info),
-  export_constructors(Body, Environment, TypeEnvironment, ConstructorValueEntries, ConstructorTypeEntries),
+  ( Opacity == opaque ->
+      ConstructorValueEntries = [], ConstructorTypeEntries = []
+  ; export_constructors(Body, Environment, TypeEnvironment, ConstructorValueEntries, ConstructorTypeEntries)
+  ),
   export_types(Declarations, Environment, TypeEnvironment, RestValueEntries, RestTypeEntries),
   append(ConstructorValueEntries, RestValueEntries, ValueEntries),
   append([Name - Info | ConstructorTypeEntries], RestTypeEntries, TypeEntries).
