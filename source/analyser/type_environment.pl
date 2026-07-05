@@ -3,6 +3,8 @@
   build_type_environment/4,
   convert_annotation_type/6,
   bind_type_parameters/6,
+  bind_type_parameters_rigid/8,
+  declared_function_scheme/6,
   instantiate_constructor/7,
   union_constructor_names/3
 ]).
@@ -40,6 +42,7 @@
   empty_context/1,
   fresh_unification_variable/4,
   fresh_bound_id/3,
+  fresh_named_bound_id/4,
   unify/4
 ]).
 
@@ -237,7 +240,7 @@ bind_quantifier_parameters([], Environment, Context, Environment, [], Context).
 bind_quantifier_parameters([type_parameter(Name, Kind, Bound, _) | Rest], EnvironmentIn, ContextIn,
                            EnvironmentOut, [Id | Ids], ContextOut) :-
   validate_bound(Bound, EnvironmentIn, ContextIn, Context1),
-  fresh_bound_id(Context1, Id, Context2),
+  fresh_named_bound_id(Context1, Name, Id, Context2),
   put_assoc(Name, EnvironmentIn, type_parameter_binding(quantified_variable(Id), Kind), Environment1),
   bind_quantifier_parameters(Rest, Environment1, Context2, EnvironmentOut, Ids, ContextOut).
 
@@ -257,6 +260,57 @@ bind_type_parameters([type_parameter(Name, Kind, Bound, _) | Rest], EnvironmentI
   parameter_monotype(Kind, Bound, EnvironmentIn, Level, ContextIn, MonoType, Context1),
   put_assoc(Name, EnvironmentIn, type_parameter_binding(MonoType, Kind), Environment1),
   bind_type_parameters(Rest, Environment1, Level, Context1, EnvironmentOut, ContextOut).
+
+%% declared_function_scheme(+ValueNode, +TypeEnvironment, +Level, +ContextIn, -Scheme, -ContextOut).
+%
+% The polymorphic scheme DECLARED by a generic function literal whose
+% parameters and return type are all annotated: the type parameters become
+% the scheme's quantifiers and the annotations its body.  Used to pre-bind a
+% definition's forward placeholder, so a recursive use instantiates the
+% declared signature polymorphically instead of leaking the body's rigid
+% skolems into an outer-level placeholder.  Fails when the value is not a
+% fully annotated generic function literal.
+declared_function_scheme(function_node(TypeParameters, Parameters, type_annotation(ReturnExpression), _Body, _Span),
+                         TypeEnvironment, Level, ContextIn,
+                         type_scheme(BoundIds, function_type(ParameterTypes, ReturnType)), ContextOut) :-
+  TypeParameters = [_ | _],
+  parameter_annotation_expressions(Parameters, ParameterExpressions),
+  bind_quantifier_parameters(TypeParameters, TypeEnvironment, ContextIn, Environment1, BoundIds, Context1),
+  convert_proper_each(ParameterExpressions, Environment1, [], Level, Context1, ParameterTypes, Context2),
+  convert_proper(ReturnExpression, Environment1, [], Level, Context2, ReturnType, ContextOut).
+
+parameter_annotation_expressions([], []).
+parameter_annotation_expressions([parameter_node(_, type_annotation(Expression), _) | Rest],
+                                 [Expression | Expressions]) :-
+  parameter_annotation_expressions(Rest, Expressions).
+
+%% bind_type_parameters_rigid(+TypeParameters, +EnvironmentIn, +OuterLevel, +BodyLevel,
+%%                            +ContextIn, -EnvironmentOut, -SkolemPairs, -ContextOut).
+%
+% Like bind_type_parameters, but an unbounded proper parameter becomes a
+% RIGID skolem (born at BodyLevel, the function body's level), so the body
+% must treat each declared generic as an arbitrary, distinct type: collapsing
+% two of them, or equating one with a concrete type, is a type error at the
+% definition site rather than a silently less-general function.  Each skolem
+% is paired with a flexible variable minted FIRST at OuterLevel -- these
+% replace the skolems in the function's resulting type (see
+% substitute_skolems), and minting them in declaration order before any
+% parameter/body variable keeps the generalised scheme's quantifiers
+% positional (see generalize/5).  Bounded and higher-kinded parameters keep
+% their flexible meaning: a bound IS the parameter's type.
+bind_type_parameters_rigid([], Environment, _OuterLevel, _BodyLevel, Context, Environment, [], Context).
+bind_type_parameters_rigid([type_parameter(Name, Kind, Bound, _) | Rest], EnvironmentIn, OuterLevel, BodyLevel,
+                           ContextIn, EnvironmentOut, SkolemPairs, ContextOut) :-
+  ( Kind =:= 0, Bound == no_bound ->
+      fresh_unification_variable(ContextIn, OuterLevel, Replacement, Context1),
+      fresh_bound_id(Context1, SkolemId, Context2),
+      MonoType = skolem(SkolemId, BodyLevel, Name),
+      SkolemPairs = [SkolemId - Replacement | RestPairs]
+  ; parameter_monotype(Kind, Bound, EnvironmentIn, BodyLevel, ContextIn, MonoType, Context2),
+    SkolemPairs = RestPairs
+  ),
+  put_assoc(Name, EnvironmentIn, type_parameter_binding(MonoType, Kind), Environment1),
+  bind_type_parameters_rigid(Rest, Environment1, OuterLevel, BodyLevel, Context2, EnvironmentOut, RestPairs, ContextOut).
 
 % A higher-kinded parameter (kind > 0) is always a fresh variable; a proper
 % (kind 0) parameter is its converted bound when bounded, else a fresh var.

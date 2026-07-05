@@ -42,9 +42,11 @@
     --------------------------------------------------------------------
     LEVELS AND SCOPES
     --------------------------------------------------------------------
-    The typing level tracks nesting depth.  The only construct that
-    increments it is a *definition* (`x = e`), this language's `let`.
-    Lambdas keep the level fixed and introduce monomorphic parameters.
+    The typing level tracks nesting depth.  A *definition* (`x = e`),
+    this language's `let`, increments it.  A plain lambda keeps the level
+    fixed and introduces monomorphic parameters; a lambda with explicit
+    generics types its body one level deeper, where each generic is a
+    rigid skolem confined by the escape check.
 */
 
 :- use_module(library(assoc)).
@@ -60,6 +62,7 @@
   instantiate_forall_positional/6,
   skolemize_forall/6,
   generalize/5,
+  substitute_skolems/3,
   instantiate/5,
   instantiate_positional/6,
   monomorphic_type_scheme/2
@@ -70,7 +73,8 @@
 ]).
 :- use_module(type_environment, [
   convert_annotation_type/6,
-  bind_type_parameters/6,
+  bind_type_parameters_rigid/8,
+  declared_function_scheme/6,
   instantiate_constructor/7,
   union_constructor_names/3
 ]).
@@ -98,8 +102,7 @@ infer_program(program_node(Expressions), TypeEnvironment, InitialEnvironment, Co
 % (One error per top-level item: a thrown error abandons that item's body.)
 infer_program_accumulating(program_node(Expressions), TypeEnvironment, InitialEnvironment, ContextIn,
                            program_type(LastType, ContextOut), FinalEnvironment, Errors) :-
-  definition_names(Expressions, Names),
-  prebind_forward(Names, 0, InitialEnvironment, ContextIn, Environment1, Context1),
+  prebind_forward(Expressions, 0, InitialEnvironment, TypeEnvironment, ContextIn, Environment1, Context1),
   walk_accumulating(Expressions, 0, false, Environment1, TypeEnvironment, Context1,
                     LastType, FinalEnvironment, ContextOut, [], ReverseErrors),
   reverse(ReverseErrors, Errors).
@@ -153,25 +156,32 @@ item_span(_Node, span(0, 0)).
 % environment after the last item (with all definitions bound).
 infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment,
                ContextIn, ResultType, FinalEnvironment, ContextOut) :-
-  definition_names(Expressions, Names),
-  prebind_forward(Names, Level, Environment, ContextIn, Environment1, Context1),
+  prebind_forward(Expressions, Level, Environment, TypeEnvironment, ContextIn, Environment1, Context1),
   infer_sequence_walk(Expressions, Level, InsideFunction, Environment1, TypeEnvironment,
                       Context1, ResultType, FinalEnvironment, ContextOut).
 
-% Collect the names bound by value definitions directly in this sequence.
-definition_names([], []).
-definition_names([definition_node(identifier_node(Name, _), _, _, _) | Es], [Name | Names]) :- !,
-  definition_names(Es, Names).
-definition_names([_ | Es], Names) :-
-  definition_names(Es, Names).
-
-% Bind each name to a fresh placeholder variable, tagged `forward`.
-prebind_forward([], _Level, Environment, Context, Environment, Context).
-prebind_forward([Name | Names], Level, Environment, ContextIn, EnvironmentOut, ContextOut) :-
-  fresh_unification_variable(ContextIn, Level, Placeholder, Context1),
-  monomorphic_type_scheme(Placeholder, Scheme),
+% Pre-bind each value definition's name, tagged `forward`.  A fully annotated
+% generic function literal contributes its DECLARED scheme, so a recursive
+% use instantiates the signature polymorphically -- necessary now that the
+% body is checked against rigid skolems, which may not leak into an
+% outer-level placeholder.  Any other definition gets a fresh placeholder
+% variable and recursion through it stays monomorphic, as before.  A bad
+% annotation is ignored HERE (placeholder fallback) so the error surfaces at
+% the definition item, which reports it with its span.
+prebind_forward([], _Level, Environment, _TypeEnvironment, Context, Environment, Context).
+prebind_forward([definition_node(identifier_node(Name, _), _, Value, _) | Expressions], Level,
+                Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut) :- !,
+  ( catch(declared_function_scheme(Value, TypeEnvironment, Level, ContextIn, DeclaredScheme, Context1),
+          analysis_error(_),
+          fail) ->
+      Scheme = DeclaredScheme
+  ; fresh_unification_variable(ContextIn, Level, Placeholder, Context1),
+    monomorphic_type_scheme(Placeholder, Scheme)
+  ),
   put_assoc(Name, Environment, forward(Scheme), Environment1),
-  prebind_forward(Names, Level, Environment1, Context1, EnvironmentOut, ContextOut).
+  prebind_forward(Expressions, Level, Environment1, TypeEnvironment, Context1, EnvironmentOut, ContextOut).
+prebind_forward([_ | Expressions], Level, Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut) :-
+  prebind_forward(Expressions, Level, Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut).
 
 % Walk the sequence, threading the (growing) environment and reporting the
 % last expression's type.  An empty sequence has the unit type `()`.
@@ -221,10 +231,16 @@ infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironm
 % recursive loop; otherwise leave the placeholder so the definition can be
 % generalised independently.
 tie_forward_knot(Name, Environment, ValueType, ContextIn, ContextOut) :-
-  get_assoc(Name, Environment, forward(type_scheme([], Placeholder))),
-  ( placeholder_referenced(Placeholder, ContextIn) ->
-      unify(ValueType, Placeholder, ContextIn, ContextOut)
-  ; ContextOut = ContextIn
+  get_assoc(Name, Environment, forward(Scheme)),
+  ( Scheme = type_scheme([], Placeholder) ->
+      ( placeholder_referenced(Placeholder, ContextIn) ->
+          unify(ValueType, Placeholder, ContextIn, ContextOut)
+      ; ContextOut = ContextIn
+      )
+  ; % A declared polymorphic scheme (fully annotated generic literal): the
+    % value was checked against the very annotations recursive uses
+    % instantiated, so there is no placeholder to tie.
+    ContextOut = ContextIn
   ).
 
 placeholder_referenced(Placeholder, Context) :-
@@ -258,16 +274,33 @@ infer(identifier_node(Name, _), Level, InsideFunction, Environment, _TypeEnviron
 % its annotation if present; the body is typed with those bound and with
 % `InsideFunction = true`.  A return annotation, if present, is unified
 % against the inferred body type.
-infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body, _), Level, _InsideFunction,
+infer(function_node([], Parameters, ReturnAnnotation, Body, _), Level, _InsideFunction,
       Environment, TypeEnvironment, ContextIn,
-      function_type(ParameterTypes, BodyType), ContextOut) :-
-  % Explicit generics extend the type environment for this function's
-  % parameter / return annotations and body (an unbounded parameter is a
-  % fresh variable; a bounded one carries its bound, e.g. an open record).
-  bind_type_parameters(TypeParameters, TypeEnvironment, Level, ContextIn, TypeEnvironment1, Context1),
-  bind_parameters(Parameters, Level, TypeEnvironment1, Environment, Context1,
+      function_type(ParameterTypes, BodyType), ContextOut) :- !,
+  bind_parameters(Parameters, Level, TypeEnvironment, Environment, ContextIn,
+                  ParameterTypes, Environment1, Context1),
+  type_function_body(ReturnAnnotation, Body, Level, Environment1, TypeEnvironment, Context1, BodyType, ContextOut).
+
+% Lambda with explicit generics (`<A B>(..)`): each unbounded proper
+% parameter is a RIGID skolem while the body is checked -- one level deeper,
+% so the escape check confines it -- making the body prove it works for an
+% ARBITRARY, DISTINCT type per generic (a body that forces `A = B`, or `A =
+% number`, is rejected HERE, at the definition, not at some later call site
+% as an inscrutable occurs-check/mismatch).  A bounded parameter is its
+% bound; a higher-kinded one stays a fresh variable.  Afterwards the skolems
+% are swapped back to the flexible variables paired with them (minted first,
+% in declaration order, so the scheme's quantifiers stay positional for
+% explicit type arguments), and the type generalises exactly as before.
+infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body, _), Level, _InsideFunction,
+      Environment, TypeEnvironment, ContextIn, ResultType, ContextOut) :-
+  Level1 is Level + 1,
+  bind_type_parameters_rigid(TypeParameters, TypeEnvironment, Level, Level1, ContextIn,
+                             TypeEnvironment1, SkolemPairs, Context1),
+  bind_parameters(Parameters, Level1, TypeEnvironment1, Environment, Context1,
                   ParameterTypes, Environment1, Context2),
-  type_function_body(ReturnAnnotation, Body, Level, Environment1, TypeEnvironment1, Context2, BodyType, ContextOut).
+  type_function_body(ReturnAnnotation, Body, Level1, Environment1, TypeEnvironment1, Context2, BodyType, ContextOut),
+  fully_resolve(function_type(ParameterTypes, BodyType), ContextOut, ResolvedType),
+  substitute_skolems(ResolvedType, SkolemPairs, ResultType).
 
 % Tuple: infer each member into a field.  A literal is a CLOSED record, so
 % its tail is `closed`.  Positional members get sequential `index` keys;

@@ -12,6 +12,7 @@
 :- use_module(generator, [generate/2]).
 :- use_module(module_loader, [compile_program/3]).
 :- use_module(module_paths, [source_to_js_path/2]).
+:- use_module(diagnostics, [print_analysis_error/1]).
 :- use_module('transformation/macro', [check_macros/1, expand_macros/2]).
 :- use_module('transformation/module', [expand_modules/2]).
 :- use_module('transformation/constructor_pattern', [resolve_bare_constructors/3]).
@@ -59,6 +60,11 @@ compile(Source, Output, AnalysisResult) :-
 % Callers that hold sources elsewhere (an editor buffer, a test fixture) call
 % `compile_program/3` directly with their own resolver, and are free to
 % ignore the returned artifacts entirely (check-only).
+%
+% This is also the CLI entry, so a compilation error is not rethrown raw: it
+% is PRINTED to standard error as the same human-readable message the LSP
+% shows (see diagnostics.pl), and compile_file FAILS.  Callers that want the
+% `analysis_error` term itself use `compile_program/3` or `compile/3`.
 compile_file(SourcePath) :-
   % Check the extension first so a wrong one fails fast and loudly.
   ( phrase(output_path(_OutputPath), SourcePath) ->
@@ -66,7 +72,11 @@ compile_file(SourcePath) :-
   ; atom_chars(SourceAtom, SourcePath),
     domain_error(sl_source_file, SourceAtom)
   ),
-  compile_program(SourcePath, module_paths:read_source_chars, CompiledModules),
+  catch(
+    compile_program(SourcePath, module_paths:read_source_chars, CompiledModules),
+    analysis_error(Reason),
+    ( print_analysis_error(Reason), fail )
+  ),
   write_compiled_modules(CompiledModules).
 
 % Each module's JavaScript lands beside its source, extension swapped.

@@ -2,6 +2,7 @@
   empty_context/1,
   fresh_unification_variable/4,
   fresh_bound_id/3,
+  fresh_named_bound_id/4,
   resolve_head/3,
   fully_resolve/3,
   unify/4,
@@ -10,6 +11,7 @@
   instantiate_forall/5,
   instantiate_forall_positional/6,
   generalize/5,
+  substitute_skolems/3,
   instantiate/5,
   instantiate_positional/6,
   monomorphic_type_scheme/2,
@@ -53,13 +55,17 @@
                                         bound ids, appearing in Body as
                                         `quantified_variable(Id)`, are replaced
                                         by the arguments).
-        skolem(Id, Level)               a rigid, opaque constant standing for a
+        skolem(Id, Level, Name)         a rigid, opaque constant standing for a
                                         universally-quantified variable while
                                         CHECKING a value against a polytype.
                                         Its `Level` powers the escape check:
                                         a unification variable at a shallower
                                         level may not capture it (that would
-                                        let the skolem leak its scope).
+                                        let the skolem leak its scope).  `Name`
+                                        is the type parameter's SOURCE NAME
+                                        (or `anonymous`), carried only so
+                                        error messages can say `A` instead of
+                                        an opaque id; identity is the Id.
 
     --------------------------------------------------------------------
     RANK-N POLYMORPHISM (predicative, bidirectional)
@@ -124,6 +130,21 @@ fresh_unification_variable(context(Id, Store), Level, unification_variable(Id),
 % constants, neither of which lives in the solution store.
 fresh_bound_id(context(Id, Store), Id, context(NextId, Store)) :-
   NextId is Id + 1.
+
+%% fresh_named_bound_id(+ContextIn, +Name, -Id, -ContextOut).
+%
+% Like fresh_bound_id, but records the bound variable's source name in the
+% store (as `bound_name(Name)`), so a later skolemisation of the enclosing
+% `forall_type` can carry the name into error messages (see
+% fresh_skolem_mapping).
+fresh_named_bound_id(context(Id, Store), Name, Id, context(NextId, Store1)) :-
+  NextId is Id + 1,
+  put_assoc(Id, Store, bound_name(Name), Store1).
+
+% The recorded source name of a bound id, or `anonymous` when it was minted
+% nameless (synthetic type-lambda positions, imported schemes).
+bound_id_name(context(_, Store), Id, Name) :-
+  ( get_assoc(Id, Store, bound_name(Name0)) -> Name = Name0 ; Name = anonymous ).
 
 %% monomorphic_type_scheme(+Type, -Scheme).
 monomorphic_type_scheme(Type, type_scheme([], Type)).
@@ -303,7 +324,7 @@ unify_resolved(constructor_ref(Name), constructor_ref(Name), Context, Context) :
 % A skolem is rigid: it unifies only with the very same skolem (the var cases
 % above already handle a flexible variable capturing a skolem, subject to the
 % level escape check).
-unify_resolved(skolem(Id, _), skolem(Id, _), Context, Context) :- !.
+unify_resolved(skolem(Id, _, _), skolem(Id, _, _), Context, Context) :- !.
 % Two polytypes unify by alpha-equivalence: open both with ONE shared set of
 % skolems (positionally) and unify the bodies.  Mismatched arities, or bodies
 % that force a shared skolem to differ, fail.
@@ -336,7 +357,10 @@ shared_skolem_mappings([], [], Context, [], [], Context).
 shared_skolem_mappings([Id1 | Ids1], [Id2 | Ids2], ContextIn,
                        [Id1 - Skolem | Mapping1], [Id2 - Skolem | Mapping2], ContextOut) :-
   fresh_bound_id(ContextIn, SkolemId, Context1),
-  Skolem = skolem(SkolemId, 0),
+  ( bound_id_name(ContextIn, Id1, Name), Name \== anonymous -> true
+  ; bound_id_name(ContextIn, Id2, Name)
+  ),
+  Skolem = skolem(SkolemId, 0, Name),
   shared_skolem_mappings(Ids1, Ids2, Context1, Mapping1, Mapping2, ContextOut).
 
 unify_list([], [], Context, Context).
@@ -457,13 +481,13 @@ occurs_check_and_adjust_levels(Id, MaxLevel, Type, ContextIn, ContextOut) :-
       occurs_check_and_adjust_levels(Id, MaxLevel, Body, ContextIn, ContextOut)
   ; Resolved = type_lambda(_BoundIds, Body) ->
       occurs_check_and_adjust_levels(Id, MaxLevel, Body, ContextIn, ContextOut)
-  ; Resolved = skolem(_SkolemId, SkolemLevel) ->
+  ; Resolved = skolem(_SkolemId, SkolemLevel, SkolemName) ->
       % ESCAPE CHECK.  Binding a variable born at `MaxLevel` to a skolem from a
       % DEEPER scope (a larger level) would let that skolem leak outside the
       % polymorphic context that introduced it -- exactly the unsoundness
       % skolemisation guards against.
       ( SkolemLevel > MaxLevel ->
-          throw(analysis_error(polymorphic_type_escapes(SkolemLevel)))
+          throw(analysis_error(polymorphic_type_escapes(SkolemName)))
       ; ContextOut = ContextIn
       )
   ; ContextOut = ContextIn                 % base type, `closed` or constructor_ref
@@ -653,6 +677,53 @@ substitute_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping,
   substitute_quantified_variables(Type, Mapping, Type1),
   substitute_fields(Fields, Mapping, Outs).
 
+%% substitute_skolems(+Type, +Mapping, -Out).
+%
+% Replace `skolem(Id, _, _)` with its mapped replacement for every `Id - Type`
+% pair in Mapping; skolems outside the mapping are left alone.  Used when a
+% function literal's explicit generics -- checked RIGIDLY against the body as
+% skolems -- are swapped back to flexible variables in the function's
+% resulting type, so it generalises (or instantiates, when used inline) like
+% any inferred type.  The input is assumed fully resolved.
+substitute_skolems(Type, Mapping, Out) :-
+  ( Type = skolem(Id, _, _) ->
+      ( memberchk(Id - Replacement, Mapping) -> Out = Replacement ; Out = Type )
+  ; Type = function_type(Parameters, Return) ->
+      substitute_skolems_list(Parameters, Mapping, Parameters1),
+      substitute_skolems(Return, Mapping, Return1),
+      Out = function_type(Parameters1, Return1)
+  ; Type = tuple_type(Fields, Tail) ->
+      substitute_skolems_fields(Fields, Mapping, Fields1),
+      substitute_skolems(Tail, Mapping, Tail1),
+      Out = tuple_type(Fields1, Tail1)
+  ; Type = type_constructor(Name, Arguments) ->
+      substitute_skolems_list(Arguments, Mapping, Arguments1),
+      Out = type_constructor(Name, Arguments1)
+  ; Type = type_application(Head, Arguments) ->
+      substitute_skolems(Head, Mapping, Head1),
+      substitute_skolems_list(Arguments, Mapping, Arguments1),
+      Out = type_application(Head1, Arguments1)
+  ; Type = forall_type(BoundIds, Body) ->
+      substitute_skolems(Body, Mapping, Body1),
+      Out = forall_type(BoundIds, Body1)
+  ; Type = type_lambda(BoundIds, Body) ->
+      substitute_skolems(Body, Mapping, Body1),
+      Out = type_lambda(BoundIds, Body1)
+  ; Out = Type
+  ).
+
+substitute_skolems_list([], _, []).
+substitute_skolems_list([Type | Types], Mapping, [Out | Outs]) :-
+  substitute_skolems(Type, Mapping, Out),
+  substitute_skolems_list(Types, Mapping, Outs).
+
+substitute_skolems_fields([], _, []).
+substitute_skolems_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping,
+                          [tuple_field(Mutability1, Key, Type1) | Outs]) :-
+  substitute_skolems(Mutability, Mapping, Mutability1),
+  substitute_skolems(Type, Mapping, Type1),
+  substitute_skolems_fields(Fields, Mapping, Outs).
+
 % ---------------------------------------------------------------------------
 % Rank-N: skolemisation, instantiation and subsumption
 % ---------------------------------------------------------------------------
@@ -684,8 +755,9 @@ skolemize_forall(BoundIds, Body, Level, ContextIn, SkolemBody, ContextOut) :-
   substitute_quantified_variables(Body, Mapping, SkolemBody).
 
 fresh_skolem_mapping([], _Level, Context, [], Context).
-fresh_skolem_mapping([Id | Ids], Level, ContextIn, [Id - skolem(SkolemId, Level) | Mapping], ContextOut) :-
+fresh_skolem_mapping([Id | Ids], Level, ContextIn, [Id - skolem(SkolemId, Level, Name) | Mapping], ContextOut) :-
   fresh_bound_id(ContextIn, SkolemId, Context1),
+  bound_id_name(ContextIn, Id, Name),
   fresh_skolem_mapping(Ids, Level, Context1, Mapping, ContextOut).
 
 %% subsume(+ActualType, +ExpectedType, +Level, +ContextIn, -ContextOut).
@@ -745,5 +817,6 @@ solved_pairs([], _, []).
 solved_pairs([Id - solved(Type) | Pairs], Context, [Id = Resolved | Rest]) :- !,
   fully_resolve(Type, Context, Resolved),
   solved_pairs(Pairs, Context, Rest).
-solved_pairs([_ - unsolved(_) | Pairs], Context, Rest) :-
+% Skip unsolved variables and non-variable entries (`bound_name(_)` records).
+solved_pairs([_ - _ | Pairs], Context, Rest) :-
   solved_pairs(Pairs, Context, Rest).
