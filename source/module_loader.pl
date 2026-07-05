@@ -19,6 +19,7 @@
                  --per module-->    resolve imports against already-compiled
                                      dependency interfaces, seed the analyser,
                                      collapse `namespace.member` accesses,
+                                     resolve bare nullary constructor patterns,
                                      `analyse_module`, rewrite `use`/`use_all`
                                      nodes to `import_node`/`namespace_import_node`,
                                      rewrite imported constructor patterns to
@@ -49,6 +50,7 @@
 ]).
 :- use_module('transformation/module', [expand_modules/2]).
 :- use_module('transformation/macro_program', [process_macros/3]).
+:- use_module('transformation/constructor_pattern', [resolve_bare_constructors/3]).
 :- use_module(namespace_import, [
   namespace_of/2,
   seed_namespace/9,
@@ -194,7 +196,11 @@ compile_modules([Module | Rest], Asts, InterfacesIn, [Module - JavaScript | Comp
                   ImportPlan, NamespaceBases, NamespaceMembers, ConstructorTags),
   % Collapse `Namespace.member` value accesses to flat qualified identifiers
   % (using the imported interfaces' member sets) before anything reads the AST.
-  collapse_namespace_access(Ast, NamespaceBases, NamespaceMembers, ResolvedAst),
+  collapse_namespace_access(Ast, NamespaceBases, NamespaceMembers, CollapsedAst),
+  % Resolve bare nullary constructor names in match patterns (this module's
+  % own declarations plus the seeded imports), before the AST forks into the
+  % analysis and codegen paths -- both must see the same patterns.
+  resolve_bare_constructors(CollapsedAst, SeedTypeEnvironment, ResolvedAst),
   analyse_module(ResolvedAst, SeedValueEnvironment, SeedTypeEnvironment, _Result, Interface),
   put_assoc(Module, InterfacesIn, Interface, Interfaces1),
   rewrite_imports(ResolvedAst, ImportPlan, CodegenAst0),

@@ -47,7 +47,9 @@
           types               -- a bare type name in an annotation or in
             another declaration's body resolves to the lifted type;
           constructor patterns -- `Circle(r)` in a `match` arm resolves to the
-            lifted constructor.
+            lifted constructor; a BARE match-pattern name that reaches a
+            nullary constructor (`None => ..`) resolves to a constructor
+            pattern instead of a binding.
         A lambda parameter, block-local binding, or match-arm pattern shadows a
         VALUE/constructor of the same name; a function's or quantifier's type
         parameters shadow a TYPE of the same name.
@@ -135,6 +137,14 @@ body_constructor_names(variant_body(Constructors), Names) :-
   findall(Name, member(constructor(Name, _Fields, _), Constructors), Names).
 body_constructor_names(_OtherBody, []).
 
+% As above, but paired with each constructor's arity (its field count).
+body_constructor_arities(variant_body(Constructors), Pairs) :-
+  !,
+  findall(Name - Arity,
+          ( member(constructor(Name, Fields, _), Constructors), length(Fields, Arity) ),
+          Pairs).
+body_constructor_arities(_OtherBody, []).
+
 % ---------------------------------------------------------------------------
 % Pass 1: collect the whole module namespace.
 % ---------------------------------------------------------------------------
@@ -201,9 +211,9 @@ direct_bindings([Item | Rest], Prefix, Values, Types, Constructors, Modules) :-
   ; type_binder(Item, Name, Body) ->
       append(Prefix, [Name], TypeSeg),
       Types = [Name - TypeSeg | Types1],
-      body_constructor_names(Body, ConstructorNames),
-      pair_each(ConstructorNames, Prefix, ConstructorPairs),
-      append(ConstructorPairs, Values1, Values),
+      body_constructor_arities(Body, ConstructorArities),
+      constructor_pairs(ConstructorArities, Prefix, ValueConstructorPairs, ConstructorPairs),
+      append(ValueConstructorPairs, Values1, Values),
       append(ConstructorPairs, Constructors1, Constructors),
       Modules = Modules1
   ; value_binder(Item, Name) ->
@@ -214,10 +224,14 @@ direct_bindings([Item | Rest], Prefix, Values, Types, Constructors, Modules) :-
   ),
   direct_bindings(Rest, Prefix, Values1, Types1, Constructors1, Modules1).
 
-pair_each([], _Prefix, []).
-pair_each([Name | Names], Prefix, [Name - Seg | Pairs]) :-
+% A constructor contributes a plain `Name - Seg` VALUE pair (constructors are
+% reached as values) and a `Name - ctor(Seg, Arity)` CONSTRUCTOR pair -- the
+% arity lets pattern rewriting resolve a BARE nullary constructor name.
+constructor_pairs([], _Prefix, [], []).
+constructor_pairs([Name - Arity | Rest], Prefix,
+                  [Name - Seg | ValuePairs], [Name - ctor(Seg, Arity) | CtorPairs]) :-
   append(Prefix, [Name], Seg),
-  pair_each(Names, Prefix, Pairs).
+  constructor_pairs(Rest, Prefix, ValuePairs, CtorPairs).
 
 % ---------------------------------------------------------------------------
 % Pass 2a: file-level items.  Structure is preserved; only `module`s flatten,
@@ -500,7 +514,9 @@ rewrite_arms([], _Ctx, []).
 rewrite_arms([match_arm(Patterns, Guard, Result, S) | Rest], Ctx,
              [match_arm(Patterns1, Guard1, Result1, S) | Rest1]) :-
   rewrite_patterns(Patterns, Ctx, Patterns1),
-  patterns_vars(Patterns, Bound),
+  % Bound names come from the REWRITTEN patterns: a bare name resolved into a
+  % nullary constructor binds nothing, so it must not shadow in the body.
+  patterns_vars(Patterns1, Bound),
   shrink_values(Ctx, Bound, Ctx1),
   rewrite_guard(Guard, Ctx1, Guard1),
   rewrite(Result, Ctx1, Result1),
@@ -521,13 +537,25 @@ rewrite_patterns([Pattern | Rest], Ctx, [Pattern1 | Rest1]) :-
 
 rewrite_pattern(error_node(S), _Ctx, error_node(S)) :- !.   % malformed pattern: pass through (see rewrite/3)
 rewrite_pattern(wildcard_pattern(S), _Ctx, wildcard_pattern(S)) :- !.
-rewrite_pattern(binding_pattern(Name, S), _Ctx, binding_pattern(Name, S)) :- !.
+% A bare name in a match pattern denotes the nearest in-scope NULLARY
+% constructor of that name, if any (`None => ..` matches the constructor, no
+% `()` needed); otherwise it stays a binding.  A name whose nearest
+% constructor takes fields also stays a binding -- matching such a
+% constructor requires the parenthesised form.  This clause resolves only
+% nested-module constructors (the ones this pass has in scope); top-level and
+% imported ones are resolved by `transformation/constructor_pattern.pl`.
+rewrite_pattern(binding_pattern(Name, S), ctx(_, _, CS, _, _, _), Output) :- !,
+  ( memberchk(Name - Entry, CS), Entry = ctor(Seg, 0) ->
+      join_dotted(Seg, QualifiedName),
+      Output = constructor_pattern(QualifiedName, [], S)
+  ; Output = binding_pattern(Name, S)
+  ).
 rewrite_pattern(literal_pattern(Node, S), Ctx, literal_pattern(Node1, S)) :- !,
   rewrite(Node, Ctx, Node1).
 rewrite_pattern(constructor_pattern(Name, SubPatterns, S), Ctx,
                 constructor_pattern(QualifiedName, SubPatterns1, S)) :- !,
   Ctx = ctx(_, _, CS, _, _, _),
-  ( memberchk(Name - Seg, CS) ->
+  ( memberchk(Name - ctor(Seg, _), CS) ->
       join_dotted(Seg, QualifiedName)
   ; split_dotted(Name, Segments), Segments = [_, _ | _] ->
       resolve_pattern_path(Segments, S, Ctx, Name, QualifiedName)

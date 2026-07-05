@@ -663,10 +663,14 @@ arm_guard(Tokens, Rest, GuardNodes, D0, D) :-
 
 % ===========================================================================
 % Patterns (match arms):
-%   _ | NUMBER | STRING | Name | QualifiedName(subpattern*) | (pat*)
+%   _ | NUMBER | STRING | Name | QualifiedName(subpattern*)? | (pat*)
 % A constructor pattern's name may be QUALIFIED (`math.Some(v)`, for a
 % whole-module import's or a nested module's constructor); a BINDING is always
-% a single identifier, so a dotted name not followed by `(...)` is diagnosed.
+% a single identifier, so a dotted name without `(...)` is unambiguously a
+% NULLARY constructor pattern (`math.None`).  A bare single identifier parses
+% as a binding; when it names an in-scope nullary constructor it is resolved
+% into a constructor pattern before analysis (see
+% `transformation/constructor_pattern.pl`).
 % ===========================================================================
 
 pattern(Tokens, Rest, Node, D0, D) :-
@@ -688,9 +692,9 @@ pattern(Tokens, Rest, Node, D0, D) :-
           Node = node(constructor_pattern, Children)
       ; \+ member(t('.', _, _, _), NameCh) ->
           Node = node(binding_pattern, NameCh), Rest = T1, D0 = D
-      ; offset(T1, At),
-        Node = node(error, [t(missing, [], At, At)]), Rest = T1,
-        D0 = [diagnostic(At, At, expected_constructor_pattern) | D]
+      ; % A dotted name with no parens: a nullary constructor pattern (a
+        % binding is a single identifier, so `math.None` is unambiguous).
+        Node = node(constructor_pattern, NameCh), Rest = T1, D0 = D
       )
   ; peek_punct(Tokens, open_paren) ->
       bump(Tokens, T1, OpenCh),

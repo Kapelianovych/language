@@ -123,12 +123,17 @@ Pattern :-
 	| "_"
 	| Identifier
 
-# A tagged-union constructor pattern.  Nullary constructors are matched with
-# empty parens (`None()`), so a bare identifier is unambiguously a binding.  The
-# name may be QUALIFIED (`math.Some(v)`) for a constructor from a whole-module
-# import or a nested module.
+# A tagged-union constructor pattern.  The name may be QUALIFIED
+# (`math.Some(v)`) for a constructor from a whole-module import or a nested
+# module.  The field list may be omitted for a NULLARY constructor: a dotted
+# name is unambiguous at parse time (`math.None`), while a bare identifier
+# parses as a binding and is resolved into a constructor pattern before
+# analysis when it names an in-scope nullary constructor (`None => ..`); value
+# bindings do not shadow constructor names in pattern position.  A bare name
+# whose constructor takes fields stays a binding -- matching such a
+# constructor requires the parenthesised form.
 ConstructorPattern :-
-	QualifiedName "(" Separator* (Pattern (Separator+ Pattern)*)? Separator* ")"
+	QualifiedName ("(" Separator* (Pattern (Separator+ Pattern)*)? Separator* ")")?
 
 RecordPattern :- "(" Separator* (PatternMember (Separator+ PatternMember)*)* Separator* ")"
 

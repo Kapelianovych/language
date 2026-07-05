@@ -78,6 +78,7 @@
   collapse_namespace_access/4
 ]).
 :- use_module('../transformation/macro_program', [process_macros/3]).
+:- use_module('../transformation/constructor_pattern', [resolve_bare_constructors/3]).
 
 % ---------------------------------------------------------------------------
 % Database state (all dynamic).
@@ -438,7 +439,10 @@ compute(analysis(File), analysis(Errors, DefinitionTypes, Interface)) :-
   query(expanded_ast(File), Expansion),
   ( Expansion = expanded(Ast) ->
       query(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members, ImportErrors)),
-      collapse_namespace_access(Ast, Bases, Members, ResolvedAst),
+      collapse_namespace_access(Ast, Bases, Members, CollapsedAst),
+      % Bare nullary constructor names in match patterns become constructor
+      % patterns, so the editor's typing/exhaustiveness matches the compiler's.
+      resolve_bare_constructors(CollapsedAst, SeedTypes, ResolvedAst),
       % Import errors (a name not exported by a dependency) lead the list, so the
       % `use`-site diagnostic shows even when the same name later also trips an
       % `unbound_variable` at its use sites.

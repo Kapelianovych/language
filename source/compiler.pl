@@ -14,6 +14,8 @@
 :- use_module(module_paths, [source_to_js_path/2]).
 :- use_module('transformation/macro', [check_macros/1, expand_macros/2]).
 :- use_module('transformation/module', [expand_modules/2]).
+:- use_module('transformation/constructor_pattern', [resolve_bare_constructors/3]).
+:- use_module(library(assoc)).
 
 %% compile(+Source, -Output, -AnalysisResult).
 %
@@ -31,7 +33,11 @@ compile(Source, Output, AnalysisResult) :-
     % type-checking and generating the resulting program.
     check_macros(ParsedAst),
     expand_macros(ParsedAst, ExpandedAst),
-    expand_modules(ExpandedAst, Ast),
+    expand_modules(ExpandedAst, FlatAst),
+    % Bare nullary constructor names in match patterns become constructor
+    % patterns (no imports here, so only this file's own declarations apply).
+    empty_assoc(NoImports),
+    resolve_bare_constructors(FlatAst, NoImports, Ast),
     analyse(Ast, AnalysisResult),
     generate(Ast, Output)
   )).

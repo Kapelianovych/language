@@ -203,8 +203,6 @@ message_text(expected(else), "expected `else`") :- !.
 message_text(unexpected_token, "unexpected token") :- !.
 message_text(opaque_alias_removed,
              "`opaque` takes a variant body; for an FFI type declare `type Name` with no body") :- !.
-message_text(expected_constructor_pattern,
-             "a qualified name in a pattern must be a constructor pattern `Module.Name(...)`") :- !.
 message_text(Other, Msg) :- atom_chars(Other, Msg).
 
 % Render an analyser error reason to a human message.  The common reasons get a
