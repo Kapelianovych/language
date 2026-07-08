@@ -1,8 +1,7 @@
 :- module(diagnostics, [
   message_text/2,
   reason_text/2,
-  type_text/2,
-  print_analysis_error/1
+  type_text/2
 ]).
 
 /*  diagnostics.pl  --  Rendering compiler errors as human-readable text.
@@ -10,64 +9,21 @@
     The SINGLE place a parse-diagnostic tag, an analyser error reason, or a
     resolved type becomes prose, shared by both front ends:
 
-      * the LSP server (`syntax/lsp.pl`) puts the text in
+      * the LSP server (`lsp/lsp.pl`) puts the text in
         `publishDiagnostics` messages;
-      * the batch CLI (`compiler.pl:compile_file/1`) prints it to standard
-        error via `print_analysis_error/1`.
+      * the batch CLI (`cli/cli.pl:print_analysis_error/1`) prints it to
+        standard error.
 
     Keeping the wording here means an editor squiggle and a terminal build
-    failure always describe the same error the same way.
+    failure always describe the same error the same way.  This module itself
+    touches neither a stream nor the filesystem -- see `cli/cli.pl` for where
+    `message_text/2` and `reason_text/2` meet an actual `stderr`.
 */
 
 :- set_prolog_flag(double_quotes, chars).
 
 :- use_module(library(dcgs)).
 :- use_module(library(lists)).
-:- use_module(library(format)).
-:- use_module(module_paths, [read_source_chars/2]).
-
-% ---------------------------------------------------------------------------
-% CLI reporting
-% ---------------------------------------------------------------------------
-
-%% print_analysis_error(+Reason).
-%
-% Write an `analysis_error` payload to standard error as one or more
-% human-readable lines.  Syntax errors carry a char-offset span; when the
-% offending module's source is readable the offset is shown as `line:column`
-% (1-based), otherwise as a raw offset.  Always succeeds.
-print_analysis_error(syntax_errors(Module, Diagnostics)) :- !,
-  ( read_source_chars(Module, Text) -> true ; Text = none ),
-  print_syntax_diagnostics(Diagnostics, Module, Text).
-print_analysis_error(syntax_errors(Diagnostics)) :- !,
-  print_syntax_diagnostics(Diagnostics, none, none).
-print_analysis_error(Reason) :-
-  reason_text(Reason, Msg),
-  format(user_error, "error: ~s~n", [Msg]).
-
-print_syntax_diagnostics([], _Module, _Text).
-print_syntax_diagnostics([diagnostic(Start, _End, What) | Diagnostics], Module, Text) :-
-  message_text(What, Msg),
-  ( Text \== none, offset_line_column(Text, Start, Line, Column) ->
-      format(user_error, "~s:~d:~d: error: ~s~n", [Module, Line, Column, Msg])
-  ; Module \== none ->
-      format(user_error, "~s: error at offset ~d: ~s~n", [Module, Start, Msg])
-  ; format(user_error, "error at offset ~d: ~s~n", [Start, Msg])
-  ),
-  print_syntax_diagnostics(Diagnostics, Module, Text).
-
-% A char offset as a 1-based line:column position within the source text.
-offset_line_column(Text, Offset, Line, Column) :-
-  offset_line_column_(Text, Offset, 1, 1, Line, Column).
-
-offset_line_column_(_Text, 0, Line, Column, Line, Column) :- !.
-offset_line_column_([], _Remaining, Line, Column, Line, Column) :- !.
-offset_line_column_([Ch | Cs], Remaining, Line0, Column0, Line, Column) :-
-  Remaining1 is Remaining - 1,
-  ( Ch == '\n' -> Line1 is Line0 + 1, Column1 = 1
-  ; Line1 = Line0, Column1 is Column0 + 1
-  ),
-  offset_line_column_(Cs, Remaining1, Line1, Column1, Line, Column).
 
 % ---------------------------------------------------------------------------
 % Message text

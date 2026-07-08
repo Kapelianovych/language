@@ -1,6 +1,6 @@
 :- module(lsp, [serve/0, serve_streams/2]).
 
-/*  source/syntax/lsp.pl  --  JSON-RPC Language Server Protocol loop.
+/*  lsp/lsp.pl  --  JSON-RPC Language Server Protocol loop.
     ========================================================================
 
     The last mile: an event loop that turns editor messages into queries on the
@@ -33,8 +33,8 @@
 :- use_module(library(lists)).
 :- use_module(library(serialization/json), [json_chars//1]).
 :- use_module('queries', [init_db/0, set_input/2, query/2]).
-:- use_module('../module_paths', [canonical_chars/2]).
-:- use_module('../diagnostics', [message_text/2, reason_text/2, type_text/2]).
+:- use_module('../source/module_paths', [canonical_chars/2]).
+:- use_module('../source/diagnostics', [message_text/2, reason_text/2, type_text/2]).
 
 % ===========================================================================
 % Object accessors over the json_chars/1 term shape.

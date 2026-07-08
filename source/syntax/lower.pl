@@ -99,7 +99,7 @@ lower(node(program, Children), program_node(Items)) :-
 %% `diagnostic(Start, End, What)` for each.  A caller that ignores `Diagnostics`
 %% therefore gets an AST that may contain `error_node`s -- inference would then
 %% bare-fail on one -- so the BATCH compiler must inspect `Diagnostics` and
-%% refuse a program with syntax errors (see `compiler.pl` / `module_loader.pl`).
+%% refuse a program with syntax errors (see `compiler.pl`).
 parse_source(Chars, Ast, Diagnostics) :-
   tokenize(Chars, Tokens),
   parse_tokens(Tokens, Green, Diagnostics),

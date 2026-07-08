@@ -1,18 +1,19 @@
 :- module(queries, [
   init_db/0,
   set_input/2,
+  set_prelude_modules/1,
   query/2,
   reset_exec_log/0,
   exec_count/2
 ]).
 
-/*  source/syntax/queries.pl  --  Demand-driven (query-based) analysis engine.
+/*  lsp/queries.pl  --  Demand-driven (query-based) analysis engine.
     ========================================================================
 
     This is the incremental-analysis layer an LSP needs: type-checking and
     diagnostics that, after an edit, recompute ONLY what the edit affected.
     The design is the one rust-analyzer (Salsa) / Roslyn use, implemented here
-    in Prolog over the lossless parser in this directory.
+    in Prolog over the lossless parser in `source/syntax/`.
 
     THE MODEL
 
@@ -62,23 +63,25 @@
 :- use_module(library(lists)).
 :- use_module(library(assoc)).
 :- use_module(library(iso_ext), [setup_call_cleanup/3]).
-:- use_module('lexer',  [tokenize/2]).
-:- use_module('parser', [parse_tokens/3]).
-:- use_module('lower',  [lower/2, parse_source/2]).
-:- use_module('../analyser', [analyse_accumulating/6]).
-:- use_module('../module_paths', [
+:- use_module('../source/syntax/lexer',  [tokenize/2]).
+:- use_module('../source/syntax/parser', [parse_tokens/3]).
+:- use_module('../source/syntax/lower',  [lower/2, parse_source/2]).
+:- use_module('../source/analyser', [analyse_accumulating/6]).
+:- use_module('../source/module_paths', [
   read_source_chars/2,
   canonical_chars/2,
   module_directory/2,
-  resolve_source_path/3
+  resolve_source_path/3,
+  normalise_path/2
 ]).
-:- use_module('../namespace_import', [
+:- use_module('../source/namespace_import', [
   namespace_of/2,
   seed_namespace/9,
+  prelude_bases/2,
   collapse_namespace_access/4
 ]).
-:- use_module('../transformation/macro_program', [process_macros/3]).
-:- use_module('../transformation/constructor_pattern', [resolve_bare_constructors/3]).
+:- use_module('../source/transformation/macro_program', [process_macros/3]).
+:- use_module('../source/transformation/constructor_pattern', [resolve_bare_constructors/3]).
 
 % ---------------------------------------------------------------------------
 % Database state (all dynamic).
@@ -110,6 +113,39 @@ set_input(Key, Value) :-
   retract(current_revision(R0)), R is R0 + 1, assertz(current_revision(R)),
   retractall(input(Key, _, _)),
   assertz(input(Key, Value, R)).
+
+%% set_prelude_modules(+Paths).
+%
+% Configures the engine's PRELUDE: a list of `.sl` source paths (mirroring
+% `compiler:compile/4`'s `PreludePaths`) whose public names are
+% seeded into `import_seeds` for every file that is not itself one of them,
+% with no `use` required (see `effective_prelude_modules/2`,
+% `compute(import_seeds(File), ...)`).  This is plain `set_input/2` under the
+% key `prelude_modules` -- NOT a bare dynamic fact -- so that
+% `module_deps`/`import_seeds`, which read it via `query(prelude_modules, _)`,
+% record it as a real dependency: reconfiguring correctly invalidates their
+% memos through the same firewalled machinery as any other input change (and
+% reconfiguring to an EQUAL list propagates nothing, same as any other input).
+set_prelude_modules(Paths) :-
+  normalise_each(Paths, Modules),
+  set_input(prelude_modules, Modules).
+
+normalise_each([], []).
+normalise_each([Path | Paths], [Module | Modules]) :-
+  normalise_path(Path, Module),
+  normalise_each(Paths, Modules).
+
+% The default when `set_prelude_modules/1` was never called: no prelude.
+compute(prelude_modules, []).
+
+% A file's EFFECTIVE prelude set: every configured prelude module, unless the
+% file itself IS one of them (mirrors `compiler:effective_preludes/3` --
+% prelude files only see each other through an explicit `use`).  Must be
+% called from within a `compute/2` body so `query(prelude_modules, _)` is
+% recorded as a dependency of the caller.
+effective_prelude_modules(File, Effective) :-
+  query(prelude_modules, PreludeModules),
+  ( memberchk(File, PreludeModules) -> Effective = [] ; Effective = PreludeModules ).
 
 % ---------------------------------------------------------------------------
 % The query driver.
@@ -253,7 +289,11 @@ compute(def_names(File), Names) :-
 % / unknown / loops out, `macro_error(Reason)` (surfaced as a diagnostic).
 % ===========================================================================
 
-% Direct file dependencies (resolved paths), excluding the builtin `Compiler`.
+% Direct file dependencies (resolved paths), excluding the builtin `Compiler`
+% -- plus an implicit edge on every EFFECTIVE prelude module (see
+% `effective_prelude_modules/2`), so editing the prelude, or reconfiguring it
+% via `set_prelude_modules/1`, re-checks every file that implicitly depends on
+% it, exactly like an explicit dependency would.
 compute(module_deps(File), Deps) :-
   query(program_ast(File), program_node(Items)),
   module_directory(File, Directory),
@@ -261,7 +301,9 @@ compute(module_deps(File), Deps) :-
           ( use_dependency_path(Items, Path),
             Path \== "Compiler",
             resolve_source_path(Directory, Path, Dep) ),
-          Deps).
+          ExplicitDeps),
+  effective_prelude_modules(File, EffectivePreludes),
+  append(ExplicitDeps, EffectivePreludes, Deps).
 
 % The file's dependency closure, dependencies first, the file itself last
 % (the order `process_macros/3` numbers modules in).  Cycle-safe via a visited
@@ -378,11 +420,48 @@ ast_has_macros(Term) :-
 % surfacing later as a generic `unbound_variable` at each use site.
 % `Bases`/`Members` drive the whole-module-import access collapse
 % (`Namespace.member` -> a flat qualified identifier) below.
+%
+% The file's EFFECTIVE prelude modules (see `effective_prelude_modules/2`)
+% are seeded FIRST, into `V0`/`T0`, exactly like `compiler:resolve_imports`
+% seeds them before the file's own `Items` -- so an explicit `use` or a local
+% declaration of the same name overrides a prelude entry, same as today.  Each
+% is seeded with an EMPTY namespace (`namespace_import:qualify/3`), so a flat
+% prelude name resolves unqualified and a qualified companion-module name
+% (`Optional.isSome`, already dotted in the prelude's own interface) needs
+% only `prelude_bases/2`'s derived tokens in `Bases` for the access collapse
+% below to recognise it -- no `Std.`-style prefix to strip.
 compute(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members, ImportErrors)) :-
   query(program_ast(File), program_node(Items)),
   module_directory(File, Directory),
   empty_assoc(V0), empty_assoc(T0),
-  seed_imports(Items, Directory, V0, T0, SeedValues, SeedTypes, [], Bases, [], Members, [], ImportErrors).
+  effective_prelude_modules(File, EffectivePreludes),
+  seed_prelude_modules(EffectivePreludes, V0, T0, V1, T1, [], PreludeBases, [], PreludeMembers),
+  seed_imports(Items, Directory, V1, T1, SeedValues, SeedTypes, PreludeBases, Bases, PreludeMembers, Members, [], ImportErrors).
+
+% Seed the value/type environments from every effective prelude module's
+% interface, resolved through the query engine (so editing the prelude
+% re-checks every importer).  `prelude_interface_of/2` guards against import
+% cycles the same way `dependency_interface_of/3` does for explicit imports.
+seed_prelude_modules([], V, T, V, T, Bases, Bases, Members, Members).
+seed_prelude_modules([PreludeModule | Rest], V0, T0, V, T, Bases0, Bases, Members0, Members) :-
+  prelude_interface_of(PreludeModule, Interface),
+  seed_namespace([], Interface, V0, T0, V1, T1, _Renames, MemberNames, _Tags),
+  prelude_bases(MemberNames, ModuleBases),
+  append(MemberNames, Members0, Members1),
+  append(ModuleBases, Bases0, Bases1),
+  seed_prelude_modules(Rest, V1, T1, V, T, Bases1, Bases, Members1, Members).
+
+% Like `dependency_interface_of/3`, but the prelude module's path is already
+% fully resolved (not relative to some importer's `Directory`), so there is no
+% `resolve_source_path` step.
+prelude_interface_of(PreludeModule, Interface) :-
+  ( resolving_dependency(PreludeModule) ->
+      Interface = module_interface([], [])
+  ; setup_call_cleanup(
+      assertz(resolving_dependency(PreludeModule)),
+      query(interface(PreludeModule), Interface),
+      retract(resolving_dependency(PreludeModule)))
+  ).
 
 seed_imports([], _Directory, V, T, V, T, Bases, Bases, Members, Members, Errors, Errors).
 seed_imports([use_node(Path, Names, Span) | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members, E0, E) :-

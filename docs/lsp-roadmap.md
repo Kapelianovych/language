@@ -1,11 +1,13 @@
 # LSP front-end — remaining work
 
-The editor-grade front-end in `source/syntax/` is complete and working: lossless
-lexer → recovering parser → green tree → `lower` to the historical AST →
-demand-driven incremental analysis (single full-coverage checker = the batch
-analyser, cross-file import seeding, reader-macro expansion over the dependency
-closure) → JSON-RPC LSP server (diagnostics + hover). The batch compiler is
-untouched and its emitted JS is byte-identical to the committed baselines.
+The editor-grade front-end is complete and working: lossless lexer → recovering
+parser → green tree → `lower` to the historical AST (all in `source/syntax/`,
+shared with the batch compiler) → demand-driven incremental analysis (single
+full-coverage checker = the batch analyser, cross-file import seeding,
+reader-macro expansion over the dependency closure) → JSON-RPC LSP server
+(diagnostics + hover) (the incremental engine and JSON-RPC loop live in `lsp/`).
+The batch compiler is untouched and its emitted JS is byte-identical to the
+committed baselines.
 
 This document tracks what is left. Nothing here is a bug; it is depth and breadth.
 

@@ -1,6 +1,7 @@
 :- module(namespace_import, [
   namespace_of/2,
   seed_namespace/9,
+  prelude_bases/2,
   collapse_namespace_access/4,
   rewrite_constructor_tags/3
 ]).
@@ -14,7 +15,7 @@
 
     Unlike nested modules (resolved entirely intra-file by the module transformation (`transformation/module.pl`)),
     this needs the dependency's compiled INTERFACE -- which member names exist,
-    and their types -- so it runs in the module loader, after the dependency is
+    and their types -- so it runs in the compiler, after the dependency is
     analysed.
 
     NAMESPACING THE INTERFACE.  The imported names are seeded under qualified
@@ -94,6 +95,10 @@ seed_types([Name - Info | Rest], Namespace, Exported, TIn, TOut, ConstructorTags
   put_assoc(Local, TIn, Info1, T1),
   seed_types(Rest, Namespace, Exported, T1, TOut, ConstructorTags).
 
+% An EMPTY namespace (the prelude: an implicit whole-module import with no
+% namespace token at all) leaves the name unprefixed instead of prepending a
+% leading `.`.
+qualify([], Name, Local) :- !, canonical_chars(Name, Local).
 qualify(Namespace, Name, Local) :-
   append(Namespace, ['.' | Name], Joined),
   canonical_chars(Joined, Local).
@@ -105,6 +110,32 @@ qualify(Namespace, Name, Local) :-
 canonical_chars([], []).
 canonical_chars([Character | Characters], [Character | Rest]) :-
   canonical_chars(Characters, Rest).
+
+% ---------------------------------------------------------------------------
+% prelude_bases(+MemberNames, -Bases).
+%
+% For a PRELUDE import (empty namespace, see `qualify/3`), `seed_namespace`
+% leaves qualified member names exactly as the dependency exported them --
+% e.g. a nested `public module Optional` in the dependency already exports
+% "Optional.isSome" verbatim. There is no single namespace token to register
+% with `collapse_namespace_access` (there is no prefix to strip), so
+% the base a caller actually writes (`Optional` in `Optional.isSome(x)`) must
+% be derived from the qualified names themselves: the first dotted segment of
+% each. A flat name (no `.`) contributes no base.
+% ---------------------------------------------------------------------------
+
+prelude_bases(MemberNames, Bases) :-
+  findall(Base, ( member(Name, MemberNames), first_segment(Name, Base) ), AllBases),
+  distinct_preserve_order(AllBases, Bases).
+
+first_segment(Name, Base) :-
+  append(Base, ['.' | _], Name), Base \== [], !.
+
+distinct_preserve_order(List, Distinct) :- distinct_preserve_order(List, [], Distinct).
+distinct_preserve_order([], _Seen, []).
+distinct_preserve_order([Item | Rest], Seen, Output) :-
+  ( memberchk(Item, Seen) -> Output = Output1 ; Output = [Item | Output1] ),
+  distinct_preserve_order(Rest, [Item | Seen], Output1).
 
 % --- Re-qualify the interned type info -------------------------------------
 

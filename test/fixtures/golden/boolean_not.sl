@@ -1,0 +1,1 @@
+public not = (value) !value

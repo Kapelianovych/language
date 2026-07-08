@@ -270,7 +270,7 @@ The feature is implemented end-to-end:
   quasiquote rebuilds, splicing unquotes) and replaces each invocation,
   to a fixpoint, then erases macro definitions and the `Compiler` import.
 - **Pipeline** — `check_macros` then `expand_macros` run after parse and before
-  module expansion (`module_loader.pl`, `compiler.pl`).
+  module expansion (`compiler.pl`).
 
 ### v1 limitations
 

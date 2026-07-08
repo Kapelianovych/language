@@ -1,0 +1,1 @@
+public answer = 42

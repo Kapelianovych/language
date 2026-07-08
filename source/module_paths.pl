@@ -5,16 +5,17 @@
   normalise_path/2,
   module_directory/2,
   resolve_source_path/3,
-  source_to_js_path/2
+  source_to_js_path/2,
+  relative_specifier/3
 ]).
 
 /*  module_paths.pl  --  Shared module-path arithmetic and source reading.
 
-    These helpers are used by BOTH the batch build driver (`module_loader.pl`)
-    and the incremental analysis engine (`syntax/queries.pl`), so they live in
-    one place: a module path means the same thing, and a name read from disk has
-    the same representation, in both pipelines.  Keeping them here also keeps the
-    incremental engine free of the code generator (which `module_loader` pulls
+    These helpers are used by BOTH the batch compiler (`compiler.pl`) and the
+    incremental analysis engine (`lsp/queries.pl`), so they live in one place:
+    a module path means the same thing, and a name read from disk has the
+    same representation, in both pipelines.  Keeping them here also keeps the
+    incremental engine free of the code generator (which `compiler.pl` pulls
     in but the editor front-end does not need).
 
     A MODULE is identified by its normalised source path (a character list).
@@ -75,6 +76,62 @@ module_directory(Path, Directory) :-
       reverse(DirectoryReversed, Directory)
   ; Directory = ['.']
   ).
+
+% Everything after the last `/` (the whole path when there is none).
+path_basename(Path, Basename) :-
+  reverse(Path, Reversed),
+  ( append(BasenameReversed, ['/' | _], Reversed) ->
+      reverse(BasenameReversed, Basename)
+  ; Basename = Path
+  ).
+
+% relative_specifier(+FromDirectory, +TargetSourcePath, -JsSpecifier).
+%
+% The ESM-legal relative import specifier from a directory (an importing
+% module's, already `module_directory`-derived) to another module's `.js`
+% path. Used for the prelude: a prelude module lives at a caller-fixed path
+% that is generally NOT relative to the importing file the way an explicit
+% `use ./x` path is, so the specifier must be computed from scratch by
+% comparing directory segments, counting `..`s past their common prefix.
+% Always leads with `./` or `../` -- a bare `"sub/Std.js"` is a BARE
+% specifier under ESM resolution, not a relative one.
+relative_specifier(FromDirectory, TargetSourcePath, JsSpecifier) :-
+  source_to_js_path(TargetSourcePath, TargetJsPath),
+  module_directory(TargetJsPath, TargetDirectory),
+  path_basename(TargetJsPath, Basename),
+  directory_segments(FromDirectory, FromSegments),
+  directory_segments(TargetDirectory, TargetSegments),
+  common_prefix_length(FromSegments, TargetSegments, CommonLength),
+  length(FromSegments, FromLength),
+  UpCount is FromLength - CommonLength,
+  n_copies(UpCount, "..", UpSegments),
+  drop_n(CommonLength, TargetSegments, DownSegments),
+  append(UpSegments, DownSegments, MiddleSegments),
+  ( UpCount =:= 0 -> Prefixed = ["." | MiddleSegments] ; Prefixed = MiddleSegments ),
+  append(Prefixed, [Basename], Segments),
+  join_on_slash(Segments, Joined),
+  canonical_chars(Joined, JsSpecifier).
+
+% `module_directory/2`'s "no slash" fallback returns the SENTINEL `.` (not a
+% real path segment) to mean "no directory at all".  Read as zero segments,
+% or `split_on_slash` would treat it as one
+% literal `.` segment and a root-level prelude would get a spurious `.`
+% component in its specifier (`../../.'/Std.js` instead of `../../Std.js`).
+directory_segments(".", []) :- !.
+directory_segments(Directory, Segments) :- split_on_slash(Directory, Segments).
+
+% The number of leading segments two segment lists share.
+common_prefix_length([], _, 0) :- !.
+common_prefix_length(_, [], 0) :- !.
+common_prefix_length([Segment | Xs], [Segment | Ys], N) :- !,
+  common_prefix_length(Xs, Ys, N0), N is N0 + 1.
+common_prefix_length(_, _, 0).
+
+n_copies(0, _, []) :- !.
+n_copies(N, Item, [Item | Rest]) :- N > 0, N1 is N - 1, n_copies(N1, Item, Rest).
+
+drop_n(0, List, List) :- !.
+drop_n(N, [_ | Rest], Output) :- N > 0, N1 is N - 1, drop_n(N1, Rest, Output).
 
 % Resolve `.` and `..` segments.
 normalise_path(Path, Normalised) :-

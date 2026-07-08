@@ -1,0 +1,1 @@
+export const $origin = (() => { const $x = 0; const $y = 0; return $y; })();

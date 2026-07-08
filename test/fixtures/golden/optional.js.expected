@@ -1,0 +1,3 @@
+export const $Some = $_c0 => ({"$tag": "Some", 0: $_c0});
+export const $None = ({"$tag": "None"});
+export const $isSome = (($self) => (($_match) => { { if (true && ($_match["$tag"] === "Some")) { return true; } } { if (true && ($_match["$tag"] === "None")) { return false; } } throw new Error("non-exhaustive match"); })($self));

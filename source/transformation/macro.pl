@@ -115,7 +115,7 @@ mentions_parse_item(Term) :-
   mentions_parse_item(Argument), !.
 
 % ---------------------------------------------------------------------------
-% Cross-file helpers (whole-program macro processing; see module_loader.pl)
+% Cross-file helpers (whole-program macro processing; see compiler.pl)
 % ---------------------------------------------------------------------------
 
 %% program_macros(+ProgramAst, -MacroDefinitions).
@@ -581,7 +581,7 @@ reify_each([Argument | Arguments], Environment, Table, [Node | Nodes]) :-
     given a globally-unique KEY (`Name#ModuleIndex`).  A per-module RESOLUTION
     map sends each name as written in that module (a bare `times`, or a dotted
     `macros.times` from a whole-module import) to the key of the macro it
-    denotes.  The loader (`module_loader.pl`) builds these maps from imports;
+    denotes.  The compiler (`compiler.pl`) builds these maps from imports;
     here we apply them:
 
       * `resolve_macro_body/3` rewrites a macro BODY -- every macro reference

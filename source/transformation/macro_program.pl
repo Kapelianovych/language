@@ -10,11 +10,12 @@
     every macro definition / `Compiler` import erased.
 
     It is shared by BOTH pipelines:
-      * the batch build driver (`module_loader.pl`), over the full program graph;
-      * the incremental engine (`syntax/queries.pl`), over a single file's
+      * the batch compiler (`compiler.pl`), over the full program graph;
+      * the incremental engine (`lsp/queries.pl`), over a single file's
         dependency closure -- so a file using macros type-checks in the editor.
-    Keeping it out of `module_loader` keeps the code generator (which the loader
-    pulls in, but the editor front-end does not need) off the engine's path.
+    Keeping it out of `compiler.pl` keeps the code generator (which the
+    compiler pulls in, but the editor front-end does not need) off the
+    engine's path.
 
     The expansion is index-stable: macro KEYS (`Name#Index`) are internal and
     never reach codegen, so numbering a single file's closure independently of
