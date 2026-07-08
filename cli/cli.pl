@@ -1,6 +1,7 @@
 :- module(cli, [compile_file/2]).
 
-/*  cli/cli.pl  --  The imperative shell around the pure compiler core.
+/*  cli/cli.pl  --  The imperative shell around the pure compiler core, and the
+    command-line entry point itself.
 
     Everything here touches the real filesystem or a terminal: reading `.sl`
     source, writing `.js` output, and printing errors to `stderr`.  The
@@ -8,6 +9,19 @@
     handed a resolver closure and returns data -- so this is the ONE place
     that wiring happens for a batch, on-disk build.  An LSP or a future
     browser/Node embedding supplies its own I/O instead of loading this file.
+
+    USAGE (run directly with `scryer-prolog`; the `--` is `scryer-prolog`'s
+    own separator between ITS flags and the script's argv, same as
+    `test/run.pl`'s `-- --bless`):
+
+        scryer-prolog cli/cli.pl -- <entry.sl> [--prelude <p1.sl,p2.sl,...>]
+
+    `<entry.sl>` is compiled together with every module it imports; each
+    module's JavaScript is written alongside its source.  `--prelude` names
+    ADDITIONAL `.sl` files (comma-separated, no spaces) to seed as implicit
+    preludes on top of the always-implicit standard library -- see
+    `compiler:compile/4`'s doc.  Exits 0 on success, 1 on a usage or
+    compilation error (the latter printed to `stderr`).
 */
 
 :- use_module(library(pio)).
@@ -15,9 +29,59 @@
 :- use_module(library(lists)).
 :- use_module(library(format)).
 :- use_module(library(error)).
+:- use_module(library(os), [argv/1]).
 :- use_module('../source/compiler', [compile/4]).
 :- use_module('../source/module_paths', [read_source_chars/2, source_to_js_path/2]).
 :- use_module('../source/diagnostics', [message_text/2, reason_text/2]).
+
+:- initialization(main).
+
+% ---------------------------------------------------------------------------
+% Command-line entry point.
+% ---------------------------------------------------------------------------
+
+main :-
+  argv(Argv),
+  ( parse_argv(Argv, EntryPath, PreludePaths) ->
+      ( catch(compile_file(EntryPath, PreludePaths), Error, (print_uncaught(Error), fail)) ->
+          halt(0)
+      ; halt(1)
+      )
+  ; print_usage, halt(1)
+  ).
+
+% A CLI never dumps a raw Prolog exception term: `compile_file/2` already
+% prints and fails cleanly on an `analysis_error` (a genuine compile
+% failure), so anything still escaping here is a usage-shaped error the
+% extension check throws directly (`domain_error(sl_source_file, Path)`) --
+% caught and reported the same way, rather than reaching the toplevel raw.
+print_uncaught(error(domain_error(sl_source_file, Path), _Context)) :- !,
+  format(user_error, "error: not an .sl source file: ~a~n", [Path]).
+print_uncaught(Error) :-
+  format(user_error, "error: ~q~n", [Error]).
+
+% parse_argv(+Argv, -EntryPath, -PreludePaths).
+% Pulls the (at most one) `--prelude <csv>` flag out of `Argv`, wherever it
+% appears, and requires exactly one argument left over: the entry path.
+parse_argv(Argv, EntryPath, PreludePaths) :-
+  extract_prelude_flag(Argv, PreludePaths, [EntryPath]).
+
+extract_prelude_flag(["--prelude", Value | Rest], PreludePaths, Remaining) :- !,
+  split_on_comma(Value, PreludePaths),
+  Remaining = Rest.
+extract_prelude_flag([Arg | Rest], PreludePaths, [Arg | Remaining]) :- !,
+  extract_prelude_flag(Rest, PreludePaths, Remaining).
+extract_prelude_flag([], [], []).
+
+split_on_comma(Chars, [Segment | Segments]) :-
+  append(Segment, [',' | Rest], Chars), !,
+  split_on_comma(Rest, Segments).
+split_on_comma(Chars, [Chars]).
+
+print_usage :-
+  format(user_error,
+         "usage: scryer-prolog cli/cli.pl <entry.sl> [--prelude <p1.sl,p2.sl,...>]~n",
+         []).
 
 %% compile_file(+SourcePath, +PreludePaths).
 %
