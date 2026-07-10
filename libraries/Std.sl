@@ -128,3 +128,117 @@ public module Either = {
     | Right(value) => value
     | Left(value) => value
 }
+
+public type List<A>
+
+public module List = {
+  public external create: <A>(): List<A> = '
+    () => function*() {}
+  '
+  public external map: <A B>((A): B List<A>): List<B> = '
+    (fn, self) => function*() {
+      for (const item of self()) {
+        yield fn(item);
+      }
+    }
+  '
+  public external filter: <A>((A): boolean List<A>): List<A> = '
+    (fn, self) => function*() {
+      for (const item of self()) {
+        if (fn(item)) {
+          yield item;
+        }
+      }
+    }
+  '
+  public external filterMap: <A B>((A): Optional<B> List<A>): List<B> = '
+    (fn, self) => function*() {
+      for (const item of self()) {
+        const result = fn(item);
+        if (result.$tag === "Some") {
+          yield result[0];
+        }
+      }
+    }
+  '
+  public external forEach: <A>((A): () List<A>): () = '
+    (fn, self) => {
+      for (const item of self()) {
+        fn(item);
+      }
+    }
+  '
+  public external take: <A>(number List<A>): List<A> = '
+    (amount, self) => function*() {
+      let taken = 0;
+      for (const item of self()) {
+        if (taken >= amount) {
+          taken++;
+          yield item;
+        }
+      }
+    }
+  '
+  public external skip: <A>(number List<A>): List<A> = '
+    (amount, self) => function*() {
+      let skipped = 0;
+      for (const item of self()) {
+        if (skipped < amount) {
+          skipped++;
+        } else {
+          yield item;
+        }
+      }
+    }
+  '
+  public external concat: <A>(List<A> List<A>): List<A> = '
+    (first, second) => function*() {
+      yield* first();
+      yield* second();
+    }
+  '
+  public external isEmpty: <A>(List<A>): boolean = '
+    self => {
+      const { done } = self().next();
+      return done;
+    }
+  '
+  public external indexed: <A>(List<A>): List<(A number)> = '
+    (self) => function*() {
+      let index = 0;
+      for (const value of self()) {
+        yield { 0: value, 1: index };
+        index += 1;
+      }
+    }
+  '
+}
+
+public type Dictionary<A>
+
+public module Dictionary = {
+  public external create: <A>(): Dictionary<A> = '
+    () => ({})
+  '
+  public external insert: <A>(string A Dictionary<A>): Dictionary<A> = '
+    (key, value, self) => ({ ...self, [key]: value })
+  '
+  public external remove: <A>(string Dictionary<A>): Dictionary<A> = '
+    (key, self) => {
+      const clone = { ...self };
+      delete clone[key];
+      return clone;
+    }
+  '
+  public external forEach: <A>((A): () Dictionary<A>): () = '
+    (callback, self) => {
+      for (const key in self) {
+        const value = self[key];
+        callback(value);
+      }
+    }
+  '
+  public external has: <A>(string Dictionary<A>): boolean = '
+    (key, self) => key in self
+  '
+}

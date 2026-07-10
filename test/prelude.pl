@@ -12,7 +12,7 @@
 
 :- use_module(library(lists)).
 :- use_module(test_harness, [read_file_chars/2]).
-:- use_module('../source/compiler', [compile/4]).
+:- use_module('../source/compiler', [compile/4, compile/5]).
 :- use_module('../source/module_paths', [normalise_path/2]).
 
 % ---------------------------------------------------------------------------
@@ -21,6 +21,8 @@
 % ---------------------------------------------------------------------------
 
 consumer("flat.sl", "public main = identity(1)").
+consumer("custom_std/Std.sl", "public shout = (x) x").
+consumer("custom.sl", "public main = shout(1)").
 consumer("pattern.sl", "public main = match None | Some(_) => 1 | None => 2").
 consumer("qualified.sl", "public main = Optional.isSome(None)").
 consumer("shadow_value.sl", "public identity = (x) x").
@@ -76,6 +78,21 @@ prelude_check(result('relative specifier at the prelude\'s own directory (./Std.
   ( Outcome = compiled(Modules) ->
       ( entry_js_contains(Modules, "flat.sl", "from \"./libraries/Std.js\"") -> Status = pass
       ; Status = fail(wrong_specifier) )
+  ; Status = fail(Outcome) ).
+
+% `compile/5` lets a host (the CLI, via SL_HOME) pass a RESOLVED implicit
+% prelude instead of the cwd-relative `libraries/Std.sl` default.  The custom
+% prelude must REPLACE the default -- `custom.sl` uses only `shout` from it,
+% and would fail with `missing_module(libraries/Std.sl)` if the default were
+% still seeded, since the fixture table has no entry for it.
+prelude_check(result('compile/5 honors a host-resolved implicit prelude', Status)) :-
+  ( catch(compile("custom.sl", prelude:resolve_fixture, ["custom_std/Std.sl"], [], Modules),
+          Error, Outcome = threw(Error)) ->
+      ( var(Outcome) -> Outcome = compiled(Modules) ; true )
+  ; Outcome = bare_failure ),
+  ( Outcome = compiled(Ms) ->
+      ( entry_js_contains(Ms, "custom.sl", "($shout)(") -> Status = pass
+      ; Status = fail(no_call_to_shout) )
   ; Status = fail(Outcome) ).
 
 % ---------------------------------------------------------------------------

@@ -203,8 +203,8 @@ lower_expr(node(number, Ch), number_node(Value, Span)) :- !,
   gspan(node(number, Ch), Span).
 lower_expr(node(string, Ch), string_node(Parts, Span)) :- !,
   child_token(Ch, string, t(string, Text, _, _)),
-  string_parts(Text, Parts),
-  gspan(node(string, Ch), Span).
+  gspan(node(string, Ch), Span),
+  string_parts(Text, Span, Parts).
 lower_expr(node(identifier, Ch), Node) :- !,
   child_token(Ch, ident, t(ident, Name, _, _)),
   gspan(node(identifier, Ch), Span),
@@ -450,7 +450,7 @@ lower_match_pattern(node(wildcard_pattern, Ch), wildcard_pattern(Span)) :- !, gs
 % because they are literals, never bindings).
 lower_match_pattern(node(literal_pattern, Ch), literal_pattern(Lit, Span)) :- !,
   ( child_token(Ch, number, t(number, Text, NS, NE)) -> number_value(Text, V), Lit = number_node(V, span(NS, NE))
-  ; child_token(Ch, string, t(string, Text, SS, SE)) -> string_parts(Text, Parts), Lit = string_node(Parts, span(SS, SE))
+  ; child_token(Ch, string, t(string, Text, SS, SE)) -> string_parts(Text, span(SS, SE), Parts), Lit = string_node(Parts, span(SS, SE))
   ; child_token(Ch, ident, t(ident, Name, BS, BE)) ->
       ( Name == [t,r,u,e] -> Lit = boolean_node(true, span(BS, BE))
       ; Lit = boolean_node(false, span(BS, BE)) ) ),
@@ -690,24 +690,31 @@ number_value(Text, Value) :-
 
 % Strings: strip the surrounding quotes, then split into static / interpolated
 % parts, processing `\'` `\\` `\{` escapes, mirroring string_literal.pl.
-string_parts(['\'' | Rest], Parts) :-
+% `StringSpan` is the string token's span in the enclosing file: an
+% interpolation whose inner text does not parse to an expression (e.g. the
+% empty `'{}'`) lowers to an `error_node` carrying it, so the malformed string
+% surfaces as a located error instead of bare-failing the whole parse.
+string_parts(['\'' | Rest], StringSpan, Parts) :-
   append(Body, ['\''], Rest), !,
-  string_body_parts(Body, [string_static_part([])], Parts).
-string_parts(Text, [string_static_part(Text)]).      % unterminated: take as-is
+  string_body_parts(Body, StringSpan, [string_static_part([])], Parts).
+string_parts(Text, _StringSpan, [string_static_part(Text)]).   % unterminated: take as-is
 
-string_body_parts([], Parts, Parts).
-string_body_parts(['\\', C | Cs], Parts0, Parts) :- !,
+string_body_parts([], _StringSpan, Parts, Parts).
+string_body_parts(['\\', C | Cs], StringSpan, Parts0, Parts) :- !,
   ( member(C, ['\'', '{', '\\']) -> Ch = C ; Ch = C ),
   add_static_char(Ch, Parts0, Parts1),
-  string_body_parts(Cs, Parts1, Parts).
-string_body_parts(['{' | Cs], Parts0, Parts) :- !,
+  string_body_parts(Cs, StringSpan, Parts1, Parts).
+string_body_parts(['{' | Cs], StringSpan, Parts0, Parts) :- !,
   take_balanced(Cs, 1, Inner, Rest),
-  parse_interpolation(Inner, Expr),
+  ( parse_interpolation(Inner, Expr) ->
+      true
+  ; Expr = error_node(StringSpan)
+  ),
   append(Parts0, [string_interpolated_part(Expr)], Parts1),
-  string_body_parts(Rest, Parts1, Parts).
-string_body_parts([C | Cs], Parts0, Parts) :-
+  string_body_parts(Rest, StringSpan, Parts1, Parts).
+string_body_parts([C | Cs], StringSpan, Parts0, Parts) :-
   add_static_char(C, Parts0, Parts1),
-  string_body_parts(Cs, Parts1, Parts).
+  string_body_parts(Cs, StringSpan, Parts1, Parts).
 
 % Append a char to the last part if it is static, else start a new static part.
 add_static_char(C, Parts0, Parts) :-

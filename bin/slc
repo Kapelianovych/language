@@ -1,0 +1,16 @@
+#!/bin/sh
+# slc -- run the compiler from anywhere.
+#
+# Scryer gives cli.pl no way to learn its own location, but this script knows
+# its own: the repository root is one directory up.  Export it as SL_HOME (so
+# cli.pl resolves libraries/Std.sl against it) and exec the CLI, forwarding
+# all arguments:
+#
+#     bin/slc <entry.sl> [--prelude <p1.sl,p2.sl,...>]
+#
+# An already-set SL_HOME is respected (useful for pointing at a different
+# checkout's standard library).
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+SL_HOME=${SL_HOME:-$(dirname -- "$HERE")}
+export SL_HOME
+exec scryer-prolog "$SL_HOME/cli/cli.pl" -- "$@"

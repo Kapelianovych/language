@@ -1,6 +1,7 @@
 :- module(compiler, [
   compile/3,
-  compile/4
+  compile/4,
+  compile/5
 ]).
 
 /*  compiler.pl  --  The compiler's public surface: source text or a module
@@ -19,6 +20,11 @@
       * `compile/4`  -- an entry module plus a source resolver; resolves the
         whole `use` graph, type-checks every module in dependency order, and
         returns the generated JavaScript per module. See its own doc below.
+      * `compile/5`  -- like `compile/4`, but the IMPLICIT prelude paths (the
+        standard library) are passed by the host instead of defaulting to the
+        cwd-relative `libraries/Std.sl` -- a host that can be launched from
+        anywhere (the CLI) resolves where the standard library actually lives
+        and passes it here.
 */
 
 :- use_module(library(dcgs)).
@@ -56,6 +62,17 @@
 % recovering parser turns malformed input into `error_node`s that inference would
 % otherwise bare-fail on, so we refuse the program up front with its diagnostics.
 compile(Source, Output, AnalysisResult) :-
+  ( compile_source(Source, Output, AnalysisResult) ->
+      true
+  ; % Every failure the pipeline can diagnose is THROWN as an
+    % `analysis_error`; a bare failure is therefore a compiler bug.  It must
+    % still reach the user as an error -- a host that sees a plain `false`
+    % has nothing to print, which is how "the build exits 1 saying nothing"
+    % happens -- so it is reported as an internal error instead.
+    throw(analysis_error(internal_error))
+  ).
+
+compile_source(Source, Output, AnalysisResult) :-
   once((
     parse_source(Source, ParsedAst, Diagnostics),
     ( Diagnostics == [] -> true
@@ -161,9 +178,29 @@ compile(Source, Output, AnalysisResult) :-
 %     most one diagnostic; rich multi-diagnostic feedback is the job of the
 %     incremental engine in `lsp/queries.pl`, not this batch driver.)
 compile(EntryPath, ResolveModule, PreludePaths, CompiledModules) :-
+  implicit_prelude_paths(ImplicitPreludePaths),
+  compile(EntryPath, ResolveModule, ImplicitPreludePaths, PreludePaths, CompiledModules).
+
+%% compile(+EntryPath, +ResolveModule, +ImplicitPreludePaths, +PreludePaths, -CompiledModules).
+%
+% Like `compile/4`, with the implicit prelude set made explicit:
+% `ImplicitPreludePaths` plays the role `implicit_prelude_paths/1` plays for
+% `compile/4` (the standard library, seeded into every non-prelude module),
+% and `PreludePaths` remains the caller's ADDITIONAL preludes.  This core
+% never touches the filesystem, so it cannot know where the standard library
+% lives when the process is launched outside the repository -- a host that
+% can be (the CLI, via `SL_HOME`) resolves the real path and passes it here.
+compile(EntryPath, ResolveModule, ImplicitPreludePaths, PreludePaths, CompiledModules) :-
+  ( compile_graph(EntryPath, ResolveModule, ImplicitPreludePaths, PreludePaths, CompiledModules) ->
+      true
+  ; % Same backstop as `compile/3`: a bare failure anywhere in the graph
+    % build is a compiler bug, but the user still gets an error for it.
+    throw(analysis_error(internal_error))
+  ).
+
+compile_graph(EntryPath, ResolveModule, ImplicitPreludePaths, PreludePaths, CompiledModules) :-
   once((
     normalise_path(EntryPath, Entry),
-    implicit_prelude_paths(ImplicitPreludePaths),
     append(ImplicitPreludePaths, PreludePaths, AllPreludePaths),
     normalise_paths(AllPreludePaths, AllPreludeModules),
     distinct_preserve_order(AllPreludeModules, PreludeModules),
@@ -181,6 +218,9 @@ compile(EntryPath, ResolveModule, PreludePaths, CompiledModules) :-
   )).
 
 % The standard library is always an effective prelude; see `compile/4`'s doc.
+% This default is CWD-RELATIVE, which suits in-repo callers (tests, and the
+% CLI when run from the repository root); `compile/5` exists for hosts that
+% resolve the standard library's real location themselves.
 implicit_prelude_paths(["libraries/Std.sl"]).
 
 normalise_paths([], []).

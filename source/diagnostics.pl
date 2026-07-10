@@ -80,6 +80,12 @@ reason_text(unknown_import(Path, Name), Msg) :- !,
 reason_text(forward_reference_outside_function(Name), Msg) :- !,
   name_chars(Name, NC), append("`", NC, P1),
   append(P1, "` is referenced before its definition (only legal inside a function body)", Msg).
+reason_text(duplicate_definition(Name), Msg) :- !,
+  name_chars(Name, NC), append("`", NC, P1),
+  append(P1, "` is defined more than once in the same scope", Msg).
+reason_text(malformed_syntax(_Span), "malformed syntax") :- !.
+reason_text(internal_error,
+            "internal compiler error: compilation failed without a diagnostic (please report this program)") :- !.
 reason_text(Reason, Msg) :-                                % generic fallback
   functor(Reason, Name, _), atom_chars(Name, NameChars),
   reason_words(NameChars, Msg).

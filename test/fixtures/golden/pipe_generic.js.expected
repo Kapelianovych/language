@@ -1,0 +1,3 @@
+const $log = $_a0_0 => (console.log)($_a0_0);
+const $identity = (($value) => $value);
+($log)(($identity)(5));

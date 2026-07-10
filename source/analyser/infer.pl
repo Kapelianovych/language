@@ -230,17 +230,25 @@ infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironm
 % already solved), unify the placeholder with the value's type to close the
 % recursive loop; otherwise leave the placeholder so the definition can be
 % generalised independently.
+%
+% Every definition in sequence position was pre-bound `forward` by
+% `prebind_forward`, so the lookup below can only miss when an EARLIER item in
+% the SAME sequence already rebound the name `defined` -- i.e. the name is
+% defined twice in one scope.  That is an error the user must see, not a bare
+% failure that silently collapses the whole analysis.
 tie_forward_knot(Name, Environment, ValueType, ContextIn, ContextOut) :-
-  get_assoc(Name, Environment, forward(Scheme)),
-  ( Scheme = type_scheme([], Placeholder) ->
-      ( placeholder_referenced(Placeholder, ContextIn) ->
-          unify(ValueType, Placeholder, ContextIn, ContextOut)
-      ; ContextOut = ContextIn
+  ( get_assoc(Name, Environment, forward(Scheme)) ->
+      ( Scheme = type_scheme([], Placeholder) ->
+          ( placeholder_referenced(Placeholder, ContextIn) ->
+              unify(ValueType, Placeholder, ContextIn, ContextOut)
+          ; ContextOut = ContextIn
+          )
+      ; % A declared polymorphic scheme (fully annotated generic literal): the
+        % value was checked against the very annotations recursive uses
+        % instantiated, so there is no placeholder to tie.
+        ContextOut = ContextIn
       )
-  ; % A declared polymorphic scheme (fully annotated generic literal): the
-    % value was checked against the very annotations recursive uses
-    % instantiated, so there is no placeholder to tie.
-    ContextOut = ContextIn
+  ; throw(analysis_error(duplicate_definition(Name)))
   ).
 
 placeholder_referenced(Placeholder, Context) :-
@@ -415,6 +423,17 @@ infer(unary_node(Operator, Operand, _), Level, InsideFunction, Environment, Type
   unary_signature(Operator, Level, OperandType, ResultType),
   infer(Operand, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ActualOperandType, Context1),
   unify(ActualOperandType, OperandType, Context1, ContextOut).
+
+% The pipe `x -> f` IS application -- codegen emits exactly `f(x)` -- so it is
+% typed by the same `apply_call/9` a call expression uses.  That instantiates a
+% polymorphic callee (a `forall_type`, e.g. a generic `external`) before
+% applying, and CHECKS the piped value against the parameter, identically to
+% `f(x)`.  Routing pipe through the generic binary rule instead would unify the
+% callee against a bare `(A) -> B` monotype, which a forall head never matches.
+infer(binary_node(pipe, Left, Right, _), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, ResultType, ContextOut) :- !,
+  infer(Right, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
+  apply_call(TargetType, [Left], Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut).
 
 % Binary operator.
 infer(binary_node(Operator, Left, Right, _), Level, InsideFunction, Environment, TypeEnvironment,

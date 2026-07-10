@@ -12,6 +12,7 @@
 :- use_module(golden,       [golden_results/1, golden_bless/0]).
 :- use_module(roundtrip,    [roundtrip_results/1]).
 :- use_module(prelude,      [prelude_results/1]).
+:- use_module(errors,       [error_results/1]).
 :- use_module(test_harness, [report/1]).
 
 :- initialization(main).
@@ -24,9 +25,11 @@ main :-
   ; golden_results(Golden),
     roundtrip_results(RoundTrip),
     prelude_results(Prelude),
+    error_results(Errors),
     report([
       suite('Golden (compile/3 -> .js.expected)', Golden),
       suite('Round-trip (lexer & parser losslessness)', RoundTrip),
-      suite('Prelude (compile/4 -> implicit imports)', Prelude)
+      suite('Prelude (compile/4 -> implicit imports)', Prelude),
+      suite('Errors (rejected programs throw, never bare-fail)', Errors)
     ])
   ).

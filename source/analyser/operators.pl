@@ -8,7 +8,7 @@
     The source language has no way to *write* a type, so the only
     polymorphism a program can observe comes from let-generalisation and
     from the handful of operators that are intrinsically polymorphic
-    (structural equality and the pipe).  Each operator is given a type
+    (structural equality).  Each operator is given a type
     here; the inference engine simply unifies the operand types against
     these signatures.
 
@@ -22,8 +22,10 @@
       * `& ^ |`            boolean logical and / xor / or, on booleans
       * `< <= > >=`        numeric comparison, yielding boolean
       * `== !=`            structural equality, polymorphic: (a a) -> boolean
-      * `->`               pipe: `x -> f` feeds `x` to a unary function `f`,
-                           so it has type `a (a -> b) -> b`
+
+    The pipe `->` is NOT here: `x -> f` is application (`f(x)`), so
+    `infer.pl` types it through the same `apply_call` as a call expression
+    (which knows how to instantiate a polymorphic callee first).
 */
 
 :- use_module(types, [fresh_unification_variable/4]).
@@ -52,14 +54,6 @@ binary_signature(Operator, Level, CtxIn, Left, Right, Result, CtxOut) :-
       % (a a) -> boolean : both operands share one fresh variable.
       fresh_unification_variable(CtxIn, Level, A, CtxOut),
       Left = A, Right = A, Result = boolean
-  ; Operator = pipe ->
-      % a (a -> b) -> b : the right operand must be a unary function whose
-      % parameter type matches the left operand.
-      fresh_unification_variable(CtxIn, Level, A, Ctx1),
-      fresh_unification_variable(Ctx1, Level, B, CtxOut),
-      Left = A,
-      Right = function_type([A], B),
-      Result = B
   ).
 
 % Operators whose signature is (number number) -> number.
