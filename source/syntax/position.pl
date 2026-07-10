@@ -74,7 +74,7 @@
 
 :- dynamic(input_length/1).
 
-%% here(-Tail)//
+% here(-Tail)//
 %
 % Capture the current remaining-input suffix as `Tail`, consuming nothing.
 % Defined directly as the three-argument DCG body predicate: unifying all three
@@ -82,7 +82,7 @@
 % difference-list state.
 here(Tail, Tail, Tail).
 
-%% set_input_length(+Input).
+% set_input_length(+Input).
 %
 % Record the total length of the input list being parsed, so `span_between/3`
 % can convert captured suffixes into absolute offsets.  Idempotent across
@@ -93,7 +93,7 @@ set_input_length(Input) :-
   retractall(input_length(_)),
   assertz(input_length(Length)).
 
-%% span_between(+StartTail, +EndTail, -Span).
+% span_between(+StartTail, +EndTail, -Span).
 %
 % Turn two captured suffixes (start and end of a construct) into a
 % `span(Start, End)` of absolute 0-based character offsets, `End` exclusive.
@@ -101,7 +101,7 @@ span_between(StartTail, EndTail, span(Start, End)) :-
   offset(StartTail, Start),
   offset(EndTail, End).
 
-%% zero_width_span_at(+Tail, -Span).
+% zero_width_span_at(+Tail, -Span).
 %
 % A zero-width `span(Offset, Offset)` at the current position.  Useful for a
 % construct that occupies no source text at the point it is recorded (rare; the
@@ -109,7 +109,7 @@ span_between(StartTail, EndTail, span(Start, End)) :-
 zero_width_span_at(Tail, span(Offset, Offset)) :-
   offset(Tail, Offset).
 
-%% node_span(+Node, -Span).
+% node_span(+Node, -Span).
 %
 % Read the `span(Start, End)` off any spanned AST node.  By construction every
 % spanned node carries its span as its LAST argument, so this takes the last
@@ -123,7 +123,7 @@ node_span(Node, Span) :-
   !,
   Span = Last.
 
-%% span_cover(+Left, +Right, -Span).
+% span_cover(+Left, +Right, -Span).
 %
 % The span that covers two already-spanned nodes: from the start of `Left` to
 % the end of `Right`.  (Assumes `Left` precedes `Right` in source order.)
@@ -131,7 +131,7 @@ span_cover(Left, Right, span(Start, End)) :-
   node_span(Left, span(Start, _)),
   node_span(Right, span(_, End)).
 
-%% offset(+Tail, -Offset).
+% offset(+Tail, -Offset).
 %
 % The absolute 0-based offset of a captured input suffix `Tail`: the total input
 % length minus how much input remains.  Exported for the few rules that already

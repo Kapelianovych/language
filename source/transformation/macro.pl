@@ -65,7 +65,7 @@
 :- use_module('../analyser', [analyse_module/5]).
 :- use_module('../syntax/lower', [parse_source/2]).
 
-%% check_macros(+ProgramAst).
+% check_macros(+ProgramAst).
 %
 % Type-check every macro definition in the program.  Succeeds (with no output)
 % when the program defines no macros; otherwise throws `analysis_error(Reason)`
@@ -75,7 +75,7 @@ check_macros(program_node(Items)) :-
   collect_compiler_imports(Items, ImportedNames),
   check_macro_set(MacroDefinitions, ImportedNames).
 
-%% check_macro_set(+MacroDefinitions, +CompilerImportNames).
+% check_macro_set(+MacroDefinitions, +CompilerImportNames).
 %
 % Type-check a set of macro definitions together (so they may reference one
 % another).  Used both per-file (`check_macros/1`) and whole-program (the loader
@@ -89,7 +89,7 @@ check_macro_set(MacroDefinitions, CompilerImportNames) :-
   analyse_module(program_node(DesugaredDefinitions),
                  SeedValueEnvironment, SeedTypeEnvironment, _Result, _Interface).
 
-%% require_parse_item_import(+MacroDefinitions, +CompilerImportNames).
+% require_parse_item_import(+MacroDefinitions, +CompilerImportNames).
 %
 % Enforce, PER MODULE, that a module whose macro bodies use `parseItem` imports
 % it (`use Compiler:(parseItem)`).  The whole-program type check pools every
@@ -118,20 +118,20 @@ mentions_parse_item(Term) :-
 % Cross-file helpers (whole-program macro processing; see compiler.pl)
 % ---------------------------------------------------------------------------
 
-%% program_macros(+ProgramAst, -MacroDefinitions).
+% program_macros(+ProgramAst, -MacroDefinitions).
 program_macros(program_node(Items), MacroDefinitions) :-
   collect_macros(Items, MacroDefinitions).
 
-%% program_compiler_imports(+ProgramAst, -CompilerImportNames).
+% program_compiler_imports(+ProgramAst, -CompilerImportNames).
 program_compiler_imports(program_node(Items), Names) :-
   collect_compiler_imports(Items, Names).
 
-%% macro_definition_names(+MacroDefinitions, -Names).
+% macro_definition_names(+MacroDefinitions, -Names).
 macro_definition_names([], []).
 macro_definition_names([macro_definition_node(Name, _, _, _) | Rest], [Name | Names]) :-
   macro_definition_names(Rest, Names).
 
-%% macro_table(+MacroDefinitions, -Table).
+% macro_table(+MacroDefinitions, -Table).
 %
 % Build the name -> definition table used by the interpreter.  Macro names are
 % a single global namespace, so a name defined in two files is a `duplicate_macro`
@@ -251,7 +251,7 @@ desugar_parameters([Name | Names], Span,
     same hazard as any recursive definition).
 */
 
-%% expand_macros(+ProgramIn, -ProgramOut).
+% expand_macros(+ProgramIn, -ProgramOut).
 expand_macros(program_node(Items), program_node(OutItems)) :-
   build_macro_table(Items, Table),
   exclude_macro_items(Items, Kept),
@@ -596,7 +596,7 @@ reify_each([Argument | Arguments], Environment, Table, [Node | Nodes]) :-
         a macro).  An unresolved `@name` is an error (the macro is not in scope).
 */
 
-%% macro_key_name(+ModuleIndex, +Name, -KeyChars).
+% macro_key_name(+ModuleIndex, +Name, -KeyChars).
 %
 % A unique internal name for a macro: `Name#Index`.  `#` cannot occur in a
 % source identifier, so a key never collides with a user name; the key is only
@@ -613,7 +613,7 @@ canonical_chars([], []).
 canonical_chars([Character | Characters], [Character | Rest]) :-
   canonical_chars(Characters, Rest).
 
-%% resolve_macro_body(+Body, +Resolution, -ResolvedBody).
+% resolve_macro_body(+Body, +Resolution, -ResolvedBody).
 resolve_macro_body(Body, Resolution, ResolvedBody) :-
   resolve_references(Body, Resolution, [], ResolvedBody).
 
@@ -693,7 +693,7 @@ resolve_guard(no_guard, _Resolution, _Locals, no_guard).
 resolve_guard(guard(Expression), Resolution, Locals, guard(Expression1)) :-
   resolve_references(Expression, Resolution, Locals, Expression1).
 
-%% resolve_uses(+Term, +Resolution, -Out).
+% resolve_uses(+Term, +Resolution, -Out).
 %
 % Rewrite only `@name(..)` invocation names (recursing into arguments) to keys;
 % leave ordinary identifiers untouched.  An `@name` not in `Resolution` is a
@@ -717,7 +717,7 @@ resolve_uses_list([Term | Terms], Resolution, [Out | Outs]) :-
   resolve_uses(Term, Resolution, Out),
   resolve_uses_list(Terms, Resolution, Outs).
 
-%% expand_program_with_table(+ProgramAst, +Table, -ExpandedAst).
+% expand_program_with_table(+ProgramAst, +Table, -ExpandedAst).
 %
 % Interpret every `@key(..)` invocation in an already-resolved, already-stripped
 % program, using a pre-built key-keyed `Table`.

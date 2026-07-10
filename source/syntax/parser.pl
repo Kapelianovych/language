@@ -125,7 +125,7 @@ missing(Tokens, What, [t(missing, [], At, At)], [diagnostic(At, At, expected(Wha
 % expression (definitions are `name = expr`, handled by the `=` operator).
 % ===========================================================================
 
-%% parse_tokens(+Tokens, -GreenTree, -Diagnostics).
+% parse_tokens(+Tokens, -GreenTree, -Diagnostics).
 parse_tokens(Tokens, node(program, Children), Diagnostics) :-
   items(Tokens, Rest, ItemChildren, Diagnostics, []),
   skip_trivia(Rest, Trivia, [Eof | _]),

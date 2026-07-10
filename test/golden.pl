@@ -15,7 +15,7 @@
 
 golden_dir("test/fixtures/golden").
 
-%% golden_results(-Results).
+% golden_results(-Results).
 golden_results(Results) :-
   golden_dir(Dir),
   sl_fixtures(Dir, Names),
@@ -45,7 +45,7 @@ golden_verdict(produced(Actual), _Expected, ActualPath, fail(mismatch(see(A)))) 
 golden_verdict(threw(Error), _Expected, _ActualPath, fail(compile_threw(Error))) :- !.
 golden_verdict(bare_failure, _Expected, _ActualPath, fail(compile_bare_failed)).
 
-%% golden_bless.
+% golden_bless.
 %
 % (Re)generate every `NAME.js.expected` from the current compiler output.
 golden_bless :-

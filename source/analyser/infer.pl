@@ -79,7 +79,7 @@
   union_constructor_names/3
 ]).
 
-%% infer_program(+ProgramNode, +TypeEnvironment, +InitialEnvironment, +ContextIn, -Result, -FinalEnvironment).
+% infer_program(+ProgramNode, +TypeEnvironment, +InitialEnvironment, +ContextIn, -Result, -FinalEnvironment).
 %
 % Entry point for a whole program: a sequence of top-level expressions
 % evaluated at level 0.  `Result` is `program_type(LastType, ContextOut)`.
@@ -90,8 +90,8 @@ infer_program(program_node(Expressions), TypeEnvironment, InitialEnvironment, Co
               program_type(LastType, ContextOut), FinalEnvironment) :-
   infer_sequence(Expressions, 0, false, InitialEnvironment, TypeEnvironment, ContextIn, LastType, FinalEnvironment, ContextOut).
 
-%% infer_program_accumulating(+ProgramNode, +TypeEnvironment, +InitialEnvironment,
-%%                            +ContextIn, -Result, -FinalEnvironment, -Errors).
+% infer_program_accumulating(+ProgramNode, +TypeEnvironment, +InitialEnvironment,
+%                            +ContextIn, -Result, -FinalEnvironment, -Errors).
 %
 % Same inference as `infer_program/6` -- the SAME judgement, environment and
 % unifier -- but instead of letting the first `analysis_error` propagate, each
@@ -145,7 +145,7 @@ item_span(_Node, span(0, 0)).
 % Sequences: programs and blocks  (this is where `let` lives)
 % ---------------------------------------------------------------------------
 
-%% infer_sequence(+Expressions, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -FinalEnvironment, -ContextOut).
+% infer_sequence(+Expressions, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -FinalEnvironment, -ContextOut).
 %
 % A sequence is the scope shared by a group of definitions.  We first
 % pre-bind every definition name as a `forward` placeholder (so earlier
@@ -516,7 +516,7 @@ check_template_unquotes_each([Argument | Arguments], Level, InsideFunction, Envi
 % Annotations
 % ---------------------------------------------------------------------------
 
-%% apply_annotation(+Annotation, +InferredType, +TypeEnvironment, +Level, +ContextIn, -ContextOut).
+% apply_annotation(+Annotation, +InferredType, +TypeEnvironment, +Level, +ContextIn, -ContextOut).
 %
 % Unify an explicit annotation (if any) against an inferred type.  The
 % annotation is converted to a closed monotype via `type_environment.pl`.
@@ -557,7 +557,7 @@ check_type_argument_count(Quantifiers, Provided) :-
 % When the callee's type is still unknown we fall back to synthesising the
 % argument types and unifying, exactly as before.
 
-%% apply_call(+TargetType, +Arguments, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -ContextOut).
+% apply_call(+TargetType, +Arguments, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -ContextOut).
 apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut) :-
   resolve_head(TargetType, ContextIn, Resolved),
   ( Resolved = forall_type(_, _) ->
@@ -612,7 +612,7 @@ check_arguments([Argument | Arguments], [Parameter | Parameters], Level, InsideF
 % Bidirectional checking
 % ---------------------------------------------------------------------------
 
-%% check_expr(+Node, +ExpectedType, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ContextOut).
+% check_expr(+Node, +ExpectedType, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ContextOut).
 %
 % Check that `Node` has type `ExpectedType`.  When the expectation is a
 % polytype we SKOLEMISE it (one level deeper) and check the node against the
@@ -871,7 +871,7 @@ missing_constructors([Name | Names], Covered, Missing) :-
     missing_constructors(Names, Covered, Rest)
   ).
 
-%% type_pattern(+Pattern, +ExpectedType, +Level, +TypeEnvironment, +EnvironmentIn, +ContextIn, -EnvironmentOut, -ContextOut).
+% type_pattern(+Pattern, +ExpectedType, +Level, +TypeEnvironment, +EnvironmentIn, +ContextIn, -EnvironmentOut, -ContextOut).
 %
 % Constrain `ExpectedType` to match `Pattern`, extending the environment with
 % the pattern's bindings (monomorphic).

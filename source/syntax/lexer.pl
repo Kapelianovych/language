@@ -82,7 +82,7 @@
 % Entry point.
 % ---------------------------------------------------------------------------
 
-%% tokenize(+Chars, -Tokens).
+% tokenize(+Chars, -Tokens).
 %
 % `Chars` is the whole source as a list of character atoms.  `Tokens` is the
 % lossless token list ending in exactly one `t(eof, [], N, N)`.

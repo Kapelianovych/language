@@ -55,7 +55,7 @@
 % compile/3 -- a single, import-free source text.
 % ---------------------------------------------------------------------------
 
-%% compile(+Source, -Output, -AnalysisResult).
+% compile(+Source, -Output, -AnalysisResult).
 %
 % Compiles source text into output text.  A syntax error is reported as a thrown
 % `analysis_error(syntax_errors(Diagnostics))` rather than a silent failure: the
@@ -67,7 +67,7 @@ compile(Source, Output, AnalysisResult) :-
   ; % Every failure the pipeline can diagnose is THROWN as an
     % `analysis_error`; a bare failure is therefore a compiler bug.  It must
     % still reach the user as an error -- a host that sees a plain `false`
-    % has nothing to print, which is how "the build exits 1 saying nothing"
+    % has nothing to print, which is how "the build exits saying nothing"
     % happens -- so it is reported as an internal error instead.
     throw(analysis_error(internal_error))
   ).
@@ -128,7 +128,7 @@ compile_source(Source, Output, AnalysisResult) :-
 % public entry under a `math.`-qualified local name -- see `namespace_import`.
 % ---------------------------------------------------------------------------
 
-%% compile(+EntryPath, +ResolveModule, +PreludePaths, -CompiledModules).
+% compile(+EntryPath, +ResolveModule, +PreludePaths, -CompiledModules).
 %
 % Compiles the module graph rooted at `EntryPath` (a `.sl` source path as a
 % character list).  `CompiledModules` is a list of `ModulePath - JavaScript`
@@ -181,7 +181,7 @@ compile(EntryPath, ResolveModule, PreludePaths, CompiledModules) :-
   implicit_prelude_paths(ImplicitPreludePaths),
   compile(EntryPath, ResolveModule, ImplicitPreludePaths, PreludePaths, CompiledModules).
 
-%% compile(+EntryPath, +ResolveModule, +ImplicitPreludePaths, +PreludePaths, -CompiledModules).
+% compile(+EntryPath, +ResolveModule, +ImplicitPreludePaths, +PreludePaths, -CompiledModules).
 %
 % Like `compile/4`, with the implicit prelude set made explicit:
 % `ImplicitPreludePaths` plays the role `implicit_prelude_paths/1` plays for

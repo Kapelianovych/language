@@ -38,7 +38,7 @@
 :- use_module(library(assoc)).
 :- use_module(library(lists)).
 
-%% resolve_bare_constructors(+Program, +SeedTypeEnvironment, -Resolved).
+% resolve_bare_constructors(+Program, +SeedTypeEnvironment, -Resolved).
 %
 % `SeedTypeEnvironment` is the assoc the analyser will be seeded with (empty
 % for a single-file compile); its nullary `constructor_key/1` entries and the

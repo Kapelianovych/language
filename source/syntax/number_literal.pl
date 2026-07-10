@@ -13,7 +13,7 @@ number_literal(number_node(Number, Span)) -->
   here(End),
   { span_between(Start, End, Span) }.
 
-%% integer_literal(+DigitFunctor, +Radix, -Number, -DigitsCount).
+% integer_literal(+DigitFunctor, +Radix, -Number, -DigitsCount).
 %
 % Parses any integer literal and converts it into a decimal number.
 integer_literal(

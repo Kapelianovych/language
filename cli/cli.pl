@@ -143,7 +143,7 @@ print_usage :-
          "usage: scryer-prolog cli/cli.pl <entry.sl> [--prelude <p1.sl,p2.sl,...>]~n",
          []).
 
-%% compile_file(+SourcePath, +ImplicitPreludePaths, +PreludePaths).
+% compile_file(+SourcePath, +ImplicitPreludePaths, +PreludePaths).
 %
 % Compiles the `.sl` file at SourcePath together with every module it imports
 % (directly or transitively), writing each module's JavaScript alongside it
@@ -215,7 +215,7 @@ output_path(OutputPath) -->
 % CLI reporting
 % ---------------------------------------------------------------------------
 
-%% print_analysis_error(+Reason).
+% print_analysis_error(+Reason).
 %
 % Write an `analysis_error` payload to standard error as one or more
 % human-readable lines.  Syntax errors carry a char-offset span; when the

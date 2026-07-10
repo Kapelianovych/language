@@ -50,7 +50,7 @@
 % Building the environment
 % ---------------------------------------------------------------------------
 
-%% build_type_environment(+ProgramNode, -TypeEnvironment, -ConstructorBindings).
+% build_type_environment(+ProgramNode, -TypeEnvironment, -ConstructorBindings).
 %
 % `TypeEnvironment` maps type names to their info and variant constructor
 % names to `variant_constructor(...)`.  `ConstructorBindings` is a list of
@@ -60,7 +60,7 @@ build_type_environment(ProgramNode, TypeEnvironment, ConstructorBindings) :-
   empty_assoc(Empty),
   build_type_environment(ProgramNode, Empty, TypeEnvironment, ConstructorBindings).
 
-%% build_type_environment(+ProgramNode, +InitialEnvironment, -TypeEnvironment, -ConstructorBindings).
+% build_type_environment(+ProgramNode, +InitialEnvironment, -TypeEnvironment, -ConstructorBindings).
 %
 % As above, but starts from `InitialEnvironment` instead of an empty assoc, so
 % imported types and constructors (seeded by the module loader) are in scope
@@ -194,7 +194,7 @@ quantified_parameter_scope([type_parameter(Name, Kind, _Bound, _) | Rest], Index
   Index1 is Index + 1,
   quantified_parameter_scope(Rest, Index1, Environment1, EnvironmentOut, Variables, Ids).
 
-%% instantiate_constructor(+CtorName, +TypeEnvironment, +Level, +ContextIn, -UnionType, -FieldTypes, -ContextOut).
+% instantiate_constructor(+CtorName, +TypeEnvironment, +Level, +ContextIn, -UnionType, -FieldTypes, -ContextOut).
 %
 % For pattern matching: produce the constructor's union type and field types
 % with the union's parameters freshly instantiated at `Level`.
@@ -213,7 +213,7 @@ fresh_parameter_scope([type_parameter(Name, Kind, _Bound, _) | Rest], Environmen
   put_assoc(Name, EnvironmentIn, type_parameter_binding(Fresh, Kind), Environment1),
   fresh_parameter_scope(Rest, Environment1, Level, Context1, EnvironmentOut, Variables, ContextOut).
 
-%% union_constructor_names(+UnionName, +TypeEnvironment, -Names).
+% union_constructor_names(+UnionName, +TypeEnvironment, -Names).
 union_constructor_names(UnionName, TypeEnvironment, Names) :-
   get_assoc(UnionName, TypeEnvironment, type_variant_info(_Parameters, Constructors)),
   findall(Name, member(constructor(Name, _Fields, _), Constructors), Names).
@@ -248,7 +248,7 @@ bind_quantifier_parameters([type_parameter(Name, Kind, Bound, _) | Rest], Enviro
 % Binding function/anonymous type parameters into an environment
 % ---------------------------------------------------------------------------
 
-%% bind_type_parameters(+TypeParameters, +EnvironmentIn, +Level, +ContextIn, -EnvironmentOut, -ContextOut).
+% bind_type_parameters(+TypeParameters, +EnvironmentIn, +Level, +ContextIn, -EnvironmentOut, -ContextOut).
 %
 % Extend an environment with a function's generics.  An unbounded parameter
 % becomes a fresh type variable; a bounded one becomes its converted bound
@@ -261,7 +261,7 @@ bind_type_parameters([type_parameter(Name, Kind, Bound, _) | Rest], EnvironmentI
   put_assoc(Name, EnvironmentIn, type_parameter_binding(MonoType, Kind), Environment1),
   bind_type_parameters(Rest, Environment1, Level, Context1, EnvironmentOut, ContextOut).
 
-%% declared_function_scheme(+ValueNode, +TypeEnvironment, +Level, +ContextIn, -Scheme, -ContextOut).
+% declared_function_scheme(+ValueNode, +TypeEnvironment, +Level, +ContextIn, -Scheme, -ContextOut).
 %
 % The polymorphic scheme DECLARED by a generic function literal whose
 % parameters and return type are all annotated: the type parameters become
@@ -284,8 +284,8 @@ parameter_annotation_expressions([parameter_node(_, type_annotation(Expression),
                                  [Expression | Expressions]) :-
   parameter_annotation_expressions(Rest, Expressions).
 
-%% bind_type_parameters_rigid(+TypeParameters, +EnvironmentIn, +OuterLevel, +BodyLevel,
-%%                            +ContextIn, -EnvironmentOut, -SkolemPairs, -ContextOut).
+% bind_type_parameters_rigid(+TypeParameters, +EnvironmentIn, +OuterLevel, +BodyLevel,
+%                            +ContextIn, -EnvironmentOut, -SkolemPairs, -ContextOut).
 %
 % Like bind_type_parameters, but an unbounded proper parameter becomes a
 % RIGID skolem (born at BodyLevel, the function body's level), so the body
@@ -326,7 +326,7 @@ parameter_monotype(0, bound(BoundExpression), Environment, Level, ContextIn, Mon
 % Converting surface type expressions to monotypes
 % ---------------------------------------------------------------------------
 
-%% convert_annotation_type(+TypeExpression, +TypeEnvironment, +Level, +ContextIn, -MonoType, -ContextOut).
+% convert_annotation_type(+TypeExpression, +TypeEnvironment, +Level, +ContextIn, -MonoType, -ContextOut).
 %
 % An annotation must denote a proper type (kind *).
 convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, MonoType, ContextOut) :-

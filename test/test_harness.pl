@@ -23,7 +23,7 @@
 % Reporting.
 % ---------------------------------------------------------------------------
 
-%% report(+Suites).
+% report(+Suites).
 %
 % Suites is a list of `suite(Title, Results)`.  Prints every check, a summary
 % line, then halts (0 if all passed, 1 otherwise).
@@ -54,7 +54,7 @@ report_results([result(Name, fail(Reason)) | Rest], P0-F0, Acc) :-
 % atoms (Scryer's default `double_quotes` flag is `chars`).
 % ---------------------------------------------------------------------------
 
-%% read_file_chars(+Path, -Chars).
+% read_file_chars(+Path, -Chars).
 %
 % Read a file into a canonical cons list of character atoms.  FAILS (does not
 % throw) when the file cannot be read, so callers decide how to report it.
@@ -64,11 +64,11 @@ read_file_chars(Path, Chars) :-
   % list so `==/2` against freshly built lists behaves (see module_paths.pl).
   force_list(Raw, Chars).
 
-%% write_file_chars(+Path, +Chars).
+% write_file_chars(+Path, +Chars).
 write_file_chars(Path, Chars) :-
   phrase_to_file(all_chars(Chars), Path).
 
-%% sl_fixtures(+Dir, -Names).
+% sl_fixtures(+Dir, -Names).
 %
 % The basenames of every `*.sl` file directly in Dir, sorted.  Dir is resolved
 % relative to the current working directory (run the suite from the repo root).

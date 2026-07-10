@@ -108,13 +108,13 @@ init_db :-
 % Inputs.
 % ---------------------------------------------------------------------------
 
-%% set_input(+Key, +Value).  Records an input and ticks the revision.
+% set_input(+Key, +Value).  Records an input and ticks the revision.
 set_input(Key, Value) :-
   retract(current_revision(R0)), R is R0 + 1, assertz(current_revision(R)),
   retractall(input(Key, _, _)),
   assertz(input(Key, Value, R)).
 
-%% set_prelude_modules(+Paths).
+% set_prelude_modules(+Paths).
 %
 % Configures the engine's PRELUDE: a list of `.sl` source paths (mirroring
 % `compiler:compile/4`'s `PreludePaths`) whose public names are
@@ -151,7 +151,7 @@ effective_prelude_modules(File, Effective) :-
 % The query driver.
 % ---------------------------------------------------------------------------
 
-%% query(+Key, -Value).
+% query(+Key, -Value).
 %
 % DETERMINISTIC (note the closing `!`): a query has exactly one value, and its
 % evaluation has side effects (memoisation, dependency edges).  Without the cut,

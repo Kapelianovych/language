@@ -95,7 +95,7 @@
 
 :- use_module(library(lists)).
 
-%% expand_modules(+ProgramIn, -ProgramOut).
+% expand_modules(+ProgramIn, -ProgramOut).
 %
 % Idempotent: a program with no `module_node` is returned unchanged apart from
 % de-duplicating identical lifted `use` imports.

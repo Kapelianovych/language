@@ -54,7 +54,7 @@ version_url(Version, Url) :-
   append("https://www.unicode.org/Public/", Version, A),
   append(A, "/ucd/DerivedCoreProperties.txt", Url).
 
-%% main.
+% main.
 %
 % Entry point when run as a script.  Parses the arguments after `--`, runs the
 % generator, and halts.
@@ -97,7 +97,7 @@ parse_args(["-o", Path | T], S0, _, Source, Output) :-
 % Driver
 % ---------------------------------------------------------------------------
 
-%% generate_identifier(+Source, +OutputPath).
+% generate_identifier(+Source, +OutputPath).
 %
 % Source is `file(Path)` or `url(Url)`.  Reads the UCD data, extracts and
 % merges the XID ranges, builds the BSTs, and writes the module.

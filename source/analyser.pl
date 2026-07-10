@@ -50,7 +50,7 @@
 :- use_module('transformation/module', [expand_modules/2]).
 :- use_module(unicode, [xid_start/1, xid_continue/1]).
 
-%% analyse(+AST, -Result).
+% analyse(+AST, -Result).
 %
 % `Result` is `analysis_result(Type, Substitution)` where `Type` is the
 % fully-resolved principal type of the program and `Substitution` is the
@@ -64,7 +64,7 @@ analyse(AST, Result) :-
   empty_assoc(EmptyTypeEnvironment),
   analyse_module(AST, EmptyValueEnvironment, EmptyTypeEnvironment, Result, _Interface).
 
-%% analyse_module(+AST, +SeedValueEnvironment, +SeedTypeEnvironment, -Result, -Interface).
+% analyse_module(+AST, +SeedValueEnvironment, +SeedTypeEnvironment, -Result, -Interface).
 %
 % Type-checks one module.  `SeedValueEnvironment` / `SeedTypeEnvironment` are
 % assocs pre-populated by the module loader with the entries this module
@@ -100,7 +100,7 @@ analyse_module(ProgramAst, SeedValueEnvironment, SeedTypeEnvironment,
   collect_exports(PublicValueNames, PublicTypeDeclarations, FinalEnvironment, TypeEnvironment,
                   ValueEntries, TypeEntries).
 
-%% analyse_accumulating(+AST, +SeedValueEnv, +SeedTypeEnv, -Errors, -DefinitionTypes, -Interface).
+% analyse_accumulating(+AST, +SeedValueEnv, +SeedTypeEnv, -Errors, -DefinitionTypes, -Interface).
 %
 % The SAME checker as `analyse_module/5` -- identical environment setup and the
 % identical inference rules -- but it ACCUMULATES type errors instead of

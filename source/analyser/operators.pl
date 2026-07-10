@@ -30,7 +30,7 @@
 
 :- use_module(types, [fresh_unification_variable/4]).
 
-%% unary_signature(+Operator, +Level, -OperandType, -ResultType).
+% unary_signature(+Operator, +Level, -OperandType, -ResultType).
 %
 % (Level is accepted for symmetry with binary_signature; the unary
 % operators are monomorphic so it is unused.)
@@ -38,7 +38,7 @@ unary_signature(number_negation,  _Level, number,  number).
 unary_signature(boolean_negation, _Level, boolean, boolean).
 unary_signature(bit_invertion,    _Level, number,  number).
 
-%% binary_signature(+Operator, +Level, +CtxIn, -LeftType, -RightType, -ResultType, -CtxOut).
+% binary_signature(+Operator, +Level, +CtxIn, -LeftType, -RightType, -ResultType, -CtxOut).
 %
 % Yields the expected operand types and the result type of a binary
 % operator.  Polymorphic operators allocate fresh unification variables

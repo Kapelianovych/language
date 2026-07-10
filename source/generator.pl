@@ -13,7 +13,7 @@
 :- use_module(library(dcgs)).
 :- use_module(generator/javascript, [program//1]).
 
-%% generate(+AST, -JavaScript).
+% generate(+AST, -JavaScript).
 %
 % `JavaScript` is the generated source as a character list.  `once/1` keeps
 % generation deterministic (the grammar is unambiguous, but this guards

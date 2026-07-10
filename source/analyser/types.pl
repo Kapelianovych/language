@@ -113,17 +113,17 @@
 :- use_module(library(assoc)).
 :- use_module(library(lists)).
 
-%% empty_context(-Context).
+% empty_context(-Context).
 empty_context(context(0, Store)) :-
   empty_assoc(Store).
 
-%% fresh_unification_variable(+ContextIn, +Level, -Variable, -ContextOut).
+% fresh_unification_variable(+ContextIn, +Level, -Variable, -ContextOut).
 fresh_unification_variable(context(Id, Store), Level, unification_variable(Id),
                            context(NextId, Store1)) :-
   NextId is Id + 1,
   put_assoc(Id, Store, unsolved(Level), Store1).
 
-%% fresh_bound_id(+ContextIn, -Id, -ContextOut).
+% fresh_bound_id(+ContextIn, -Id, -ContextOut).
 %
 % Allocate a fresh, globally-unique id WITHOUT minting a unification variable
 % for it -- used for the bound variables of a `forall_type` and for skolem
@@ -131,7 +131,7 @@ fresh_unification_variable(context(Id, Store), Level, unification_variable(Id),
 fresh_bound_id(context(Id, Store), Id, context(NextId, Store)) :-
   NextId is Id + 1.
 
-%% fresh_named_bound_id(+ContextIn, +Name, -Id, -ContextOut).
+% fresh_named_bound_id(+ContextIn, +Name, -Id, -ContextOut).
 %
 % Like fresh_bound_id, but records the bound variable's source name in the
 % store (as `bound_name(Name)`), so a later skolemisation of the enclosing
@@ -146,14 +146,14 @@ fresh_named_bound_id(context(Id, Store), Name, Id, context(NextId, Store1)) :-
 bound_id_name(context(_, Store), Id, Name) :-
   ( get_assoc(Id, Store, bound_name(Name0)) -> Name = Name0 ; Name = anonymous ).
 
-%% monomorphic_type_scheme(+Type, -Scheme).
+% monomorphic_type_scheme(+Type, -Scheme).
 monomorphic_type_scheme(Type, type_scheme([], Type)).
 
 % ---------------------------------------------------------------------------
 % Resolution (context application, Fig. 4)
 % ---------------------------------------------------------------------------
 
-%% resolve_head(+Type, +Context, -Resolved).
+% resolve_head(+Type, +Context, -Resolved).
 %
 % Follow solved unification variables one head level deep.
 resolve_head(Type, Context, Resolved) :-
@@ -185,7 +185,7 @@ zip_mapping([], [], []).
 zip_mapping([Id | Ids], [Argument | Arguments], [Id - Argument | Mapping]) :-
   zip_mapping(Ids, Arguments, Mapping).
 
-%% fully_resolve(+Type, +Context, -Resolved).
+% fully_resolve(+Type, +Context, -Resolved).
 %
 % Deep context application, leaving no solved variables.  Tuple chains are
 % flattened so the result is a single `tuple_type(AllFields, FinalTail)`.
@@ -254,7 +254,7 @@ field_monotypes([tuple_field(Mutability, _, Type) | Fields], [Mutability, Type |
 % Unification with level adjustment (Fig. 6)
 % ---------------------------------------------------------------------------
 
-%% unify(+Type1, +Type2, +ContextIn, -ContextOut).
+% unify(+Type1, +Type2, +ContextIn, -ContextOut).
 unify(Type1, Type2, ContextIn, ContextOut) :-
   resolve_head(Type1, ContextIn, Resolved1),
   resolve_head(Type2, ContextIn, Resolved2),
@@ -443,7 +443,7 @@ fresh_common_tail(unification_variable(Id1), unification_variable(Id2),
   NextId1 is NextId + 1,
   put_assoc(NextId, Store, unsolved(Level), Store1).
 
-%% bind_unification_variable(+Id, +Type, +ContextIn, -ContextOut).
+% bind_unification_variable(+Id, +Type, +ContextIn, -ContextOut).
 bind_unification_variable(Id, Type, ContextIn, ContextOut) :-
   ContextIn = context(_, Store),
   get_assoc(Id, Store, unsolved(Level)),
@@ -451,7 +451,7 @@ bind_unification_variable(Id, Type, ContextIn, ContextOut) :-
   put_assoc(Id, Store1, solved(Type), Store2),
   ContextOut = context(NextId, Store2).
 
-%% occurs_check_and_adjust_levels(+Id, +MaxLevel, +Type, +ContextIn, -ContextOut).
+% occurs_check_and_adjust_levels(+Id, +MaxLevel, +Type, +ContextIn, -ContextOut).
 occurs_check_and_adjust_levels(Id, MaxLevel, Type, ContextIn, ContextOut) :-
   resolve_head(Type, ContextIn, Resolved),
   ( Resolved = unification_variable(Other) ->
@@ -502,7 +502,7 @@ occurs_check_and_adjust_levels_list(Id, MaxLevel, [Type | Types], ContextIn, Con
 % Generalisation and instantiation (let-polymorphism, via levels)
 % ---------------------------------------------------------------------------
 
-%% generalize(+Type, +OuterLevel, +Context, -Scheme, -Context).
+% generalize(+Type, +OuterLevel, +Context, -Scheme, -Context).
 %
 % The quantifiers are ordered by ASCENDING variable id, i.e. by creation
 % order.  This makes the scheme's quantifier list positional: a function's
@@ -517,7 +517,7 @@ generalize(Type, OuterLevel, Context, type_scheme(QuantifiedIds, Body), Context)
   sort(Generalizable, QuantifiedIds),
   abstract_quantified_variables(Resolved, QuantifiedIds, Body).
 
-%% scheme_free_unification_variables(+Scheme, -Ids).
+% scheme_free_unification_variables(+Scheme, -Ids).
 %
 % The unification-variable ids that remain FREE in a scheme's body (i.e. were
 % not generalised away).  A scheme with none is self-contained and portable
@@ -603,12 +603,12 @@ abstract_fields([tuple_field(Mutability, Key, Type) | Fields], QuantifiedIds,
   abstract_quantified_variables(Type, QuantifiedIds, Type1),
   abstract_fields(Fields, QuantifiedIds, Outs).
 
-%% instantiate(+Scheme, +Level, +ContextIn, -Type, -ContextOut).
+% instantiate(+Scheme, +Level, +ContextIn, -Type, -ContextOut).
 instantiate(type_scheme(QuantifiedIds, Body), Level, ContextIn, Type, ContextOut) :-
   fresh_quantified_mapping(QuantifiedIds, Level, ContextIn, Mapping, ContextOut),
   substitute_quantified_variables(Body, Mapping, Type).
 
-%% instantiate_positional(+Scheme, +Provided, +Level, +ContextIn, -Type, -ContextOut).
+% instantiate_positional(+Scheme, +Provided, +Level, +ContextIn, -Type, -ContextOut).
 %
 % Instantiate with EXPLICIT type arguments: the first k quantifiers (in the
 % scheme's positional order -- see generalize/5) are replaced by the k
@@ -677,7 +677,7 @@ substitute_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping,
   substitute_quantified_variables(Type, Mapping, Type1),
   substitute_fields(Fields, Mapping, Outs).
 
-%% substitute_skolems(+Type, +Mapping, -Out).
+% substitute_skolems(+Type, +Mapping, -Out).
 %
 % Replace `skolem(Id, _, _)` with its mapped replacement for every `Id - Type`
 % pair in Mapping; skolems outside the mapping are left alone.  Used when a
@@ -728,7 +728,7 @@ substitute_skolems_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping
 % Rank-N: skolemisation, instantiation and subsumption
 % ---------------------------------------------------------------------------
 
-%% instantiate_forall(+ForallType, +Level, +ContextIn, -OpenedType, -ContextOut).
+% instantiate_forall(+ForallType, +Level, +ContextIn, -OpenedType, -ContextOut).
 %
 % Open a polytype by replacing its bound variables with FRESH UNIFICATION
 % variables at `Level` -- used when a polymorphic value is used at a specific
@@ -737,7 +737,7 @@ instantiate_forall(forall_type(BoundIds, Body), Level, ContextIn, OpenedType, Co
   fresh_quantified_mapping(BoundIds, Level, ContextIn, Mapping, ContextOut),
   substitute_quantified_variables(Body, Mapping, OpenedType).
 
-%% instantiate_forall_positional(+ForallType, +Provided, +Level, +ContextIn, -OpenedType, -ContextOut).
+% instantiate_forall_positional(+ForallType, +Provided, +Level, +ContextIn, -OpenedType, -ContextOut).
 %
 % Open a polytype with EXPLICIT type arguments bound positionally to its
 % first bound variables (a `forall_type` keeps its bound ids in source
@@ -746,7 +746,7 @@ instantiate_forall_positional(forall_type(BoundIds, Body), Provided, Level, Cont
   positional_quantified_mapping(BoundIds, Provided, Level, ContextIn, Mapping, ContextOut),
   substitute_quantified_variables(Body, Mapping, OpenedType).
 
-%% skolemize_forall(+BoundIds, +Body, +Level, +ContextIn, -SkolemBody, -ContextOut).
+% skolemize_forall(+BoundIds, +Body, +Level, +ContextIn, -SkolemBody, -ContextOut).
 %
 % Open a polytype by replacing its bound variables with FRESH RIGID SKOLEMS at
 % `Level` -- used when CHECKING that a value really has a polymorphic type.
@@ -760,7 +760,7 @@ fresh_skolem_mapping([Id | Ids], Level, ContextIn, [Id - skolem(SkolemId, Level,
   bound_id_name(ContextIn, Id, Name),
   fresh_skolem_mapping(Ids, Level, Context1, Mapping, ContextOut).
 
-%% subsume(+ActualType, +ExpectedType, +Level, +ContextIn, -ContextOut).
+% subsume(+ActualType, +ExpectedType, +Level, +ContextIn, -ContextOut).
 %
 % The directed "ActualType is at least as polymorphic as ExpectedType" check
 % (PJ et al. JFP'07 `subsCheck`; DK ICFP'13 subtyping).  It is the rank-N
@@ -807,7 +807,7 @@ subsume_arguments([Expected | Expecteds], [Actual | Actuals], Level, ContextIn, 
 % Reporting
 % ---------------------------------------------------------------------------
 
-%% context_substitution(+Context, -Substitution).
+% context_substitution(+Context, -Substitution).
 context_substitution(Context, Substitution) :-
   Context = context(_, Store),
   assoc_to_list(Store, Pairs),

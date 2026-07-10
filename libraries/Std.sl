@@ -5,6 +5,9 @@ public not = (value) !value
 # Passes value as is.
 public identity = (value) value
 
+# Checks if two values are the same.
+public equals = (first second) first == second
+
 # Stops the program and displays a message.
 # Panic is not recoverable and should be used only when genuine
 # error state is encountered which leads to undefined behaviour.
@@ -14,30 +17,6 @@ public external panic: (string): () = '
     throw new Error(message);
   }
 '
-
-# Maps to ECMAScript's "nullish" type - `T | null | undefined`.
-# Provided only for compatibility, use `Optional` instead.
-public type Nullish<A>
-
-public module Nullish = {
-  public external of: <A>(A): Nullish<A> = 'value => value'
-  public external null: <A>(): Nullish<A> = '() => null'
-  public external undefined: <A>(): Nullish<A> = '() => undefined'
-  public external is: <A>(Nullish<A>): boolean = 'self => self == null'
-  public external castOrPanic: <A>(Nullish<A>): A = '
-    self => {
-      if (self == null) {
-        throw new Error("Cannot extract value from Nullish type since there is no value.");
-      } else {
-        return self;
-      }
-    }
-  '
-  public fromOptional = <A>(optional: Optional<A>): Nullish<A>
-    match optional
-    | Some(value) => of(value)
-    | None => undefined()
-}
 
 # Represents possibly missing value.
 public type Optional<A> = Some(A) | None
@@ -74,10 +53,6 @@ public module Optional = {
     | None => default
   public flatten = <A>(self: Optional<Optional<A>>): Optional<A>
     self->flatMap(identity)
-  public fromNullish = <A>(value: Nullish<A>): Optional<A>
-    match value
-    | value if Nullish.is(value) => None
-    | value => Some(Nullish.castOrPanic(value))
   public fromEither = <A B>(either: Either<A B>): Optional<B>
     match either
     | Right(value) => Some(value)
@@ -129,6 +104,7 @@ public module Either = {
     | Left(value) => value
 }
 
+# Potentially infinite data sequence.
 public type List<A>
 
 public module List = {
@@ -204,7 +180,7 @@ public module List = {
     }
   '
   public external indexed: <A>(List<A>): List<(A number)> = '
-    (self) => function*() {
+    self => function*() {
       let index = 0;
       for (const value of self()) {
         yield { 0: value, 1: index };
@@ -212,8 +188,51 @@ public module List = {
       }
     }
   '
+  public external some: <A>((A): boolean List<A>): boolean = '
+    (callback, self) => {
+      for (const value of self()) {
+        if (callback(value)) {
+          return true;
+        }
+      }
+      return false;
+    }
+  '
+  public external find: <A>((A): boolean List<A>): Optional<A> = '
+    (callback, self) => {
+      for (const value of self()) {
+        if (callback(value)) {
+          return $Some(value);
+        }
+      }
+      return $None;
+    }
+  '
+  public external all: <A>((A): boolean List<A>): boolean = '
+    (callback, self) => {
+      for (const value of self()) {
+        if (!callback(value)) {
+          return false;
+        }
+      }
+      return true;
+    }
+  '
+  public external append: <A>(A List<A>): List<A> = '
+    (item, self) => function*() {
+      yield* self();
+      yield item;
+    }
+  '
+  public external prepend: <A>(A List<A>): List<A> = '
+    (item, self) => function*() {
+      yield item;
+      yield* self();
+    }
+  '
 }
 
+# Keyed map of same-type data.
 public type Dictionary<A>
 
 public module Dictionary = {

@@ -92,22 +92,22 @@ lower(node(program, Children), program_node(Items)) :-
   child_nodes(Children, ItemNodes),
   maplist_lower_item(ItemNodes, Items).
 
-%% parse_source(+Chars, -Ast, -Diagnostics): the whole new front-end -- tokenize,
-%% recover-parse, lower -- returning the parser's syntax `Diagnostics` alongside
-%% the AST.  The recovering parser NEVER fails: on malformed input it emits
-%% `error`/`missing` green leaves (which lower to `error_node`) and records a
-%% `diagnostic(Start, End, What)` for each.  A caller that ignores `Diagnostics`
-%% therefore gets an AST that may contain `error_node`s -- inference would then
-%% bare-fail on one -- so the BATCH compiler must inspect `Diagnostics` and
-%% refuse a program with syntax errors (see `compiler.pl`).
+% parse_source(+Chars, -Ast, -Diagnostics): the whole new front-end -- tokenize,
+% recover-parse, lower -- returning the parser's syntax `Diagnostics` alongside
+% the AST.  The recovering parser NEVER fails: on malformed input it emits
+% `error`/`missing` green leaves (which lower to `error_node`) and records a
+% `diagnostic(Start, End, What)` for each.  A caller that ignores `Diagnostics`
+% therefore gets an AST that may contain `error_node`s -- inference would then
+% bare-fail on one -- so the BATCH compiler must inspect `Diagnostics` and
+% refuse a program with syntax errors (see `compiler.pl`).
 parse_source(Chars, Ast, Diagnostics) :-
   tokenize(Chars, Tokens),
   parse_tokens(Tokens, Green, Diagnostics),
   lower(Green, Ast).
 
-%% parse_source(+Chars, -Ast): diagnostics-discarding wrapper for callers that
-%% only want the tree (the LSP macro path, which has already surfaced parse
-%% diagnostics through its own `parse(File)` query).
+% parse_source(+Chars, -Ast): diagnostics-discarding wrapper for callers that
+% only want the tree (the LSP macro path, which has already surfaced parse
+% diagnostics through its own `parse(File)` query).
 parse_source(Chars, Ast) :-
   parse_source(Chars, Ast, _Diagnostics).
 

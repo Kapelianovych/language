@@ -20,7 +20,7 @@
 roundtrip_dir("test/fixtures/golden").
 roundtrip_dir("test/fixtures/roundtrip").
 
-%% roundtrip_results(-Results).
+% roundtrip_results(-Results).
 roundtrip_results(Results) :-
   findall(Dir-Name,
           ( roundtrip_dir(Dir), sl_fixtures(Dir, Names), member(Name, Names) ),
