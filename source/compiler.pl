@@ -47,7 +47,6 @@
   rewrite_constructor_tags/3
 ]).
 :- use_module('transformation/macro', [check_macros/1, expand_macros/2]).
-:- use_module('transformation/module', [expand_modules/2]).
 :- use_module('transformation/macro_program', [process_macros/3]).
 :- use_module('transformation/constructor_pattern', [resolve_bare_constructors/3]).
 
@@ -82,11 +81,13 @@ compile_source(Source, Output, AnalysisResult) :-
     % type-checking and generating the resulting program.
     check_macros(ParsedAst),
     expand_macros(ParsedAst, ExpandedAst),
-    expand_modules(ExpandedAst, FlatAst),
     % Bare nullary constructor names in match patterns become constructor
     % patterns (no imports here, so only this file's own declarations apply).
+    % A nested `module` is NOT erased here -- `analyse/2` and `generate/2`
+    % handle `module_node` directly (see analyser/infer.pl and
+    % generator/javascript.pl).
     empty_assoc(NoImports),
-    resolve_bare_constructors(FlatAst, NoImports, Ast),
+    resolve_bare_constructors(ExpandedAst, NoImports, Ast),
     analyse(Ast, AnalysisResult),
     generate(Ast, Output)
   )).
@@ -100,9 +101,9 @@ compile_source(Source, Output, AnalysisResult) :-
 %
 % Pipeline:
 %
-%     entry.sl --read_module-->   parse, then `expand_modules` erases nested
-%                                  `module`s (so the graph/import scan sees a
-%                                  `use` lifted out of a module body)
+%     entry.sl --read_module-->   parse (a nested `module` is a value, not
+%                                  erased -- the graph/import scan descends
+%                                  into a module body itself to find a `use`)
 %              --build_graph-->   modules in topological order (deps first),
 %                                  import cycles rejected
 %              --per module-->    resolve imports against already-compiled
@@ -311,7 +312,7 @@ use_path(Items, Path) :-
 
 use_path_in_item(use_node(Path, _Names, _Span), Path).
 use_path_in_item(use_all_node(Path, _Span), Path).
-use_path_in_item(module_node(_Name, Body, _Span), Path) :-
+use_path_in_item(module_node(_Name, _Parameters, _Opacity, _Ascription, Body, _Span), Path) :-
   use_path(Body, Path).
 use_path_in_item(public_node(Inner, _Span), Path) :-
   use_path_in_item(Inner, Path).

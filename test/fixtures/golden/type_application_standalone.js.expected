@@ -1,0 +1,4 @@
+export const $Box = (() => { const $wrap = (($x) => $x); return {"wrap": $wrap}; })();
+export const $specialized = $Box;
+export const $direct = (($Box)["wrap"])(5);
+export const $result = (($specialized)["wrap"])(5);

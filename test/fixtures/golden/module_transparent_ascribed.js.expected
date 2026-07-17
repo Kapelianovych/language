@@ -1,0 +1,2 @@
+export const $MathOps = (() => { const $add = (($a) => ($b) => ($a + $b)); const $double = (($x) => ($x * 2)); return {"add": $add, "double": $double}; })();
+export const $main = (($MathOps)["add"])(2)(3);

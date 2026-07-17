@@ -1,0 +1,3 @@
+const $Box = (() => { const $wrap = (($x) => $x); const $unwrap = (($x) => $x); return {"wrap": $wrap, "unwrap": $unwrap}; })();
+export const $r1 = (($Box)["wrap"])(5);
+export const $r2 = (($Box)["unwrap"])(true);

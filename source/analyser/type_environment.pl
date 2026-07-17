@@ -6,7 +6,9 @@
   bind_type_parameters_rigid/8,
   declared_function_scheme/6,
   instantiate_constructor/7,
-  union_constructor_names/3
+  union_constructor_names/3,
+  interface_row_for/7,
+  seed_externals/7
 ]).
 
 /*  type_environment.pl  --  Declared types, type parameters, and conversion
@@ -43,8 +45,11 @@
   fresh_unification_variable/4,
   fresh_bound_id/3,
   fresh_named_bound_id/4,
-  unify/4
+  unify/4,
+  subsume/5,
+  generalize/5
 ]).
+:- use_module('../unicode', [xid_start/1, xid_continue/1]).
 
 % ---------------------------------------------------------------------------
 % Building the environment
@@ -88,6 +93,14 @@ register_declarations([type_declaration_node(Name, Parameters, _Opacity, variant
   put_assoc(Name, EnvironmentIn, type_variant_info(Parameters, Constructors), Environment1),
   register_constructors(Constructors, Name, Parameters, Environment1, Environment2),
   register_declarations(Rest, Environment2, EnvironmentOut).
+% An interface (module-type) declaration: registered distinctly from a plain
+% alias so `convert_named/10` can give it its own opaque(nominal)/transparent
+% (structural row) semantics.
+register_declarations([type_declaration_node(Name, Parameters, Opacity, interface_body(Members), _) | Rest],
+                      EnvironmentIn, EnvironmentOut) :- !,
+  register_type_name(Name, Parameters, EnvironmentIn),
+  put_assoc(Name, EnvironmentIn, type_interface_info(Opacity, Parameters, Members), Environment1),
+  register_declarations(Rest, Environment1, EnvironmentOut).
 register_declarations([type_declaration_node(Name, Parameters, Opacity, Body, _) | Rest],
                       EnvironmentIn, EnvironmentOut) :-
   register_type_name(Name, Parameters, EnvironmentIn),
@@ -132,6 +145,12 @@ validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, no_bod
   empty_context(Context0),
   bind_validation_parameters(Parameters, TypeEnvironment, Context0, _ValidationEnvironment, _Context1),
   validate_declarations(Rest, TypeEnvironment).
+% An interface's members are each validated as an ordinary proper type.
+validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, interface_body(Members), _) | Rest], TypeEnvironment) :- !,
+  empty_context(Context0),
+  bind_validation_parameters(Parameters, TypeEnvironment, Context0, ValidationEnvironment, Context1),
+  validate_interface_members(Members, ValidationEnvironment, Context1),
+  validate_declarations(Rest, TypeEnvironment).
 validate_declarations([type_declaration_node(Name, Parameters, _Opacity, Body, _) | Rest], TypeEnvironment) :-
   empty_context(Context0),
   bind_validation_parameters(Parameters, TypeEnvironment, Context0, ValidationEnvironment, Context1),
@@ -145,6 +164,11 @@ validate_constructor_fields([], _Environment, _Context).
 validate_constructor_fields([constructor(_Name, FieldTypes, _) | Rest], Environment, ContextIn) :-
   convert_field_types(FieldTypes, Environment, 0, ContextIn, _ConvertedFields, Context1),
   validate_constructor_fields(Rest, Environment, Context1).
+
+validate_interface_members([], _Environment, _Context).
+validate_interface_members([interface_member(_Name, TypeExpression, _) | Rest], Environment, ContextIn) :-
+  convert_proper(TypeExpression, Environment, [], 0, ContextIn, _Type, Context1),
+  validate_interface_members(Rest, Environment, Context1).
 
 % Convert a constructor's positional field type expressions (each proper).
 convert_field_types([], _Environment, _Level, Context, [], Context).
@@ -380,6 +404,55 @@ convert_type(type_name_node(Name, Arguments, _), Environment, Expanding, Level, 
       throw(analysis_error(constructor_used_as_type(Name)))
   ; throw(analysis_error(undeclared_type(Name)))
   ).
+% An INTERSECTION `B + C (+ ...)` -- always kind 0 (a proper type; an
+% intersection is never itself higher-kinded/appliable, unlike a type alias
+% whose body might be a section).  Each member is first checked to actually
+% BE an interface -- a membership contract -- via `require_interface_shaped/2`
+% below, THEN converted the ordinary way via `convert_proper/6`.  The check
+% has to happen on the SURFACE (un-converted) member: once converted, both a
+% plain tagged union (e.g. `Optional`) and an opaque interface look
+% IDENTICAL as a monotype (`type_constructor(Name, Args)`), so there is no
+% way to later tell "this came from `type X = {...}`" apart from "this came
+% from `type X = A(..) | B`" by inspecting the MonoType alone -- the
+% provenance only exists in the `TypeEnvironment` entry BEFORE conversion,
+% which is exactly what `require_interface_shaped/2` consults.
+convert_type(intersection_type_node(Members, _), Environment, Expanding, Level, ContextIn,
+             intersection_type(MonoTypes), 0, ContextOut) :- !,
+  convert_intersection_members(Members, Environment, Expanding, Level, ContextIn, MonoTypes, ContextOut).
+
+convert_intersection_members([], _Environment, _Expanding, _Level, Context, [], Context).
+convert_intersection_members([Member | Rest], Environment, Expanding, Level, ContextIn,
+                             [MonoType | MonoTypes], ContextOut) :-
+  require_interface_shaped(Member, Environment),
+  convert_proper(Member, Environment, Expanding, Level, ContextIn, MonoType, Context1),
+  convert_intersection_members(Rest, Environment, Expanding, Level, Context1, MonoTypes, ContextOut).
+
+% A member of an intersection must itself be a "membership contract", not an
+% arbitrary data type -- `number + string` is meaningless (what value could
+% possibly be simultaneously a number AND a string?), so it is rejected here
+% rather than producing some nonsensical monotype downstream that would only
+% surface as a confusing error much later (or, worse, silently corrupt
+% unification -- see the `types.pl` warning about every monotype-shape
+% predicate needing an explicit branch).  Two forms qualify:
+%   * a literal/anonymous record type expression (`(x: number)`) -- this is
+%     ALREADY a structural membership contract on its own, no name needed;
+%   * a NAMED reference whose OWN declaration is specifically a
+%     `type_interface_info` (a `type X = {...}` declaration, checked
+%     directly against the TypeEnvironment entry, NOT against what it
+%     converts to -- see the comment above `convert_type`'s new clause).
+% Everything else -- a tagged union, an ordinary alias, an abstract FFI type,
+% a bare type parameter, a builtin (`number`/`string`/`boolean`, which are
+% never even IN the TypeEnvironment -- see `builtin_type/2` -- so the
+% `get_assoc` lookup below simply fails to find them, falling through to the
+% same rejection), a function type, or a quantified type -- is rejected by
+% the final catch-all clause.
+require_interface_shaped(type_name_node(Name, _Arguments, _), Environment) :- !,
+  ( get_assoc(Name, Environment, type_interface_info(_, _, _)) -> true
+  ; throw(analysis_error(not_an_interface(Name)))
+  ).
+require_interface_shaped(tuple_type_node(_, _, _), _Environment) :- !.
+require_interface_shaped(Member, _Environment) :-
+  throw(analysis_error(not_an_interface_expression(Member))).
 
 % The tail of a record annotation.  A closed record has tail `closed`.  An
 % anonymous open record `(.. ..)` gets a fresh row variable.  A captured open
@@ -443,6 +516,27 @@ convert_named(type_declaration_info(transparent, Parameters, Body), Name, Argume
       bind_alias_parameters(Parameters, ParameterMonos, Environment, BodyEnvironment),
       convert_type(Body, BodyEnvironment, [Name | Expanding], Level, Context2, BodyMono, BodyKind, Context3),
       apply_alias_extra(ExtraArguments, BodyMono, BodyKind, Environment, Expanding, Level, Context3, MonoType, Kind, ContextOut)
+  ; throw(analysis_error(type_constructor_arity_mismatch(Name, ParameterArity, Given)))
+  ).
+
+% An interface (module type) is NOMINAL when `opaque` (a module must
+% explicitly ascribe to satisfy it, exactly like an opaque alias) or a
+% STRUCTURAL row when transparent (the default): expanded to a closed
+% `tuple_type` of its members at the use site, so any value -- a module or an
+% ordinary record -- with a compatible shape satisfies it.
+convert_named(type_interface_info(opaque, Parameters, _Members), Name, Arguments, Environment,
+              Expanding, Level, ContextIn, MonoType, Kind, ContextOut) :- !,
+  nominal_reference(Name, Parameters, Arguments, Environment, Expanding, Level, ContextIn, MonoType, Kind, ContextOut).
+convert_named(type_interface_info(transparent, Parameters, Members), Name, Arguments, Environment,
+              Expanding, Level, ContextIn, tuple_type(Fields, closed), 0, ContextOut) :-
+  parameter_arity(Parameters, ParameterArity),
+  length(Arguments, Given),
+  ( Given =:= ParameterArity ->
+      parameter_kinds(Parameters, ParameterKinds),
+      convert_arguments(Arguments, ParameterKinds, Environment, Expanding, Level, ContextIn, ArgumentMonos, Context1),
+      enforce_bounds(Parameters, ArgumentMonos, Environment, Level, Context1, Context2),
+      bind_alias_parameters(Parameters, ArgumentMonos, Environment, MemberEnvironment),
+      convert_interface_members(Members, MemberEnvironment, [Name | Expanding], Level, Context2, Fields, ContextOut)
   ; throw(analysis_error(type_constructor_arity_mismatch(Name, ParameterArity, Given)))
   ).
 
@@ -578,6 +672,24 @@ parameter_arity(Parameters, Arity) :-
   length(Parameters, Arity).
 
 % Bounds (only on proper-kind parameters) are proper types.
+%
+% A bound is a SATISFACTION constraint, not an equality constraint: the
+% argument must merely be AT LEAST as capable as the bound, so `subsume/5`
+% (not `unify/4`) is the right check -- the same "actual is at least as
+% polymorphic/capable as expected" primitive used for Rank-N generics and for
+% module-ascription conformance.  This is a deliberate upgrade from this
+% predicate's old behaviour (it used to call `unify/4`, requiring the
+% argument to be EXACTLY the bound, which would have made a multi-bound
+% `<A: B + C>` nearly useless -- it would force the caller to pass literally
+% an `intersection_type([B, C])`, rather than accepting any type that merely
+% has both B's and C's capabilities).  `subsume`'s own dispatch already knows
+% how to check "Argument satisfies an intersection bound" via its
+% EXPECTED-is-intersection rule in types.pl (require every member
+% satisfied), so `<A: B + C>` needs no special handling AT ALL here --
+% `BoundType` converts to `intersection_type([...])` like any other type
+% expression (see `type_environment.pl`'s `convert_type` clause for
+% `intersection_type_node`), and this predicate calls `subsume` on it exactly
+% the same as a single, ordinary bound.
 enforce_bounds([], [], _Environment, _Level, Context, Context).
 enforce_bounds([type_parameter(_, _Kind, no_bound, _) | Parameters], [_Argument | Arguments], Environment,
                Level, ContextIn, ContextOut) :-
@@ -585,7 +697,7 @@ enforce_bounds([type_parameter(_, _Kind, no_bound, _) | Parameters], [_Argument 
 enforce_bounds([type_parameter(_, _Kind, bound(BoundExpression), _) | Parameters], [Argument | Arguments],
                Environment, Level, ContextIn, ContextOut) :-
   convert_proper(BoundExpression, Environment, [], Level, ContextIn, BoundType, Context1),
-  unify(Argument, BoundType, Context1, Context2),
+  subsume(Argument, BoundType, Level, Context1, Context2),
   enforce_bounds(Parameters, Arguments, Environment, Level, Context2, ContextOut).
 
 bind_alias_parameters([], [], Environment, Environment).
@@ -607,6 +719,85 @@ convert_members([tuple_type_member(Mutability, Label, TypeExpression, _) | Membe
 type_member_key(positional, Index, index(Index), NextIndex) :-
   NextIndex is Index + 1.
 type_member_key(labeled(Name), Index, label(Name), Index).
+
+% An interface's members become a closed row of readonly, labeled fields --
+% every member is named, so there is no positional form to key by index.
+convert_interface_members([], _Environment, _Expanding, _Level, Context, [], Context).
+convert_interface_members([interface_member(Name, TypeExpression, _) | Members], Environment, Expanding, Level,
+                          ContextIn, [tuple_field(readonly, label(Name), Type) | Fields], ContextOut) :-
+  convert_proper(TypeExpression, Environment, Expanding, Level, ContextIn, Type, Context1),
+  convert_interface_members(Members, Environment, Expanding, Level, Context1, Fields, ContextOut).
+
+% interface_row_for(+Name, +Arguments, +Environment, +Level, +ContextIn, -Fields, -ContextOut).
+%
+% Resolve a KNOWN interface name to its member row given ALREADY-CONVERTED
+% monotype arguments (e.g. from a resolved `type_constructor(Name, Arguments)`).
+% Used for nominal field access and module-ascription conformance checking,
+% both of which must see an interface's actual shape regardless of its own
+% opacity (opacity governs whether OTHER differently-named values may
+% substitute for it, not whether its own values support member access).
+interface_row_for(Name, Arguments, Environment, Level, ContextIn, Fields, ContextOut) :-
+  ( get_assoc(Name, Environment, type_interface_info(_Opacity, Parameters, Members)) ->
+      bind_alias_parameters(Parameters, Arguments, Environment, MemberEnvironment),
+      convert_interface_members(Members, MemberEnvironment, [Name], Level, ContextIn, Fields, ContextOut)
+  ; throw(analysis_error(unknown_member_target(Name)))
+  ).
+
+% ---------------------------------------------------------------------------
+% Seeding `external` declarations (shared by the top-level pipeline and a
+% nested module body's own inner scope -- see infer.pl's module_node case).
+% ---------------------------------------------------------------------------
+
+% seed_externals(+Items, +TypeEnvironment, +Level, +EnvironmentIn, +ContextIn, -EnvironmentOut, -ContextOut).
+%
+% Bind every `external Name: Type = ...` (foreign JS import) among `Items`
+% into the environment.  The ascribed `Type` is converted to a monotype and
+% generalised into a scheme exactly as a top-level annotation would be --
+% there is no value to check it against, so the type is simply trusted (this
+% is the one unsafe point of the JS boundary).  Binding them up front (before
+% inference walks the items) makes every external visible throughout its
+% scope, like a constant.  Non-`external` items are left for the inference
+% walk.
+seed_externals([], _TypeEnvironment, _Level, Environment, Context, Environment, Context).
+seed_externals([external_node(Name, TypeExpression, Source, _) | Rest], TypeEnvironment, Level,
+               EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :- !,
+  validate_external_source(Source),
+  Level1 is Level + 1,
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level1, ContextIn, MonoType, Context1),
+  generalize(MonoType, Level, Context1, Scheme, Context2),
+  put_assoc(Name, EnvironmentIn, defined(Scheme), Environment1),
+  seed_externals(Rest, TypeEnvironment, Level, Environment1, Context2, EnvironmentOut, ContextOut).
+seed_externals([_Other | Rest], TypeEnvironment, Level, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
+  seed_externals(Rest, TypeEnvironment, Level, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut).
+
+% A renamed module import (`= 'foreign' from 'module'`) names a JS export that
+% codegen splices, unescaped, into `import { Foreign } from ...` -- so it must
+% be a valid JS identifier or it would break (or inject into) the emitted
+% import.  The other source forms put no name in identifier position: a
+% `js_global` / same-name `default` import reuses the (already-valid) declared
+% name, and a `js_expression` is trusted verbatim.
+validate_external_source(js_module(_Module, named(Foreign))) :- !,
+  ( js_identifier(Foreign) -> true
+  ; throw(analysis_error(invalid_external_name(Foreign)))
+  ).
+validate_external_source(_Source).
+
+% A JS IdentifierName, on the language's own Unicode identifier basis (UAX #31
+% XID_Start / XID_Continue, via `unicode`) plus the two characters JS allows
+% that XID does not: `$` (in neither set) and a leading `_` (XID_Continue but
+% not XID_Start).  So foreign names are exactly as permissive as the language's
+% own identifiers.
+js_identifier([First | Rest]) :-
+  js_identifier_start(First),
+  maplist(js_identifier_continue, Rest).
+
+js_identifier_start(Char) :-
+  char_code(Char, Code),
+  ( Code =:= 0'_ ; Code =:= 0'$ ; xid_start(Code) ).
+
+js_identifier_continue(Char) :-
+  char_code(Char, Code),
+  ( Code =:= 0'$ ; xid_continue(Code) ).   % `_` is already in XID_Continue
 
 require_no_arguments(_, []) :- !.
 require_no_arguments(Name, _) :-

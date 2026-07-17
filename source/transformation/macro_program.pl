@@ -44,7 +44,6 @@
   expand_program_with_table/3
 ]).
 :- use_module('../namespace_import', [namespace_of/2]).
-:- use_module('module', [expand_modules/2]).
 
 % ---------------------------------------------------------------------------
 % Whole-program reader-macro processing
@@ -172,12 +171,12 @@ extend_prefix(Prefix, Name, Canonical) :-
   canonical_chars(Raw, Canonical).
 
 % A (possibly `public`) nested module's name and body.
-module_node_item(module_node(Name, Body, _Span), Name, Body).
-module_node_item(public_node(module_node(Name, Body, _Span), _), Name, Body).
+module_node_item(module_node(Name, _Parameters, _Opacity, _Ascription, Body, _Span), Name, Body).
+module_node_item(public_node(module_node(Name, _Parameters, _Opacity, _Ascription, Body, _Span), _), Name, Body).
 
 % The body of a (possibly `public`) nested module (name not needed).
-module_body(module_node(_Name, Body, _Span), Body).
-module_body(public_node(module_node(_Name, Body, _Span), _), Body).
+module_body(module_node(_Name, _Parameters, _Opacity, _Ascription, Body, _Span), Body).
+module_body(public_node(module_node(_Name, _Parameters, _Opacity, _Ascription, Body, _Span), _), Body).
 
 % --- keyed definitions, with scope-aware bodies ----------------------------
 % Walk the module tree.  At each scope a macro BODY may reference, by bare name,
@@ -285,12 +284,12 @@ expand_with_macros([Module | Rest], AstsIn, Resolutions, PublicMacros, Table, As
   get_assoc(Module, Resolutions, Resolution),
   module_directory(Module, Directory),
   % `@name` uses -> keys; drop macro definitions, the Compiler import, and macro
-  % names from `use` lists; interpret invocations; then erase nested modules.
+  % names from `use` lists; interpret invocations.  A nested `module` is NOT
+  % erased -- it is a value, handled directly by `analyse_module`/`generate`.
   resolve_uses(ParsedAst, Resolution, program_node(ResolvedItems)),
   strip_macro_items(ResolvedItems, Directory, PublicMacros, Kept),
   expand_program_with_table(program_node(Kept), Table, MacroExpandedAst),
-  expand_modules(MacroExpandedAst, ModuleExpandedAst),
-  put_assoc(Module, AstsIn, ModuleExpandedAst, Asts1),
+  put_assoc(Module, AstsIn, MacroExpandedAst, Asts1),
   expand_with_macros(Rest, Asts1, Resolutions, PublicMacros, Table, AstsOut).
 
 strip_macro_items([], _Directory, _PublicMacros, []).
@@ -317,10 +316,11 @@ strip_macro_items([Item | Rest], Directory, PublicMacros, Kept) :-
 
 % Rebuild a (possibly `public`) nested module with macro definitions stripped
 % from its body, so the module expander never sees a macro node.
-strip_nested_module(module_node(Name, Body, Span), Directory, PublicMacros, module_node(Name, Body1, Span)) :-
+strip_nested_module(module_node(Name, Parameters, Opacity, Ascription, Body, Span), Directory, PublicMacros,
+                    module_node(Name, Parameters, Opacity, Ascription, Body1, Span)) :-
   strip_macro_items(Body, Directory, PublicMacros, Body1).
-strip_nested_module(public_node(module_node(Name, Body, Span), PSpan), Directory, PublicMacros,
-                    public_node(module_node(Name, Body1, Span), PSpan)) :-
+strip_nested_module(public_node(module_node(Name, Parameters, Opacity, Ascription, Body, Span), PSpan), Directory, PublicMacros,
+                    public_node(module_node(Name, Parameters, Opacity, Ascription, Body1, Span), PSpan)) :-
   strip_macro_items(Body, Directory, PublicMacros, Body1).
 
 exclude_public_macros([], _Publics, []).

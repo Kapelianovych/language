@@ -27,6 +27,10 @@
     access_node(T, Acc)     bracket indexing       ($t)["bar"] / ($t)[0]
     assignment_node(A, V)   assignment expression  (($t)["bar"] = <V>)
     block_node(Es)          IIFE returning last    (() => { ...; return e })()
+    module_node(N,_,_,_,Is) IIFE returning a record of its PUBLIC members --
+                            const $N = (() => { ...; return {"m": $m}; })();
+                            a private member is an ordinary local `const`,
+                            simply absent from the returned object.
     definition_node(I,Ann,V) const binding         const $i = <V>;
     conditional_node(C,T,E) ternary                (c ? t : e)
     unary_node(Op, E)       (-E) / (!E) / (~E)
@@ -103,6 +107,16 @@ statements([public_node(definition_node(Identifier, Annotation, Value, DSpan), _
 % A `public external` becomes an exported foreign binding.
 statements([public_node(external_node(Name, Type, Source, _), _) | Expressions]) -->
   exported_external_definition(Name, Type, Source),
+  statements(Expressions).
+% A MODULE is a genuine record value: see `module_expression//1`.  Its type
+% parameters (if any) are compile-time-only, exactly like `Opacity`/
+% `Ascription` -- erased here just like a `type_declaration_node`'s own
+% parameters produce no JS.
+statements([module_node(Name, _Parameters, _Opacity, _Ascription, Items, _) | Expressions]) -->
+  "const ", module_const_binding(Name, Items), ";\n",
+  statements(Expressions).
+statements([public_node(module_node(Name, _Parameters, _Opacity, _Ascription, Items, _), _) | Expressions]) -->
+  "export const ", module_const_binding(Name, Items), ";\n",
   statements(Expressions).
 statements([Expression | Expressions]) -->
   statement(Expression),
@@ -244,6 +258,76 @@ expression(binary_node(Operator, Left, Right, _)) -->
 % checker, which gives such a definition the type of its value.
 expression(definition_node(_Target, _Annotation, Value, _)) -->
   expression(Value).
+
+% ---------------------------------------------------------------------------
+% Modules: a module body compiles like a block -- an IIFE -- but instead of
+% returning its last expression, it returns an object literal of its PUBLIC
+% members only.  A private member is an ordinary local `const` inside the
+% IIFE, simply omitted from the returned object: inaccessible from outside
+% both statically (the type checker never puts it in the module's row) and
+% at runtime (no such key exists on the emitted object).  `Name.member`
+% access needs no special handling at all -- it is ordinary `access_node`
+% bracket indexing on the module's value, ((`Name`)["member"]).
+% ---------------------------------------------------------------------------
+
+module_const_binding(Name, Items) -->
+  identifier(Name), " = ", module_expression(Items).
+
+module_expression(Items) -->
+  { module_public_names(Items, PublicNames) },
+  "(() => { ", module_item_statements(Items), "return {", module_record_fields(PublicNames), "}; })()".
+
+module_item_statements([]) --> [].
+module_item_statements([Item | Items]) -->
+  module_item_statement(Item), " ",
+  module_item_statements(Items).
+
+% One item inside a module body -- the same forms a top-level `statements//1`
+% handles, minus ES `export` (nothing inside an IIFE can use it; a member's
+% exposure is decided solely by whether it appears in the record returned at
+% the end, computed separately by `module_public_names/2`).  Anything else
+% (a bare definition, destructuring, or expression statement, and a `public`
+% definition once unwrapped) falls through to the ordinary `statement//1`
+% dispatch used at the top level.
+module_item_statement(external_node(Name, Type, Source, _)) -->
+  external_definition(Name, Type, Source).
+module_item_statement(public_node(external_node(Name, Type, Source, _), _)) -->
+  external_definition(Name, Type, Source).
+module_item_statement(module_node(Name, _Parameters, _Opacity, _Ascription, Items, _)) -->
+  "const ", module_const_binding(Name, Items), ";".
+module_item_statement(public_node(module_node(Name, _Parameters, _Opacity, _Ascription, Items, _), _)) -->
+  "const ", module_const_binding(Name, Items), ";".
+module_item_statement(public_node(definition_node(Identifier, Annotation, Value, Span), _)) -->
+  statement(definition_node(Identifier, Annotation, Value, Span)).
+module_item_statement(Item) -->
+  { Item \= external_node(_, _, _, _),
+    Item \= public_node(external_node(_, _, _, _), _),
+    Item \= module_node(_, _, _, _, _, _),
+    Item \= public_node(module_node(_, _, _, _, _, _), _),
+    Item \= public_node(definition_node(_, _, _, _), _) },
+  statement(Item).
+
+% The names to expose in a module's returned record: every item wrapped in
+% `public` (a definition, an external, or a nested module) contributes its
+% own name; anything else is private and simply absent from the record.
+module_public_names([], []).
+module_public_names([public_node(definition_node(identifier_node(Name, _), _, _, _), _) | Items], [Name | Names]) :- !,
+  module_public_names(Items, Names).
+module_public_names([public_node(external_node(Name, _, _, _), _) | Items], [Name | Names]) :- !,
+  module_public_names(Items, Names).
+module_public_names([public_node(module_node(Name, _, _, _, _, _), _) | Items], [Name | Names]) :- !,
+  module_public_names(Items, Names).
+module_public_names([_ | Items], Names) :-
+  module_public_names(Items, Names).
+
+% `"name": $name, ...` -- each public member is a labeled field referencing
+% its own local binding (built by `module_item_statements`).
+module_record_fields([]) --> [].
+module_record_fields([Name]) -->
+  "\"", chars(Name), "\": ", identifier(Name).
+module_record_fields([Name, Next | Names]) -->
+  "\"", chars(Name), "\": ", identifier(Name), ", ",
+  module_record_fields([Next | Names]).
 
 % ---------------------------------------------------------------------------
 % Helpers
@@ -421,12 +505,17 @@ escaped_char(Char) -->
 % JavaScript reserved word or global (`if`, `var`, `function`, ...).  The
 % prefix is applied uniformly to definitions and references, so they match.
 %
-% A QUALIFIED name from a nested module (`Math.add`, produced by
-% `transformation/module.pl`) carries `.` separators, which are not legal in a JS
-% identifier; each is translated to a further `$` (`$Math$add`).  Source
-% identifiers are XID and so contain neither `.` nor `$`, which keeps both the
-% prefix and the translated separators collision-free, and leaves ordinary
-% (dot-free) names emitted exactly as before.
+% A QUALIFIED name from a cross-file whole-namespace import (`Math.add`,
+% produced by `namespace_import.pl` for a FLAT export that is not itself a
+% module value -- see its own docs) carries `.` separators, which are not
+% legal in a JS identifier; each is translated to a further `$`
+% (`$Math$add`).  A nested `module`'s own members need no such qualification
+% at all: they are ordinary lexically-scoped local bindings inside the
+% module's IIFE (see `module_expression//1`), so `.` here only ever comes
+% from the cross-file case.  Source identifiers are XID and so contain
+% neither `.` nor `$`, which keeps both the prefix and the translated
+% separators collision-free, and leaves ordinary (dot-free) names emitted
+% exactly as before.
 identifier(Name) -->
   "$", dollar_separated(Name).
 

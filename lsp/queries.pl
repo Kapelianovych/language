@@ -350,7 +350,7 @@ use_dependency_path(Items, Path) :-
   use_dependency_path_in_item(Item, Path).
 use_dependency_path_in_item(use_node(Path, _Names, _Span), Path).
 use_dependency_path_in_item(use_all_node(Path, _Span), Path).
-use_dependency_path_in_item(module_node(_Name, Body, _Span), Path) :-
+use_dependency_path_in_item(module_node(_Name, _Parameters, _Opacity, _Ascription, Body, _Span), Path) :-
   use_dependency_path(Body, Path).
 use_dependency_path_in_item(public_node(Inner, _Span), Path) :-
   use_dependency_path_in_item(Inner, Path).

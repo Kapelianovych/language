@@ -53,7 +53,9 @@ prelude_check(result('bare constructor pattern with no import', Status)) :-
 prelude_check(result('unqualified companion-module access (Optional.isSome)', Status)) :-
   compile_with_prelude("qualified.sl", Outcome),
   ( Outcome = compiled(Modules) ->
-      ( entry_js_contains(Modules, "qualified.sl", "($Optional$isSome)(") -> Status = pass
+      % `Optional` now crosses the file boundary as one record value, so
+      % `Optional.isSome` is ordinary field access, not a flattened name.
+      ( entry_js_contains(Modules, "qualified.sl", "(($Optional)[\"isSome\"])(") -> Status = pass
       ; Status = fail(no_call_to_optional_isSome) )
   ; Status = fail(Outcome) ).
 

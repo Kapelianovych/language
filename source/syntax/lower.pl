@@ -119,8 +119,20 @@ lower_item(node(public, Ch), public_node(Inner, Span)) :- !,
   child_nodes(Ch, [InnerNode]), lower_item(InnerNode, Inner), gspan(node(public, Ch), Span).
 lower_item(node(external, Ch), Node)         :- !, lower_external(node(external, Ch), Node).
 lower_item(node(type_declaration, Ch), Node) :- !, lower_type_declaration(node(type_declaration, Ch), Node).
-lower_item(node(module, Ch), module_node(Name, Items, Span)) :- !,
-  item_name(Ch, Name),
+lower_item(node(module, Ch), module_node(Name, Parameters, Opacity, Ascription, Items, Span)) :- !,
+  module_declared_name(Ch, Name),
+  % Reuses `lower_type_params/2` verbatim -- the exact same helper
+  % `type_declaration`'s own `<T>` list lowers through -- since the green
+  % shape (`node(type_params, ...)`) is identical either way; only the
+  % surrounding declaration differs.
+  ( member(node(type_params, PCh), Ch) -> lower_type_params(node(type_params, PCh), Parameters)
+  ; Parameters = [] ),
+  ( member(node(opaque, _), Ch) -> Opacity = opaque ; Opacity = transparent ),
+  ( member(node(ascription, AscCh), Ch) ->
+      child_nodes(AscCh, [TypeRefGreen]),
+      lower_type(TypeRefGreen, TypeRefAst),
+      Ascription = some(TypeRefAst)
+  ; Ascription = none ),
   module_body_nodes(Ch, BodyNodes),
   maplist_lower_item(BodyNodes, Items),
   gspan(node(module, Ch), Span).
@@ -133,9 +145,29 @@ lower_item(node(macro_definition, Ch), macro_definition_node(Name, Params, Body,
 lower_item(node(definition, Ch), Node) :- !, lower_definition(node(definition, Ch), Node).
 lower_item(Green, Node) :- lower_expr(Green, Node).      % a bare-expression item
 
-% A module body's item nodes are every sub-node after the module name; the name
-% identifier is a leaf, so child_nodes already gives exactly the body items.
-module_body_nodes(Ch, BodyNodes) :- child_nodes(Ch, BodyNodes).
+% Like item_name/2, but robust to an optional leading `opaque` before
+% `module`: the declared name is the identifier immediately after the
+% `module` keyword itself, not simply "the second identifier" (which
+% `opaque module Name = ...` would get wrong).
+module_declared_name(Ch, Name) :-
+  findall(N, member(t(ident, N, _, _), Ch), Idents),
+  append(_, ["module", Name | _], Idents).
+
+% A module body's item nodes are every sub-node after the module name, minus
+% the `opaque` / `type_params` / `ascription` meta-nodes (the name
+% identifier is a leaf, so child_nodes already excludes it).  Without
+% excluding `type_params` here, the module's OWN `<T>` declaration would be
+% mistaken for a body ITEM and handed to `lower_item/2`, which has no clause
+% for it -- exactly the same class of bug the `is_type_node/1` whitelist
+% fix (elsewhere in this file) was for: a new green-node kind has to be
+% taught to EVERY place that enumerates "the kinds I already know about",
+% not just the one place it was introduced for.
+module_body_nodes(Ch, BodyNodes) :-
+  child_nodes(Ch, Nodes),
+  my_exclude(module_meta_node, Nodes, BodyNodes).
+module_meta_node(node(opaque, _)).
+module_meta_node(node(type_params, _)).
+module_meta_node(node(ascription, _)).
 
 % ---------------------------------------------------------------------------
 % Definitions:  LHS = RHS  ->  definition / assignment / destructuring.
@@ -246,6 +278,17 @@ lower_expr(node(call, Ch), function_call_node(Target, Args, Span)) :- !,
       Target = type_application_node(Target0, TypeArguments, Span)
   ; ArgGreens = Rest, Target = Target0 ),
   maplist_lower_expr(ArgGreens, Args).
+% A STANDALONE type application (`Stack<number>`, not immediately called) --
+% see parser.pl's `postfix_chain` for how this is told apart from the call
+% form above.  Unlike the call form (which reuses the whole call's span for
+% its wrapped `type_application_node`, since historically there was only
+% ever the callee+args to span), this one gets its OWN accurately-scoped
+% span (just the target plus its type arguments), since here the
+% `type_application_node` IS the whole expression, not a sub-part of a call.
+lower_expr(node(type_apply, [TargetGreen, node(type_args, ACh)]), type_application_node(Target, TypeArguments, Span)) :- !,
+  lower_expr(TargetGreen, Target),
+  lower_type_arguments(ACh, TypeArguments),
+  gspan(node(type_apply, [TargetGreen, node(type_args, ACh)]), Span).
 lower_expr(node(group, Ch), Node) :- !, lower_group(node(group, Ch), Node).
 lower_expr(node(block, Ch), block_node(Exprs, Span)) :- !,
   child_nodes(Ch, ExprGreens),
@@ -341,6 +384,7 @@ is_type_node(node(type_name, _)).
 is_type_node(node(type_tuple, _)).
 is_type_node(node(function_type, _)).
 is_type_node(node(quantified_type, _)).
+is_type_node(node(intersection_type, _)).
 exclude_type_node(Nodes, Kept) :- my_exclude(is_type_node, Nodes, Kept).
 
 % A group in LHS position is a destructuring record pattern.
@@ -553,6 +597,14 @@ lower_type_declaration(node(type_declaration, Ch), type_declaration_node(Name, P
       ( member(node(opaque, _), Ch) -> Opacity = opaque ; Opacity = transparent ),
       findall(Ctor, ( member(node(variant, VCh), Ch), lower_constructor(VCh, Ctor) ), Ctors),
       Body = variant_body(Ctors)
+  ; member(node(interface, ICh), Ch) ->
+      % An interface (module-type) body.  `opaque` makes it NOMINAL (a module
+      % must explicitly ascribe to satisfy it); transparent (the default)
+      % makes it a STRUCTURAL row, matched by shape -- same opaque/transparent
+      % axis as any other type declaration.
+      ( member(node(opaque, _), Ch) -> Opacity = opaque ; Opacity = transparent ),
+      lower_interface_members(ICh, Members),
+      Body = interface_body(Members)
   ; body_type_node(Ch, TypeGreen) ->
       % An alias body.  (`opaque` before an alias is RETIRED and diagnosed by
       % the parser, but a mid-edit tree still lowers -- as nominal, its old
@@ -577,6 +629,16 @@ lower_constructor(VCh, constructor(Name, ArgTypes, Span)) :-
   child_nodes(VCh, ArgGreens),
   maplist_lower_type(ArgGreens, ArgTypes),
   variant_span(VCh, Span).
+
+% Interface (module-type) members: each is `Name : Type`, in declaration order.
+lower_interface_members(ICh, Members) :-
+  findall(M, ( member(node(interface_member, MCh), ICh), lower_interface_member(MCh, M) ), Members).
+
+lower_interface_member(MCh, interface_member(Name, Type, Span)) :-
+  child_token(MCh, ident, t(ident, Name, _, _)),
+  child_nodes(MCh, [TypeGreen]),
+  lower_type(TypeGreen, Type),
+  gspan(node(interface_member, MCh), Span).
 variant_span(VCh, span(S, E)) :-
   leaves(node(x, VCh), Ls), my_exclude(trivia_leaf, Ls, Sig),
   Sig = [t(_, _, _, _) | _],
@@ -612,6 +674,18 @@ lower_type(node(function_type, Ch), function_type_node(ParamTypes, ReturnType, S
   ; lower_type(ParamG, PT), ParamTypes = [PT] ),
   lower_type(ReturnG, ReturnType),
   gspan(node(function_type, Ch), Span).
+% An intersection `B + C (+ D ...)`: the parser's green children mix `+`
+% leaf tokens with the member NODES (kept for losslessness -- see
+% parser.pl's `intersection_seq/5`), so `child_nodes/2` (which already
+% skips every leaf, keeping only `node(Kind, _)` children) is exactly what's
+% needed to pull out just the members, in their original left-to-right
+% order, ignoring the `+`s between them.  Each member is itself an ordinary
+% type node (a `type_name`, `quantified_type`, `type_tuple`, or
+% `function_type`), lowered the same way any other type is.
+lower_type(node(intersection_type, Ch), intersection_type_node(Members, Span)) :- !,
+  child_nodes(Ch, MemberGreens),
+  maplist_lower_type(MemberGreens, Members),
+  gspan(node(intersection_type, Ch), Span).
 lower_type(Green, type_name_node([], [], Span)) :- gspan(Green, Span).
 
 maplist_lower_type([], []).

@@ -38,17 +38,15 @@
 :- use_module(analyser/types, [
   empty_context/1,
   fully_resolve/3,
-  generalize/5,
   scheme_free_unification_variables/2,
   context_substitution/2
 ]).
 :- use_module(analyser/type_environment, [
   build_type_environment/4,
-  convert_annotation_type/6
+  convert_annotation_type/6,
+  seed_externals/7
 ]).
 :- use_module(analyser/infer, [infer_program/6, infer_program_accumulating/7]).
-:- use_module('transformation/module', [expand_modules/2]).
-:- use_module(unicode, [xid_start/1, xid_continue/1]).
 
 % analyse(+AST, -Result).
 %
@@ -73,17 +71,15 @@ analyse(AST, Result) :-
 % `module_interface(ValueEntries, TypeEntries)`: the assoc-ready entries this
 % module makes `public`, ready to seed an importing module.
 %
-% Nested modules are erased first (`expand_modules`); then `public` wrappers are
-% unwrapped and `use` / `use_all` declarations dropped before inference (the
-% loader has already turned imports into seed entries); the set of exported
-% names is remembered so the interface can be collected afterwards.
-analyse_module(ProgramAst, SeedValueEnvironment, SeedTypeEnvironment,
+% `public` wrappers are unwrapped and `use` / `use_all` declarations dropped
+% before inference (the loader has already turned imports into seed entries);
+% the set of exported names is remembered so the interface can be collected
+% afterwards.  A nested `module` is NOT erased -- `infer.pl`'s own
+% `infer_sequence_item` clause for `module_node` type-checks it directly,
+% producing a genuine record value (see infer.pl's module documentation).
+analyse_module(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment,
                analysis_result(Type, Substitution),
                module_interface(ValueEntries, TypeEntries)) :-
-  % Erase any nested modules first (idempotent: a flat program, e.g. one the
-  % loader already expanded, is unchanged), so inference and export collection
-  % only ever see flat, qualified top-level items.
-  expand_modules(ProgramAst, program_node(Items)),
   normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
   CleanAST = program_node(CleanItems),
   build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),
@@ -117,9 +113,8 @@ analyse_module(ProgramAst, SeedValueEnvironment, SeedTypeEnvironment,
 % throws): in an editor a module is often mid-edit, so a public name whose body
 % failed to type is simply omitted from the interface rather than aborting the
 % whole analysis.
-analyse_accumulating(ProgramAst, SeedValueEnvironment, SeedTypeEnvironment, Errors, DefinitionTypes,
+analyse_accumulating(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment, Errors, DefinitionTypes,
                      module_interface(ValueEntries, TypeEntries)) :-
-  expand_modules(ProgramAst, program_node(Items)),
   normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
   CleanAST = program_node(CleanItems),
   build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),
@@ -196,54 +191,6 @@ constructor_environment([Name - Scheme | Rest], EnvironmentIn, EnvironmentOut) :
   put_assoc(Name, EnvironmentIn, defined(Scheme), Environment1),
   constructor_environment(Rest, Environment1, EnvironmentOut).
 
-% Bind every `external Name: Type = ...` (foreign JS import) into the
-% environment.  The ascribed `Type` is converted to a monotype and generalised
-% into a scheme exactly as a top-level annotation would be -- there is no value
-% to check it against, so the type is simply trusted (this is the one unsafe
-% point of the JS boundary).  Binding them up front (before inference walks the
-% items) makes every external visible throughout the module, like a constant.
-% Non-`external` items are left for the inference walk.
-seed_externals([], _TypeEnvironment, _Level, Environment, Context, Environment, Context).
-seed_externals([external_node(Name, TypeExpression, Source, _) | Rest], TypeEnvironment, Level,
-               EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :- !,
-  validate_external_source(Source),
-  Level1 is Level + 1,
-  convert_annotation_type(TypeExpression, TypeEnvironment, Level1, ContextIn, MonoType, Context1),
-  generalize(MonoType, Level, Context1, Scheme, Context2),
-  put_assoc(Name, EnvironmentIn, defined(Scheme), Environment1),
-  seed_externals(Rest, TypeEnvironment, Level, Environment1, Context2, EnvironmentOut, ContextOut).
-seed_externals([_Other | Rest], TypeEnvironment, Level, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
-  seed_externals(Rest, TypeEnvironment, Level, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut).
-
-% A renamed module import (`= 'foreign' from 'module'`) names a JS export that
-% codegen splices, unescaped, into `import { Foreign } from ...` -- so it must
-% be a valid JS identifier or it would break (or inject into) the emitted
-% import.  The other source forms put no name in identifier position: a
-% `js_global` / same-name `default` import reuses the (already-valid) declared
-% name, and a `js_expression` is trusted verbatim.
-validate_external_source(js_module(_Module, named(Foreign))) :- !,
-  ( js_identifier(Foreign) -> true
-  ; throw(analysis_error(invalid_external_name(Foreign)))
-  ).
-validate_external_source(_Source).
-
-% A JS IdentifierName, on the language's own Unicode identifier basis (UAX #31
-% XID_Start / XID_Continue, via `unicode`) plus the two characters JS allows
-% that XID does not: `$` (in neither set) and a leading `_` (XID_Continue but
-% not XID_Start).  So foreign names are exactly as permissive as the language's
-% own identifiers.
-js_identifier([First | Rest]) :-
-  js_identifier_start(First),
-  maplist(js_identifier_continue, Rest).
-
-js_identifier_start(Char) :-
-  char_code(Char, Code),
-  ( Code =:= 0'_ ; Code =:= 0'$ ; xid_start(Code) ).
-
-js_identifier_continue(Char) :-
-  char_code(Char, Code),
-  ( Code =:= 0'$ ; xid_continue(Code) ).   % `_` is already in XID_Continue
-
 % ---------------------------------------------------------------------------
 % Module-system normalisation and export collection
 % ---------------------------------------------------------------------------
@@ -275,6 +222,14 @@ normalise_items([public_node(type_declaration_node(Name, Parameters, Opacity, Bo
 % the clean items so `seed_externals` binds it and codegen emits it.
 normalise_items([public_node(external_node(Name, Type, Source, ESpan), _) | Rest],
                 [external_node(Name, Type, Source, ESpan) | CleanItems],
+                [Name | ValueNames], TypeDeclarations) :- !,
+  normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
+% A module is an ordinary VALUE (see infer.pl's `module_node` inference); a
+% `public module` exports its name exactly like a `public` definition would.
+% A private (unqualified) module stays in the clean items unexported, same as
+% any other private binding.
+normalise_items([public_node(module_node(Name, Parameters, Opacity, Ascription, Items, MSpan), _) | Rest],
+                [module_node(Name, Parameters, Opacity, Ascription, Items, MSpan) | CleanItems],
                 [Name | ValueNames], TypeDeclarations) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
 normalise_items([public_node(Other, _) | _], _, _, _) :- !,

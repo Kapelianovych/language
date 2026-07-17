@@ -217,6 +217,12 @@ fully_resolve(Type, Context, Resolved) :-
   ; Head = type_lambda(BoundIds, Body) ->
       fully_resolve(Body, Context, Body1),
       Resolved = type_lambda(BoundIds, Body1)
+  ; Head = intersection_type(Members) ->
+      % Exactly like `type_constructor`'s Arguments above -- an intersection
+      % has no "tail" or head of its own to resolve, just a flat list of
+      % member types, each fully resolved the same way any sub-type would be.
+      fully_resolve_list(Members, Context, Members1),
+      Resolved = intersection_type(Members1)
   ; Resolved = Head                          % base type, skolem, constructor_ref
   ).
 
@@ -346,10 +352,61 @@ unify_resolved(type_lambda(Ids1, Body1), type_lambda(Ids2, Body2), ContextIn, Co
       unify(Body1Skolemized, Body2Skolemized, Context1, ContextOut)
   ; throw(analysis_error(type_mismatch(type_lambda(Ids1, Body1), type_lambda(Ids2, Body2))))
   ).
+% INTERSECTION rule: two intersections unify (are the SAME type) when their
+% member SETS correspond one-to-one, order-insensitively -- `B + C` and
+% `C + D` unify iff `{B, C}` and `{C, D}` can be paired up member-for-member
+% (here that would need `B ~ C` or `B ~ D` etc., which likely fails; `B + C`
+% and `C + B` trivially succeed, pairing each member with itself under the
+% other order).  There is no "one side plain, other side an intersection"
+% unify rule: the parser only ever BUILDS an `intersection_type` from 2+
+% members (a bare `B` with no `+` is never wrapped), so that mixed shape
+% never arises from ordinary source, and `unify` is used for EQUALITY
+% checks (two annotations of the same variable, etc.) where "is B alone the
+% same type as B + C" should indeed just fall through to the catch-all
+% below and be rejected as a mismatch, not specially accepted.
+unify_resolved(intersection_type(Members1), intersection_type(Members2), ContextIn, ContextOut) :- !,
+  ( same_length(Members1, Members2) ->
+      unify_intersection_members(Members1, Members2, ContextIn, ContextOut)
+  ; throw(analysis_error(intersection_arity_mismatch(Members1, Members2)))
+  ).
 unify_resolved(TypeA, TypeB, ContextIn, _) :-
   fully_resolve(TypeA, ContextIn, ResolvedA),
   fully_resolve(TypeB, ContextIn, ResolvedB),
   throw(analysis_error(type_mismatch(ResolvedA, ResolvedB))).
+
+% Match every member of `Members1` against SOME not-yet-claimed member of
+% `Members2` that it unifies with -- like `match_fields`'s pairing for row
+% unification, but there is no KEY to pair by here (an intersection member
+% has no label), so each candidate is tried in turn via ordinary Prolog
+% backtracking (`select_unifiable`'s second clause has no cut, so failing
+% deeper in the recursion backtracks into an earlier pairing choice).
+unify_intersection_members([], [], Context, Context).
+unify_intersection_members([Member1 | Rest1], Members2, ContextIn, ContextOut) :-
+  select_unifiable(Member1, Members2, Rest2, ContextIn, Context1),
+  unify_intersection_members(Rest1, Rest2, Context1, ContextOut).
+
+% Try to unify `Member` against the FIRST candidate; if that THROWS (a real
+% mismatch -- see `unify_resolved`'s final clause above, every genuine
+% mismatch throws, it never just fails), catch it and treat it as an
+% ordinary Prolog failure so backtracking can try the next candidate
+% instead -- an uncaught throw would abort the whole search immediately
+% rather than let a later candidate succeed.  Each attempt starts from a
+% FRESH `ContextIn`, so a failed candidate's partial bindings (from before
+% it threw) are simply discarded, never threaded into the next attempt.
+% If every candidate has been tried and none unified, THROW rather than let
+% this fail silently: `unify_resolved`'s intersection clause above already
+% committed with a cut before calling down into this, so an ordinary Prolog
+% failure at this point would surface as a bare failure with no diagnostic
+% -- exactly what this project's `internal_error` backstop and `errors.pl`
+% suite exist to catch (see their own comments: every rejected program must
+% throw, never just fail).
+select_unifiable(Member, [], _, ContextIn, _ContextOut) :-
+  fully_resolve(Member, ContextIn, Resolved),
+  throw(analysis_error(no_matching_intersection_member(Resolved))).
+select_unifiable(Member, [Candidate | Rest], Rest, ContextIn, ContextOut) :-
+  catch(unify(Member, Candidate, ContextIn, ContextOut), analysis_error(_), fail), !.
+select_unifiable(Member, [Candidate | Rest], [Candidate | RestOut], ContextIn, ContextOut) :-
+  select_unifiable(Member, Rest, RestOut, ContextIn, ContextOut).
 
 % Map two equal-length id lists to a single fresh skolem sequence, one mapping
 % per side, so the two bodies are compared under identical rigid constants.
@@ -490,6 +547,14 @@ occurs_check_and_adjust_levels(Id, MaxLevel, Type, ContextIn, ContextOut) :-
           throw(analysis_error(polymorphic_type_escapes(SkolemName)))
       ; ContextOut = ContextIn
       )
+  ; Resolved = intersection_type(Members) ->
+      % Same treatment as `type_constructor`'s Arguments just above: walk
+      % every member so that binding a variable to (or through) an
+      % intersection still correctly threads the occurs check and the level
+      % ESCAPE CHECK into whatever is nested inside each member -- e.g. a
+      % module ascribed to `B + C` where `B` or `C` itself mentions a still-
+      % unsolved variable or a skolem from a deeper scope.
+      occurs_check_and_adjust_levels_list(Id, MaxLevel, Members, ContextIn, ContextOut)
   ; ContextOut = ContextIn                 % base type, `closed` or constructor_ref
   ).
 
@@ -546,6 +611,19 @@ collect_unification_variable_ids(Type, Accumulator, Ids) :-
       collect_unification_variable_ids(Body, Accumulator, Ids)
   ; Type = type_lambda(_BoundIds, Body) ->
       collect_unification_variable_ids(Body, Accumulator, Ids)
+  ; Type = intersection_type(Members) ->
+      % This is the one that matters most in practice: a module ascribed to
+      % `B + C` (see infer.pl's module clause) has `intersection_type([...])`
+      % as its ACTUAL exposed type, which then gets `generalize/5`'d exactly
+      % like any other value's type.  `generalize/5` finds what to quantify
+      % by calling THIS predicate first (`collect_unification_variable_ids`)
+      % -- if it didn't know to look inside an intersection's members, any
+      % still-free variable living in `B` or `C` (e.g. from a generic
+      % interface) would never be discovered, and so would never be
+      % generalized -- it would stay a bare, ungeneralized unification
+      % variable, silently shared (and wrongly unified) across every future
+      % use of that module, instead of being properly abstracted per use.
+      collect_unification_variable_ids_list(Members, Accumulator, Ids)
   ; Ids = Accumulator
   ).
 
@@ -588,6 +666,18 @@ abstract_quantified_variables(Type, QuantifiedIds, Out) :-
   ; Type = type_lambda(BoundIds, Body) ->
       abstract_quantified_variables(Body, QuantifiedIds, Body1),
       Out = type_lambda(BoundIds, Body1)
+  ; Type = intersection_type(Members) ->
+      % The other half of `generalize/5`'s two-step dance: having COLLECTED
+      % which variable ids are being generalized (via
+      % `collect_unification_variable_ids`, see the comment there), this
+      % step re-walks the same structure REPLACING each of those ids with
+      % `quantified_variable(Id)` wherever it occurs -- including inside an
+      % intersection's members, which is exactly why that collection step
+      % had to look inside them too: collecting an id but never abstracting
+      % its occurrence would leave a bare unification variable id sitting
+      % inside the "generalized" scheme, which is not a valid scheme body.
+      abstract_quantified_variables_list(Members, QuantifiedIds, Members1),
+      Out = intersection_type(Members1)
   ; Out = Type
   ).
 
@@ -662,6 +752,14 @@ substitute_quantified_variables(Type, Mapping, Out) :-
   ; Type = type_lambda(BoundIds, Body) ->
       substitute_quantified_variables(Body, Mapping, Body1),
       Out = type_lambda(BoundIds, Body1)
+  ; Type = intersection_type(Members) ->
+      % Used by `instantiate`/`instantiate_positional` -- e.g. when a module
+      % ascribed to `B + C` is used (or explicitly type-applied, `Combo<..>`),
+      % its scheme's quantifiers get replaced throughout its whole type,
+      % which includes reaching inside each intersection member the same way
+      % it reaches inside a `type_constructor`'s Arguments.
+      substitute_quantified_variables_list(Members, Mapping, Members1),
+      Out = intersection_type(Members1)
   ; Out = Type
   ).
 
@@ -709,6 +807,17 @@ substitute_skolems(Type, Mapping, Out) :-
   ; Type = type_lambda(BoundIds, Body) ->
       substitute_skolems(Body, Mapping, Body1),
       Out = type_lambda(BoundIds, Body1)
+  ; Type = intersection_type(Members) ->
+      % Used when a generic function's (or, per this project, a generic
+      % MODULE's -- see the module type-parameter work later in this plan)
+      % rigid skolems are swapped back to flexible variables in its result
+      % type before that type is generalized.  If the result type happens to
+      % be (or contain) an intersection -- e.g. a generic module ascribed to
+      % an interface that itself mentions the module's own type parameter --
+      % the swap has to reach inside its members too, or a rigid skolem
+      % would be left stranded where a flexible variable was expected.
+      substitute_skolems_list(Members, Mapping, Members1),
+      Out = intersection_type(Members1)
   ; Out = Type
   ).
 
@@ -793,6 +902,37 @@ subsume_resolved(function_type(ActualParams, ActualReturn),
   same_length(ActualParams, ExpectedParams), !,
   subsume_arguments(ExpectedParams, ActualParams, Level, ContextIn, Context1),
   subsume(ActualReturn, ExpectedReturn, Level, Context1, ContextOut).
+% BOTH sides are intersections.  This is checked as its OWN case, explicitly,
+% rather than left to fall out of the two single-sided intersection rules
+% below composing with each other -- composing them would require ONE actual
+% member to single-handedly cover the WHOLE expected intersection, which is
+% too strong: a value that IS exactly both `B` and `D` correctly satisfies
+% "needs both B and D", but neither `B` alone nor `D` alone does, so the
+% "actual member vs whole expected intersection" composition would wrongly
+% reject that case.  The textbook-correct rule (Actual <: Expected between
+% two intersections) is WIDTH-then-MEET: for every REQUIRED capability
+% (every member of ExpectedMembers), SOME possessed capability (some member
+% of ActualMembers) must cover it -- different required members are allowed
+% to be covered by different possessed members.
+subsume_resolved(intersection_type(ActualMembers), intersection_type(ExpectedMembers),
+                 Level, ContextIn, ContextOut) :- !,
+  subsume_every_required(ExpectedMembers, ActualMembers, Level, ContextIn, ContextOut).
+% ACTUAL is an intersection, EXPECTED is a single ordinary type: WIDTH
+% subtyping -- possessing MORE capabilities (being both B and C) trivially
+% satisfies a request for just ONE of them, as long as SOME single member
+% alone already would (tried via backtracking over `subsume_any_member`,
+% below).  This is what lets a module ascribed to `B + C` flow anywhere a
+% plain `B`, or a plain `C`, is independently expected.
+subsume_resolved(intersection_type(ActualMembers), Expected, Level, ContextIn, ContextOut) :- !,
+  subsume_any_member(ActualMembers, Expected, Level, ContextIn, ContextOut).
+% EXPECTED is an intersection, ACTUAL is a single ordinary type: MEET
+% semantics -- to satisfy "must be both B and C", Actual (on its own) must
+% independently satisfy EVERY member.  Unlike the ACTUAL-is-intersection
+% case above, this is a plain conjunction: there is no alternative to try, so
+% a genuine failure on any one member should genuinely propagate (no
+% catch/backtrack wrapper needed here, unlike `subsume_any_member`).
+subsume_resolved(Actual, intersection_type(ExpectedMembers), Level, ContextIn, ContextOut) :- !,
+  subsume_all_members(Actual, ExpectedMembers, Level, ContextIn, ContextOut).
 % Anything else: there is no polymorphism left to peel, so plain unification is
 % exactly the right (invariant) check.
 subsume_resolved(Actual, Expected, _Level, ContextIn, ContextOut) :-
@@ -802,6 +942,39 @@ subsume_arguments([], [], _Level, Context, Context).
 subsume_arguments([Expected | Expecteds], [Actual | Actuals], Level, ContextIn, ContextOut) :-
   subsume(Expected, Actual, Level, ContextIn, Context1),
   subsume_arguments(Expecteds, Actuals, Level, Context1, ContextOut).
+
+% For every required member (an ExpectedMembers entry), some possessed
+% member (an ActualMembers entry) must subsume it -- see
+% `subsume_any_member/5` for how "some" is tried safely (subsume THROWS on a
+% genuine mismatch rather than merely failing, so trying alternatives needs
+% to catch and retry, not rely on plain Prolog backtracking over a throw,
+% which would abort the whole search instead of trying the next candidate).
+subsume_every_required([], _ActualMembers, _Level, Context, Context).
+subsume_every_required([Expected | Rest], ActualMembers, Level, ContextIn, ContextOut) :-
+  subsume_any_member(ActualMembers, Expected, Level, ContextIn, Context1),
+  subsume_every_required(Rest, ActualMembers, Level, Context1, ContextOut).
+
+% Does `subsume(Candidate, Target, ...)` succeed for SOME Candidate in the
+% list?  Tried in order; each attempt starts from a fresh `ContextIn` (a
+% candidate that throws partway through leaves no partial bindings behind,
+% same reasoning as `select_unifiable/5` above for `unify`).  Running out of
+% candidates without success THROWS (never bare-fails) with a clear reason.
+subsume_any_member([], Target, _Level, ContextIn, _ContextOut) :-
+  fully_resolve(Target, ContextIn, ResolvedTarget),
+  throw(analysis_error(no_intersection_member_subsumes(ResolvedTarget))).
+subsume_any_member([Candidate | _Rest], Target, Level, ContextIn, ContextOut) :-
+  catch(subsume(Candidate, Target, Level, ContextIn, ContextOut), analysis_error(_), fail), !.
+subsume_any_member([_ | Rest], Target, Level, ContextIn, ContextOut) :-
+  subsume_any_member(Rest, Target, Level, ContextIn, ContextOut).
+
+% Does `Actual` (a single, non-intersection type) subsume EVERY member of
+% ExpectedMembers?  A plain conjunction -- no alternatives to try, so a real
+% mismatch on any one member propagates as-is (whatever `subsume/5` itself
+% throws), rather than being caught and retried.
+subsume_all_members(_Actual, [], _Level, Context, Context).
+subsume_all_members(Actual, [Member | Rest], Level, ContextIn, ContextOut) :-
+  subsume(Actual, Member, Level, ContextIn, Context1),
+  subsume_all_members(Actual, Rest, Level, Context1, ContextOut).
 
 % ---------------------------------------------------------------------------
 % Reporting

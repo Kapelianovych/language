@@ -151,6 +151,7 @@ item(Tokens, Rest, Node, D0, D) :- keyword(Tokens, "public"),   !, public_item(T
 item(Tokens, Rest, Node, D0, D) :- keyword(Tokens, "external"), !, external_declaration(Tokens, Rest, Node, D0, D).
 item(Tokens, Rest, Node, D0, D) :- keyword(Tokens, "type"),     !, type_declaration(Tokens, Rest, Node, D0, D).
 item(Tokens, Rest, Node, D0, D) :- keyword(Tokens, "module"),   !, module_declaration(Tokens, Rest, Node, D0, D).
+item(Tokens, Rest, Node, D0, D) :- opaque_module_lookahead(Tokens), !, module_declaration(Tokens, Rest, Node, D0, D).
 item(Tokens, Rest, Node, D0, D) :- keyword(Tokens, "macro"),    !, macro_declaration(Tokens, Rest, Node, D0, D).
 item(Tokens, Rest, Node, D0, D) :-
   peek(Tokens, Kind), starts_expression(Tokens, Kind),
@@ -269,12 +270,22 @@ from_clause(Tokens, Rest, Children, D0, D) :-
 
 % ===========================================================================
 % type NAME TypeParameters? ("=" DeclarationBody)?
-%   DeclarationBody :- "opaque"? VariantBody | TypeExpression
+%   DeclarationBody :- "opaque"? (VariantBody | InterfaceBody) | TypeExpression
 %   VariantBody     :- "|"? Constructor ("|" Constructor)*
 %   Constructor     :- Identifier ("(" TypeExpression+ ")")?
+%   InterfaceBody   :- "{" InterfaceMember* "}"
+%   InterfaceMember :- Identifier ":" TypeExpression
 %
 % A declaration WITHOUT `= body` is an ABSTRACT (FFI) type: nominal, with no
 % constructors anywhere -- its values arrive only through `external`s.
+%
+% An InterfaceBody ("module type") describes a module's public members by
+% name -- curly braces mark it as a module/interface shape, distinct from a
+% tuple/record type's "(...)" and a variant's "|"-separated constructors.
+% `opaque` on an interface makes it NOMINAL (a module must explicitly
+% ascribe to it to count as one); transparent (the default) makes it
+% STRUCTURAL, matched by shape at every use site -- the same opaque/
+% transparent axis as any other type declaration.
 % ===========================================================================
 
 type_declaration(Tokens, Rest, node(type_declaration, Children), D0, D) :-
@@ -308,6 +319,9 @@ type_body(Tokens, Rest, Children, D0, D) :-
       ( variant_lookahead(T1) ->
           variants(T1, Rest, VariantChildren, D0, D),
           Children = [node(opaque, OpaqueCh) | VariantChildren]
+      ; peek_punct(T1, open_brace) ->
+          interface_body(T1, Rest, InterfaceNode, D0, D),
+          Children = [node(opaque, OpaqueCh), InterfaceNode]
       ; offset(T1, At),
         D0 = [diagnostic(At, At, opaque_alias_removed) | D1],
         type_expression(T1, Rest, TypeNode, D1, D),
@@ -315,6 +329,9 @@ type_body(Tokens, Rest, Children, D0, D) :-
       )
   ; variant_lookahead(Tokens) ->
       variants(Tokens, Rest, Children, D0, D)
+  ; peek_punct(Tokens, open_brace) ->
+      interface_body(Tokens, Rest, InterfaceNode, D0, D),
+      Children = [InterfaceNode]
   ; type_expression(Tokens, Rest, TypeNode, D0, D),
       Children = [TypeNode] ).
 
@@ -323,6 +340,32 @@ variant_lookahead(Tokens) :-
   skip_trivia(Tokens, _, [t(ident, _, _, _) | AfterIdent]),
   skip_trivia(AfterIdent, _, [t(Kind, _, _, _) | _]),
   ( punct(open_paren, Kind) ; punct(bar, Kind) ).
+
+% An interface body: "{" InterfaceMember* "}".  Every member is named
+% (Identifier ":" TypeExpression) -- an interface describes a module's public
+% members by name, so there is no positional form.
+interface_body(Tokens, Rest, node(interface, Children), D0, D) :-
+  bump(Tokens, T1, OpenCh),                            % `{`
+  interface_member_seq(T1, T2, MemberChildren, D0, D1),
+  expect_punct(close_brace, T2, Rest, CloseCh, D1, D),
+  append(OpenCh, MemberChildren, C1), append(C1, CloseCh, Children).
+
+interface_member_seq(Tokens, Tokens, [], D, D) :-
+  ( peek_punct(Tokens, close_brace) ; peek(Tokens, eof) ), !.
+interface_member_seq(Tokens, Rest, [Member | Members], D0, D) :-
+  peek(Tokens, ident), !,
+  interface_member(Tokens, T1, Member, D0, D1),
+  interface_member_seq(T1, Rest, Members, D1, D).
+interface_member_seq(Tokens, Rest, [node(error, Err) | Members], D0, D) :-
+  offset(Tokens, At), bump(Tokens, T1, Err),
+  interface_member_seq(T1, Rest, Members, D1, D),
+  D0 = [diagnostic(At, At, unexpected_token) | D1].
+
+interface_member(Tokens, Rest, node(interface_member, Children), D0, D) :-
+  expect_kind(ident, Tokens, T1, NameCh, D0, D1),
+  expect_punct(colon, T1, T2, ColonCh, D1, D2),
+  type_expression(T2, Rest, TypeNode, D2, D),
+  append(NameCh, ColonCh, C1), append(C1, [TypeNode], Children).
 
 % VariantBody: optional leading `|`, then constructors separated by `|`.
 variants(Tokens, Rest, Children, D0, D) :-
@@ -350,21 +393,67 @@ constructor_node(Tokens, Rest, node(variant, Children), D0, D) :-
   append(NameCh, ArgCh, Children).
 
 % ===========================================================================
-% module NAME = { items }
+% "opaque"? module NAME TypeParameters? (":" TypeExpression)? = { items }
+%
+% `opaque` makes the module NOMINAL (its own name becomes its identity;
+% substituting a differently-named but structurally-identical value is not
+% allowed); transparent (the default) makes it STRUCTURAL (its type is its
+% own inferred member row, matched by shape anywhere) -- the same opaque/
+% transparent axis `type` declarations already use.  The optional `: Type`
+% ascribes the module to a declared interface (or, via `+`, several at once);
+% satisfying it is checked structurally regardless of the module's own
+% nominal/structural marker.  The optional `<T>` declares a type parameter
+% SHARED by every member (unlike each member independently writing its own
+% `<T>`, which would let two members disagree on what `T` is at a given use
+% -- see `infer.pl`'s module clause for how this sharing is actually
+% enforced during inference).  It reuses `type_parameters/5` verbatim -- the
+% exact same rule `type_declaration`/`generic_function` already call -- so
+% this is a new CALL SITE, not new grammar.
 % ===========================================================================
 
 module_declaration(Tokens, Rest, node(module, Children), D0, D) :-
-  bump(Tokens, Tokens1, ModuleChildren),          % `module`
+  ( keyword(Tokens, "opaque") ->
+      bump(Tokens, Tokens0, OpaqueTok),
+      OpaquePart = [node(opaque, OpaqueTok)]
+  ; OpaquePart = [], Tokens0 = Tokens ),
+  bump(Tokens0, Tokens1, ModuleChildren),         % `module`
   expect_kind(ident, Tokens1, Tokens2, NameChildren, D0, D1),
-  expect_punct(eq, Tokens2, Tokens3, EqChildren, D1, D2),
-  expect_punct(open_brace, Tokens3, Tokens4, OpenChildren, D2, D3),
-  module_items(Tokens4, Tokens5, BodyChildren, D3, D4),
-  expect_punct(close_brace, Tokens5, Rest, CloseChildren, D4, D),
-  append(ModuleChildren, NameChildren, C1),
-  append(C1, EqChildren, C2),
-  append(C2, OpenChildren, C3),
-  append(C3, BodyChildren, C4),
-  append(C4, CloseChildren, Children).
+  ( peek_punct(Tokens2, open_angle) ->             % optional type parameters
+      type_parameters(Tokens2, Tokens2a, ParamsNode, D1, D1a),
+      ParamsPart = [ParamsNode]
+  ; ParamsPart = [], Tokens2a = Tokens2, D1a = D1 ),
+  ( peek_punct(Tokens2a, colon) ->                 % optional interface ascription
+      bump(Tokens2a, Tokens3, ColonCh),
+      % A full `type_expression/5`, not just `type_reference/5` -- this is
+      % what lets the ascription be an INTERSECTION (`module A: B + C = ..`),
+      % since `+` is parsed at the `type_expression` level (see the
+      % "INTERSECTION TYPES" grammar section above).  A plain single-interface
+      % ascription (`module A: B = ..`) still parses exactly the same as
+      % before: `type_expression/5` falls through to a bare `type_reference`
+      % whenever there is no `+` to see.
+      type_expression(Tokens3, Tokens4, TypeRefNode, D1a, D2),
+      append(ColonCh, [TypeRefNode], AscCh),
+      AscriptionPart = [node(ascription, AscCh)]
+  ; AscriptionPart = [], Tokens4 = Tokens2a, D2 = D1a ),
+  expect_punct(eq, Tokens4, Tokens5, EqChildren, D2, D3),
+  expect_punct(open_brace, Tokens5, Tokens6, OpenChildren, D3, D4),
+  module_items(Tokens6, Tokens7, BodyChildren, D4, D5),
+  expect_punct(close_brace, Tokens7, Rest, CloseChildren, D5, D),
+  append(OpaquePart, ModuleChildren, C1),
+  append(C1, NameChildren, C2),
+  append(C2, ParamsPart, C2a),
+  append(C2a, AscriptionPart, C3),
+  append(C3, EqChildren, C4),
+  append(C4, OpenChildren, C5),
+  append(C5, BodyChildren, C6),
+  append(C6, CloseChildren, Children).
+
+% `opaque module ...` -- lookahead so a bare `opaque` used as an ordinary
+% identifier elsewhere is never swallowed here.
+opaque_module_lookahead(Tokens) :-
+  keyword(Tokens, "opaque"),
+  skip_trivia(Tokens, _, [_OpaqueTok | AfterOpaque]),
+  keyword(AfterOpaque, "module").
 
 % Like `items`, but stops at the closing `}` of the module body.
 module_items(Tokens, Tokens, [], D, D) :-
@@ -410,31 +499,55 @@ postfix_chain(Acc, Tokens, Rest, Node, D0, D) :-
       argument_list(Tokens, Tokens1, ArgChildren, D0, D1),
       postfix_chain(node(call, [Acc | ArgChildren]), Tokens1, Rest, Node, D1, D)
   ; postfixable(Acc), peek_punct(Tokens, open_angle), type_application_ahead(Tokens) ->
-      % A call with explicit TYPE ARGUMENTS:  foo<number>(1).  The green call
-      % node carries the `type_args` node between the callee and the argument
-      % tokens.
+      % Explicit TYPE ARGUMENTS: `foo<number>(1)` (a call) or a STANDALONE
+      % `Stack<number>` (no call at all -- fixing a generic module's type
+      % parameter without invoking anything, see the module documentation on
+      % `Parameters`).  `type_application_ahead/1` has already proven the
+      % closed `<...>` shape (see its own comment below); the ONLY remaining
+      % question is what comes right after the closing `>`.
       type_arguments(Tokens, Tokens1, TypeArgsNode, D0, D1),
-      argument_list(Tokens1, Tokens2, ArgChildren, D1, D2),
-      postfix_chain(node(call, [Acc, TypeArgsNode | ArgChildren]), Tokens2, Rest, Node, D2, D)
+      ( peek_punct(Tokens1, open_paren) ->
+          % A call with explicit TYPE ARGUMENTS:  foo<number>(1).  The green
+          % call node carries the `type_args` node between the callee and
+          % the argument tokens.
+          argument_list(Tokens1, Tokens2, ArgChildren, D1, D2),
+          postfix_chain(node(call, [Acc, TypeArgsNode | ArgChildren]), Tokens2, Rest, Node, D2, D)
+      ; % No `(` follows: a STANDALONE type application.  `node(type_apply,
+        % [Acc, TypeArgsNode])` is its own green shape (distinct from
+        % `node(call, ...)`), so lowering can tell the two apart and build a
+        % `type_application_node` directly, with no enclosing
+        % `function_call_node`.  The chain continues normally afterwards --
+        % `Stack<number>.push` (a further `.access`) or even
+        % `Stack<number>(x)` (a further call, e.g. if the specialised value
+        % ends up itself being a function) both still work, since
+        % `postfix_chain` just keeps going with this as its new `Acc`.
+        postfix_chain(node(type_apply, [Acc, TypeArgsNode]), Tokens1, Rest, Node, D1, D)
+      )
   ; Node = Acc, Rest = Tokens, D0 = D
   ).
 
 % After a value, `x < y` is normally a comparison, so `<` commits to type
 % arguments only when a conservative forward scan proves the closed shape
-% `< ... > (`: only tokens that can occur inside type arguments are allowed
-% (names, `_`, `.`, `:`, parens, nested angles), angle depth is tracked (a
-% `>>` token closes two levels -- the lexer fuses adjacent `>`s), and the
-% token after the matching close must open the call's argument list.  Any
-% other token -- a number, a string, an operator -- proves a comparison and
-% the scan fails without consuming anything.  The one true ambiguity,
-% `a < b > (c)`, is resolved as a call of `a` with type argument `b`; a
-% chained comparison there is ill-typed anyway (its left operand is boolean).
+% `< ... >`: only tokens that can occur inside type arguments are allowed
+% (names, `_`, `.`, `:`, parens, nested angles), and angle depth is tracked (a
+% `>>` token closes two levels -- the lexer fuses adjacent `>`s).  Any other
+% token -- a number, a string, an operator -- proves a comparison and the
+% scan fails without consuming anything.  Unlike before this predicate ALSO
+% covered standalone type application, it additionally required the token
+% right after the closing `>` to be `(` (a call); that requirement is gone
+% now -- `postfix_chain` above decides call-vs-standalone itself, AFTER the
+% shape is confirmed here, by peeking for `(` on its own.  The two
+% (still-)true ambiguities: `a < b > (c)` is read as a call of `a` with type
+% argument `b`, and (now) a bare `a < b > c` -- with nothing special
+% following -- is read as `a<b>` (standalone) followed by a separate `c`; a
+% chained comparison in either shape is ill-typed anyway (a comparison's
+% result is boolean, and `boolean > c` does not type-check), so this is the
+% same pre-existing tolerance the call case already accepted, just extended
+% to the no-trailing-`(` case.
 type_application_ahead(Tokens) :-
   skip_trivia(Tokens, _, [t(K0, _, _, _) | After]),
   punct(open_angle, K0),
-  type_application_scan(After, 1, AfterClose),
-  skip_trivia(AfterClose, _, [t(K1, _, _, _) | _]),
-  punct(open_paren, K1).
+  type_application_scan(After, 1, _AfterClose).
 
 type_application_scan(Tokens, 0, Tokens) :- !.
 type_application_scan([t(K, _, _, _) | Ts], Depth, Rest) :-
@@ -961,10 +1074,96 @@ split_close(t(_, ['>', C | Cs], Start, End), t('>', ['>'], Start, Mid), t(RestKi
 % after a named type is deliberately left unconsumed: in every position where
 % a type expression appears (a labeled member, an annotated definition, a
 % variant field) the surrounding form owns the next `:` or diagnoses it.
+% ===========================================================================
+% INTERSECTION TYPES:  TypeExpression ("+" TypeExpression)*
+%
+% `B + C` is a type expression meaning "satisfies both B and C" -- used in a
+% module's ascription (`module A: B + C = {...}`) and in a bounded type
+% parameter (`<A: B + C>`).  It is intentionally the ONLY binary operator the
+% type grammar has (unlike the value grammar, which has a whole precedence
+% table for `+ - * / < > ...`): there is no other type-level operator to
+% conflict with, so a single flat left-to-right chain is all this needs --
+% no precedence climbing, no associativity table.
+%
+% WHY THE PREDICATE IS SPLIT IN TWO (`type_expression` / `type_expression_primary`).
+% `type_expression/5` used to BE what is now `type_expression_primary/5` (the
+% quantified-or-atom form).  It is split so that `+` can sit at the TOP,
+% wrapping a whole quantified-or-atom term on each side, while every EXISTING
+% caller of `type_expression/5` elsewhere in this file (tuple members,
+% function parameter/return types, constructor fields, type arguments, ...)
+% keeps calling the SAME name and so transparently gains `+` support in every
+% position a type can appear -- without those call sites needing to change at
+% all.  `type_expression_primary/5` is what a quantified type's OWN body
+% recurses into (not the full `type_expression/5`), which is a deliberate
+% precedence choice: `<A> B + C` parses as `(<A> B) + C`, i.e. the quantifier
+% binds only its immediate body, not the whole intersection chain.  (Nothing
+% in this language actually needs a quantified type as one side of an
+% intersection today; this choice just avoids the grammar being ambiguous
+% about it.)
+%
+% WHY NO SEMANTIC VALIDATION HERE.  The parser has no idea what `B` or `C`
+% *mean* -- it only knows they are type expressions.  Whether each side is
+% actually "interface-shaped" (a declared `type X = {...}`, nominal or
+% structural) is a semantic question, checked later during type conversion
+% (see `type_environment.pl`'s new `intersection_type_node` clause).  Writing
+% `number + string` parses FINE here and is rejected downstream instead --
+% consistent with how e.g. `undeclared_type` errors work everywhere else in
+% this grammar (the parser is permissive; the analyser is precise).
+% ===========================================================================
 type_expression(Tokens, Rest, Node, D0, D) :-
+  type_expression_primary(Tokens, T1, First, D0, D1),
+  intersection_seq(T1, Rest, MoreChildren, D1, D),
+  ( MoreChildren == [] ->
+      % The overwhelmingly common case: no `+` follows at all, so this type
+      % expression is just its single primary term, completely unchanged
+      % from what `type_expression/5` used to return before this feature
+      % existed -- every existing fixture and program that never uses `+`
+      % produces the exact same green tree it always did.
+      Node = First
+  ; % One or more `+ Member` pairs followed: wrap everything (the first term
+    % plus every subsequent one) in ONE `intersection_type` node, so the
+    % lowerer (and everything downstream) sees a single flat N-ary list of
+    % members rather than a nested nest of binary pairs.  `A + B + C` is
+    % `intersection_type([A, B, C])`, not `intersection_type([intersection_type([A,B]), C])`.
+    Node = node(intersection_type, [First | MoreChildren]) ).
+
+% Collect zero or more `"+" TypeExpressionPrimary` pairs, tail-recursively,
+% into a FLAT children list that mixes leaf `+` tokens with member NODES --
+% e.g. for `B + C + D` this returns `[PlusTok1, NodeC, PlusTok2, NodeD]` (the
+% first member, `NodeB`, is NOT included here -- it's prepended by the caller
+% above).  Interleaving the `+` tokens into the node's own children (instead
+% of discarding them) is what keeps the tree LOSSLESS: `green_text/2` can
+% reconstruct the original source text `B + C + D` character-for-character
+% by concatenating every leaf, including these operator tokens, in order.
+intersection_seq(Tokens, Rest, Children, D0, D) :-
+  ( peek(Tokens, '+') ->
+      % `+` is not in the curated `punct/2` table (that table is for
+      % structural punctuation like `(` `)` `:` used outside the ordinary
+      % value-expression operator grammar) -- it is lexed as an ordinary
+      % operator token whose Kind IS the atom `'+'` itself, the same token
+      % kind `binary_operator('+', 11, left)` matches at the value-expression
+      % level.  `peek(Tokens, '+')` checks the next significant token's Kind
+      % against that atom directly, exactly like `peek(Tokens, ident)` checks
+      % for an identifier.
+      bump(Tokens, T1, PlusCh),
+      type_expression_primary(T1, T2, Member, D0, D1),
+      intersection_seq(T2, Rest, MoreChildren, D1, D),
+      append(PlusCh, [Member | MoreChildren], Children)
+  ; % No `+` here: stop the chain.  `Children = []` signals "no intersection"
+    % to the caller, which is how `type_expression/5` decides whether to
+    % return the bare primary term or wrap it.
+    Children = [], Rest = Tokens, D0 = D ).
+
+% The quantified-or-atom form `type_expression/5` used to BE, before `+` was
+% added above it.  Nothing about this predicate itself changed; it is simply
+% the old body, renamed and now called by the NEW `type_expression/5` (and by
+% itself, recursively, for a quantified type's own body -- see the "WHY THE
+% PREDICATE IS SPLIT IN TWO" note above for why that recursive call is to
+% THIS predicate rather than back to the full `type_expression/5`).
+type_expression_primary(Tokens, Rest, Node, D0, D) :-
   ( peek_punct(Tokens, open_angle) ->                 % quantified (polymorphic)
       type_parameters(Tokens, T1, Params, D0, D1),
-      type_expression(T1, Rest, Body, D1, D),
+      type_expression_primary(T1, Rest, Body, D1, D),
       Node = node(quantified_type, [Params, Body])
   ; type_atom(Tokens, Rest, Node, D0, D) ).
 

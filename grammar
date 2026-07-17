@@ -250,6 +250,8 @@ MatchArm :-
 
 # A `type` declaration introduces a named type, which is one of:
 #  * a TAGGED UNION (variant / sum type): a `|`-separated list of constructors;
+#  * an INTERFACE (module type): a "{"-delimited record of named member
+#    signatures, describing a module's public shape;
 #  * a STRUCTURAL alias for a type expression; or
 #  * an ABSTRACT (FFI) type, when the declaration has NO `= body` at all:
 #    nominal, with no constructors anywhere -- its values arrive only through
@@ -258,12 +260,15 @@ MatchArm :-
 # still exportable with `public`, but the constructors stay private to the
 # enclosing module (or file), so outside code can only build and inspect
 # values through the functions the module exposes.  (`opaque` before an alias
-# body is retired; declare a bodyless type instead.)
+# body is retired; declare a bodyless type instead.)  `opaque` on an
+# INTERFACE makes it NOMINAL: a module must explicitly ascribe to it
+# (`module Name: Interface = {...}`) to count as one; transparent (the
+# default) makes it STRUCTURAL, satisfied by any module whose shape matches.
 TypeDeclaration :-
 	"type" Separator+ Identifier TypeParameters?
 	(Separator* "=" Separator* DeclarationBody)?
 
-DeclarationBody :- Opaque? VariantBody | TypeExpression
+DeclarationBody :- Opaque? (VariantBody | InterfaceBody) | TypeExpression
 
 # A body is a variant when it has a leading `|`, two or more constructors, or
 # a single constructor written with a field list `Name(...)` (this last rule
@@ -274,6 +279,14 @@ VariantBody :- "|"? Constructor (Separator* "|" Separator* Constructor)*
 
 Constructor :-
 	Identifier ("(" Separator* (TypeExpression (Separator+ TypeExpression)* Separator*)? ")")?
+
+# Curly braces mark the body as a module type, distinct from a tuple/record
+# type's "(...)" and a variant's "|"-separated constructors.  Every member is
+# named -- an interface describes a module's public members by name, so
+# there is no positional form.
+InterfaceBody :- "{" Separator* (InterfaceMember Separator*)* "}"
+
+InterfaceMember :- Identifier Separator* ":" Separator* TypeExpression
 
 Opaque :- "opaque" Separator+
 
@@ -293,10 +306,23 @@ TypeParameter :-
 		| (Separator* ":" Separator* TypeExpression)?          # proper, optional bound
 	)
 
-# A type expression is a quantified (polymorphic) type, a parenthesized form
-# (a tuple type, or a function type when a `: ReturnType` follows), or a named
-# reference.
-TypeExpression :- QuantifiedType | ParenthesizedType | TypeReference
+# A type expression is one or more TypeExpressionPrimary terms joined by `+`
+# (an INTERSECTION: "satisfies every one of these"), used in a module's
+# ascription (`module A: B + C = {...}`) and a bounded type parameter
+# (`<A: B + C>`).  `+` is the type grammar's ONLY binary operator -- there is
+# nothing else it could be confused with -- so a plain left-to-right chain is
+# enough; `B + C + D` parses as one 3-member intersection, not a nested pair
+# of 2-member ones.  Each side is only checked to actually be an
+# interface-shaped type (a declared `type X = {...}`, nominal or structural)
+# during conversion to a monotype, not by this grammar -- `number + string`
+# parses fine and is rejected later, like any other semantically-invalid but
+# syntactically-well-formed type.
+TypeExpression :- TypeExpressionPrimary ("+" TypeExpressionPrimary)*
+
+# A primary type expression is a quantified (polymorphic) type, a
+# parenthesized form (a tuple type, or a function type when a `: ReturnType`
+# follows), or a named reference.
+TypeExpressionPrimary :- QuantifiedType | ParenthesizedType | TypeReference
 
 # A QUANTIFIED type bakes a `forall` into the type, so a polymorphic type can
 # be written in an annotation -- a function parameter or field that is ITSELF
@@ -308,8 +334,11 @@ TypeExpression :- QuantifiedType | ParenthesizedType | TypeReference
 # Quantifiers are PREDICATIVE: a polytype may not be a type argument, so
 # `List<<A>(A): A>` is rejected.  Inference is bidirectional -- a value is
 # CHECKED against a polytype annotation; annotations are required only where a
-# `forall` would otherwise have to be guessed.
-QuantifiedType :- TypeParameters Separator* TypeExpression
+# `forall` would otherwise have to be guessed.  Its OWN body is a
+# TypeExpressionPrimary, not a full TypeExpression, so `<A> B + C` parses as
+# `(<A> B) + C` -- the quantifier binds only its immediate body, not the
+# whole intersection chain after it.
+QuantifiedType :- TypeParameters Separator* TypeExpressionPrimary
 
 # Members optionally end with `..` (optionally naming the rest, `..R`),
 # making the record OPEN ("and possibly more fields"); otherwise it is
@@ -405,17 +434,23 @@ ImportNames :- "(" Separator* Identifier (Separator+ Identifier)* Separator* ")"
 # a whole-module `use`).  `public` is a soft keyword.
 Public :- "public" Separator+ (External | Module | Macro | Expression)
 
-# A NESTED MODULE groups items under a name as a COMPILE-TIME namespace -- it is
-# not a value and has no type.  Its body is itself a sequence of program items,
+# A MODULE is a runtime VALUE: a record of its public members.  `opaque`
+# makes it NOMINAL (its own name is its identity; a structurally identical
+# but differently-named value cannot substitute for it); transparent (the
+# default) makes it STRUCTURAL (its type is its own inferred member row,
+# matched by shape anywhere).  The optional `: Type` ascribes it to a
+# declared interface -- checked structurally regardless of the module's own
+# nominal/structural marker.  Its body is itself a sequence of program items,
 # so modules nest and may hold definitions, `type` declarations, `external`s,
-# `use`s and further modules, each optionally `public`.  Members are reached as
-# `Name.member`; `public` exposes a member outside the module (within the file),
-# and a top-level `public module` additionally exports across files.  Member
-# names are QUALIFIED with the module path, so two modules may reuse a name (and
-# a constructor's runtime tag is likewise qualified).  `module` is a soft
-# keyword (mandatory separator).
+# `use`s and further modules, each optionally `public`.  Members are reached
+# as `Name.member`, ordinary field access on the record; `public` exposes a
+# member outside the module (within the file), and a top-level `public
+# module` additionally exports across files.  `module` is a soft keyword
+# (mandatory separator).
 Module :-
-	"module" Separator+ Identifier Separator* "=" Separator*
+	Opaque? "module" Separator+ Identifier
+	(Separator* ":" Separator* TypeReference)?
+	Separator* "=" Separator*
 	"{" Separator* (ProgramItem Separator*)* "}"
 
 # A FOREIGN (JavaScript) IMPORT.  `external` binds a name to a piece of JS with

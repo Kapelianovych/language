@@ -13,10 +13,15 @@
     `Math.Option`, `Math.Some`, ... -- without naming them one by one.  The
     namespace is the imported file's base name.
 
-    Unlike nested modules (resolved entirely intra-file by the module transformation (`transformation/module.pl`)),
-    this needs the dependency's compiled INTERFACE -- which member names exist,
-    and their types -- so it runs in the compiler, after the dependency is
-    analysed.
+    Unlike a nested `module` (a genuine record VALUE, type-checked and
+    compiled in place -- see analyser/infer.pl and generator/javascript.pl),
+    this needs the dependency's compiled INTERFACE -- which member names
+    exist, and their types -- so it runs in the compiler, after the
+    dependency is analysed.  A dependency's own nested `module` crosses this
+    boundary as ONE ordinary exported value (like any other), not as a set
+    of individually-qualified member names; `Math.Foo.member` is therefore
+    the namespace qualifying `Foo` itself, followed by ordinary field access
+    on the imported module value, not a further namespace lookup.
 
     NAMESPACING THE INTERFACE.  The imported names are seeded under qualified
     local names (`Math.Option`), and the imported types/constructors are
@@ -189,6 +194,11 @@ prefix_surface(quantified_type_node(Parameters, Body, Span), Exported, Namespace
                quantified_type_node(Parameters, Body1, Span)) :- !,
   prefix_surface(Body, Exported, Namespace, Body1).
 prefix_surface(type_hole(Span), _Exported, _Namespace, type_hole(Span)) :- !.
+% An intersection re-qualifies each of its members the same way a function
+% type re-qualifies each of its parameters -- there is nothing special about
+% "being one side of a `+`" from this pass's point of view.
+prefix_surface(intersection_type_node(Members, Span), Exported, Namespace, intersection_type_node(Members1, Span)) :- !,
+  maplist_surface(Members, Exported, Namespace, Members1).
 
 prefix_surface_arguments([], _Exported, _Namespace, []).
 prefix_surface_arguments([type_hole(Span) | Rest], Exported, Namespace, [type_hole(Span) | Rest1]) :- !,

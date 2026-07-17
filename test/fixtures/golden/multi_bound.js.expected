@@ -1,0 +1,3 @@
+const $Combo = (() => { const $info = (($n) => ($n + 1)); const $tag = 5; return {"info": $info, "tag": $tag}; })();
+export const $identity = (($x) => $x);
+export const $result = ($identity)($Combo);

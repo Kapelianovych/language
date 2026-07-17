@@ -19,16 +19,14 @@
     exhaustiveness check then reports later arms as already covered, which is
     the mitigating signal.
 
-    SCOPE.  "In scope" here means the module's TOP-LEVEL declarations (the
-    program is flat by the time the batch pipeline runs this, so that
-    includes lifted nested-module constructors under their qualified names)
-    plus the IMPORTED constructors seeded by the module loader / query
-    engine, passed in as the seed type environment (`constructor_key/1`
-    entries).  A bare name inside a not-yet-expanded nested module that
-    refers to a sibling constructor is instead resolved by
-    `transformation/module.pl`, which has that scope; the two rewrites
-    compose in either order (this pass's output is qualified there like any
-    written-out constructor pattern).
+    SCOPE.  "In scope" here means the FILE's own top-level nullary
+    constructors, plus the IMPORTED constructors seeded by the module loader
+    / query engine, passed in as the seed type environment
+    (`constructor_key/1` entries).  A nested `module` is a value, not erased,
+    but this pass's own generic term walk (`resolve/3`) descends into its
+    body like any other compound term, so a bare constructor name used
+    inside a module's functions is resolved by this same pass -- no separate
+    handling is needed.
 
     Patterns in IRREFUTABLE positions (function parameters, destructuring)
     are untouched: a constructor pattern can fail, so a bare name there is

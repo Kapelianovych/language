@@ -1,0 +1,2 @@
+export const $Counter = (() => { const $start = 0; const $next = (($n) => ($n + 1)); return {"next": $next}; })();
+export const $main = (($Counter)["next"])((($Counter)["next"])(5));

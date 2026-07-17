@@ -1,0 +1,5 @@
+const $Combo = (() => { const $info = (($n) => ($n + 1)); const $tag = 5; return {"info": $info, "tag": $tag}; })();
+export const $useAsLogger = (($x) => (($x)["info"])(1));
+export const $useAsNamed = (($x) => ($x)["tag"]);
+export const $r1 = ($useAsLogger)($Combo);
+export const $r2 = ($useAsNamed)($Combo);

@@ -76,7 +76,9 @@
   bind_type_parameters_rigid/8,
   declared_function_scheme/6,
   instantiate_constructor/7,
-  union_constructor_names/3
+  union_constructor_names/3,
+  interface_row_for/7,
+  seed_externals/7
 ]).
 
 % infer_program(+ProgramNode, +TypeEnvironment, +InitialEnvironment, +ContextIn, -Result, -FinalEnvironment).
@@ -202,6 +204,107 @@ infer_sequence_walk([Expression, Next | Rest], Level, InsideFunction, Environmen
 % use for the rest of the sequence.
 infer_sequence_item(type_declaration_node(_, _, _, _, _), _Level, _InsideFunction,
                     Environment, _TypeEnvironment, Context, tuple_type([], closed), Environment, Context) :- !.
+% A MODULE is a genuine record VALUE: its body is its own nested scope (own
+% `let`-like sequence, one level deeper, seeded with its own `external`s
+% exactly like the top level), and its type is a row built from its PUBLIC
+% members only -- private members are simply absent from the row (and, in
+% codegen, from the emitted object), so they are inaccessible from outside
+% both statically and at runtime.  `opaque` on the module marks its exposed
+% type NOMINAL (its own name, unregistered as an interface unless ascribed --
+% see the module documentation on why an unascribed opaque module does not
+% yet support `.field` access); transparent (the default) exposes the row
+% directly, structurally.  An explicit `: Interface` ascription overrides
+% either: the module's own natural row must `subsume` the interface's
+% declared row field-by-field, and the exposed type becomes the interface's
+% own (nominal or structural per the INTERFACE's own opacity, independent of
+% the module's own marker).
+%
+% `Parameters` (a module's own `<T>`, e.g. `module Stack<T> = {...}`) needs
+% every member to agree on the SAME `T` -- unlike a generic FUNCTION's `<A>`,
+% which only has ONE body to check, a module has MANY members whose
+% annotations all need to see the identical binding, or `push`'s `T` and
+% `pop`'s `T` could silently end up as two unrelated types.  This reuses the
+% EXACT mechanism an ordinary generic function's own explicit `<A B>` already
+% uses (see the `function_node(TypeParameters, ...)` clause above):
+% `bind_type_parameters_rigid/8` mints ONE rigid skolem per parameter into a
+% SCOPED type environment, which is then threaded through -- unchanged --
+% into EVERY member's annotation conversion (`seed_externals`/
+% `infer_sequence` below), so they all resolve `T` to the identical skolem
+% term.  Afterwards, `substitute_skolems/3` swaps that skolem back to its
+% paired FLEXIBLE replacement (minted first, at the shallower `Level1`) in
+% whatever becomes the module's exposed type, so `generalize/5` finds it and
+% abstracts it into the scheme's quantifier list exactly once -- the same
+% "mint the replacement first, in declaration order" trick that keeps a
+% generic function's explicit type arguments positional (see `generalize/5`'s
+% own doc in types.pl) applies here too, which is what a later `Stack<number>`
+% (explicit type application on the module VALUE, see the standalone
+% `type_application_node` support) instantiates positionally against.
+infer_sequence_item(module_node(Name, Parameters, Opacity, Ascription, Items, _Span),
+                    Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
+                    ModuleType, EnvironmentOut, ContextOut) :- !,
+  normalise_module_items(Items, CleanItems, PublicValueNames),
+  Level1 is Level + 1,
+  ( Parameters == [] ->
+      % The common (non-generic) case: nothing to bind rigidly, so this is
+      % exactly the module's ORIGINAL (pre-generic) setup, byte-for-byte --
+      % zero behavioural change for every module that doesn't declare `<T>`.
+      ScopedTypeEnvironment = TypeEnvironment, SkolemPairs = [], BodyLevel = Level1, Context0 = ContextIn
+  ; BodyLevel is Level1 + 1,
+    bind_type_parameters_rigid(Parameters, TypeEnvironment, Level1, BodyLevel, ContextIn,
+                               ScopedTypeEnvironment, SkolemPairs, Context0)
+  ),
+  seed_externals(CleanItems, ScopedTypeEnvironment, BodyLevel, Environment, Context0, SeededEnvironment, Context1),
+  infer_sequence(CleanItems, BodyLevel, InsideFunction, SeededEnvironment, ScopedTypeEnvironment, Context1,
+                _BodyLastType, BodyEnvironment, Context2),
+  module_member_row(PublicValueNames, BodyEnvironment, MemberFieldsRaw),
+  ( Ascription = some(InterfaceTypeExpression) ->
+      % The ascription is converted in `ScopedTypeEnvironment` too (not the
+      % plain outer one) -- it may itself reference the module's own `T`,
+      % e.g. `module Stack<T>: Container<T> = {...}`.
+      convert_annotation_type(InterfaceTypeExpression, ScopedTypeEnvironment, BodyLevel, Context2, InterfaceTypeRaw, Context3),
+      % `InterfaceTypeRaw` is either a SINGLE interface (`module A: B = {...}`,
+      % `type_constructor` if `B` is opaque, `tuple_type` if transparent) or,
+      % when the ascription used `+`, an `intersection_type(Members)` (each
+      % Member itself a `type_constructor`/`tuple_type` the same way).  Either
+      % way the module's own row must satisfy EVERY interface named -- for a
+      % single interface that's one check; for `B + C` it's one check PER
+      % member, all against the SAME module row (see
+      % `check_module_satisfies_each/7` below).  The check runs BEFORE the
+      % skolem substitution just below, while `T` is still the same rigid
+      % skolem on both sides (the module's row and, if the ascription
+      % mentioned `T`, the interface's row too) -- substituting first would
+      % make them impossible to relate to each other correctly.
+      ( InterfaceTypeRaw = intersection_type(InterfaceMembers) ->
+          check_module_satisfies_each(InterfaceMembers, MemberFieldsRaw, Name, ScopedTypeEnvironment, BodyLevel, Context3, Context5)
+      ; check_module_satisfies_one(InterfaceTypeRaw, MemberFieldsRaw, Name, ScopedTypeEnvironment, BodyLevel, Context3, Context5)
+      ),
+      % NOW swap `T`'s skolem back to its flexible replacement -- in whatever
+      % `InterfaceTypeRaw` turned out to be (a plain interface reference or
+      % an intersection; `substitute_skolems/3` dispatches on shape and
+      % recurses into an `intersection_type`'s members the same way it
+      % recurses into a `type_constructor`'s arguments, see types.pl).
+      substitute_skolems(InterfaceTypeRaw, SkolemPairs, ModuleType0)
+  ; Opacity == opaque ->
+      % An unascribed opaque module's synthetic identity ignores `T`
+      % entirely (this is the same pre-existing scope limit noted above: it
+      % has nowhere to register a row for `.field` access to look up, with
+      % or without a type parameter, so there is nothing extra to get right
+      % here for the generic case specifically).
+      ModuleType0 = type_constructor(Name, []),
+      Context5 = Context2
+  ; % Transparent, unascribed: the module's own row IS its type, so `T`
+    % needs the same skolem-back-to-flexible swap the ascribed branch does,
+    % just applied to the row directly (wrapping/unwrapping a throwaway
+    % `tuple_type` is how `substitute_skolems/3`'s existing per-field
+    % recursion is reused here, without needing a new exported helper).
+    substitute_skolems(tuple_type(MemberFieldsRaw, closed), SkolemPairs, tuple_type(MemberFields, closed)),
+    ModuleType0 = tuple_type(MemberFields, closed),
+    Context5 = Context2
+  ),
+  generalize(ModuleType0, Level, Context5, Scheme, Context6),
+  put_assoc(Name, Environment, defined(Scheme), EnvironmentOut),
+  ModuleType = ModuleType0,
+  ContextOut = Context6.
 % An `external` declaration carries no inferable body; its (trusted) type was
 % already seeded into the environment before the walk, so there is nothing to
 % do here.  Its "value" is unit, like a type declaration.
@@ -254,6 +357,104 @@ tie_forward_knot(Name, Environment, ValueType, ContextIn, ContextOut) :-
 placeholder_referenced(Placeholder, Context) :-
   resolve_head(Placeholder, Context, Resolved),
   Resolved \= Placeholder.
+
+% ---------------------------------------------------------------------------
+% Module bodies
+% ---------------------------------------------------------------------------
+
+% A module body follows the same use/public normalisation as a top-level
+% program (drop `use`/`use_all`, unwrap `public`, remember which names are
+% public) -- duplicated in miniature from analyser.pl's `normalise_items/4`
+% rather than shared, since analyser.pl itself depends on this module and a
+% shared predicate would be circular.  Nested `type` declarations inside a
+% module body are not yet supported (a future extension) and are rejected
+% with a clear error rather than silently mishandled.
+normalise_module_items([], [], []).
+normalise_module_items([use_node(_, _, _) | Rest], CleanItems, PublicNames) :- !,
+  normalise_module_items(Rest, CleanItems, PublicNames).
+normalise_module_items([use_all_node(_, _) | Rest], CleanItems, PublicNames) :- !,
+  normalise_module_items(Rest, CleanItems, PublicNames).
+normalise_module_items([public_node(definition_node(identifier_node(Name, NSpan), Annotation, Value, DSpan), _) | Rest],
+                      [definition_node(identifier_node(Name, NSpan), Annotation, Value, DSpan) | CleanItems],
+                      [Name | PublicNames]) :- !,
+  normalise_module_items(Rest, CleanItems, PublicNames).
+normalise_module_items([public_node(external_node(Name, Type, Source, ESpan), _) | Rest],
+                      [external_node(Name, Type, Source, ESpan) | CleanItems], [Name | PublicNames]) :- !,
+  normalise_module_items(Rest, CleanItems, PublicNames).
+normalise_module_items([public_node(module_node(Name, Parameters, Opacity, Ascription, Items, MSpan), _) | Rest],
+                      [module_node(Name, Parameters, Opacity, Ascription, Items, MSpan) | CleanItems], [Name | PublicNames]) :- !,
+  normalise_module_items(Rest, CleanItems, PublicNames).
+normalise_module_items([public_node(type_declaration_node(Name, _, _, _, _), _) | _Rest], _, _) :- !,
+  throw(analysis_error(module_nested_type_not_supported(Name))).
+normalise_module_items([type_declaration_node(Name, _, _, _, _) | _Rest], _, _) :- !,
+  throw(analysis_error(module_nested_type_not_supported(Name))).
+normalise_module_items([public_node(Other, _) | _], _, _) :- !,
+  throw(analysis_error(cannot_export(Other))).
+normalise_module_items([Item | Rest], [Item | CleanItems], PublicNames) :-
+  normalise_module_items(Rest, CleanItems, PublicNames).
+
+% The module's own natural type: a closed row of its PUBLIC members, each
+% keyed by name.  A member individually generalised as `type_scheme(Ids, Body)`
+% becomes a `forall_type(Ids, Body)` field -- `forall_type` is a first-class
+% monotype that nests anywhere (see types.pl), so a rank-2-polymorphic member
+% (e.g. `map: <A B>(...)`) is represented exactly, not flattened away.
+module_member_row([], _Environment, []).
+module_member_row([MemberName | Names], Environment,
+                  [tuple_field(readonly, label(MemberName), FieldType) | Fields]) :-
+  ( get_assoc(MemberName, Environment, defined(type_scheme(Ids, Body))) ->
+      ( Ids == [] -> FieldType = Body ; FieldType = forall_type(Ids, Body) )
+  ; throw(analysis_error(internal_error))
+  ),
+  module_member_row(Names, Environment, Fields).
+
+% Check the module's own row satisfies an ascribed interface's declared row,
+% field by field: the module's actual member type must be at least as
+% general as the interface's declared type -- `subsume/5`, the same
+% "actual-as-polymorphic-as-expected" check already used for Rank-N generics,
+% instantiating the module's member if it is itself generic and skolemising
+% the interface's expectation if IT is generic.
+check_module_satisfies([], _MemberFields, _Name, _Level, Context, Context).
+check_module_satisfies([tuple_field(_, label(MemberName), ExpectedType) | Rest], MemberFields, Name, Level,
+                       ContextIn, ContextOut) :-
+  ( memberchk(tuple_field(_, label(MemberName), ActualType), MemberFields) ->
+      subsume(ActualType, ExpectedType, Level, ContextIn, Context1)
+  ; throw(analysis_error(missing_interface_member(Name, MemberName)))
+  ),
+  check_module_satisfies(Rest, MemberFields, Name, Level, Context1, ContextOut).
+
+% check_module_satisfies_one(+InterfaceType, +MemberFields, +Name, +TypeEnvironment,
+%                            +Level, +ContextIn, -ContextOut).
+%
+% Resolve ONE ascribed interface -- `InterfaceType` is whatever
+% `convert_annotation_type` produced for it, either a `type_constructor`
+% (the interface is `opaque`: nominal, so its row is hidden from ordinary
+% unification and has to be looked up explicitly, the same way nominal
+% FIELD ACCESS does via `interface_row_for/7`) or a `tuple_type` directly
+% (the interface is transparent: already its own row, nothing to look up)
+% -- to its member row, then delegate to `check_module_satisfies/6` above.
+% This is the single-interface case (`module A: B = {...}`) AND, called once
+% per member, the building block for the intersection case
+% (`module A: B + C = {...}`) right below.
+check_module_satisfies_one(InterfaceType, MemberFields, Name, TypeEnvironment, Level, ContextIn, ContextOut) :-
+  ( InterfaceType = type_constructor(InterfaceName, InterfaceArguments) ->
+      interface_row_for(InterfaceName, InterfaceArguments, TypeEnvironment, Level, ContextIn, InterfaceRow, Context1)
+  ; InterfaceType = tuple_type(InterfaceRow, _) ->
+      Context1 = ContextIn
+  ; throw(analysis_error(not_an_interface_ascription(Name)))
+  ),
+  check_module_satisfies(InterfaceRow, MemberFields, Name, Level, Context1, ContextOut).
+
+% Ascribing to `B + C` means satisfying EACH of B and C independently,
+% against the SAME module row -- there is no "merged" row to build and check
+% once; `MemberFields` (the module's own row) is passed to every member's
+% own `check_module_satisfies_one` call unchanged.  A module missing a
+% member of ANY one interface fails here with that interface's own
+% `missing_interface_member`/`type_mismatch`-style error, exactly as it
+% would if it were ascribed to that interface alone.
+check_module_satisfies_each([], _MemberFields, _Name, _TypeEnvironment, _Level, Context, Context).
+check_module_satisfies_each([InterfaceType | Rest], MemberFields, Name, TypeEnvironment, Level, ContextIn, ContextOut) :-
+  check_module_satisfies_one(InterfaceType, MemberFields, Name, TypeEnvironment, Level, ContextIn, Context1),
+  check_module_satisfies_each(Rest, MemberFields, Name, TypeEnvironment, Level, Context1, ContextOut).
 
 % ---------------------------------------------------------------------------
 % The per-node inference rules
@@ -328,14 +529,28 @@ infer(block_node(Expressions, _), Level, InsideFunction, Environment, TypeEnviro
 % a record having AT LEAST this field (an open row tail), with any
 % mutability.  The open tail is what makes `(p) p.x` row-polymorphic: the
 % target need not be a fully known tuple.
+%
+% When the target is instead a NOMINAL type (a module or interface value --
+% an ordinary tagged union has no fields to access this way, its values are
+% inspected only through `match`), its row is looked up regardless of its own
+% opacity: opacity governs whether some OTHER, differently-named value may
+% substitute for it, not whether ITS OWN values support member access.
 infer(access_node(Target, Accessor, _), Level, InsideFunction, Environment, TypeEnvironment,
       ContextIn, FieldType, ContextOut) :-
   infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
   accessor_key(Accessor, Key),
-  fresh_unification_variable(Context1, Level, FieldType, Context2),
-  fresh_unification_variable(Context2, Level, AnyMutability, Context3),
-  fresh_unification_variable(Context3, Level, RestTail, Context4),
-  unify(TargetType, tuple_type([tuple_field(AnyMutability, Key, FieldType)], RestTail), Context4, ContextOut).
+  resolve_head(TargetType, Context1, ResolvedTarget),
+  ( ResolvedTarget = type_constructor(TypeName, TypeArguments) ->
+      interface_row_for(TypeName, TypeArguments, TypeEnvironment, Level, Context1, Fields, ContextOut),
+      ( memberchk(tuple_field(_, Key, FieldType), Fields) ->
+          true
+      ; throw(analysis_error(unknown_member(TypeName, Key)))
+      )
+  ; fresh_unification_variable(Context1, Level, FieldType, Context2),
+    fresh_unification_variable(Context2, Level, AnyMutability, Context3),
+    fresh_unification_variable(Context3, Level, RestTail, Context4),
+    unify(TargetType, tuple_type([tuple_field(AnyMutability, Key, FieldType)], RestTail), Context4, ContextOut)
+  ).
 
 % Member assignment `target.member = value`: like access, but the member's
 % mutability is required to be `mutable`, and the value's type must match.
