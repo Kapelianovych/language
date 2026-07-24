@@ -66,6 +66,7 @@
 :- use_module('../source/syntax/lexer',  [tokenize/2]).
 :- use_module('../source/syntax/parser', [parse_tokens/3]).
 :- use_module('../source/syntax/lower',  [lower/2, parse_source/2]).
+:- use_module('../source/syntax/semantic_tokens', [classify/2]).
 :- use_module('../source/analyser', [analyse_accumulating/6]).
 :- use_module('../source/module_paths', [
   read_source_chars/2,
@@ -553,6 +554,14 @@ compute(diagnostics(File), All) :-
 compute(type_at(File, Name), Type) :-
   query(analysis(File), analysis(_, DefinitionTypes, _)),
   ( member(Name - Type, DefinitionTypes) -> true ; Type = unknown ).
+
+% Semantic-highlighting tokens: an ascending-Start `tok(Type, Start, End)`
+% list over the file's green tree (see `syntax/semantic_tokens.pl`).  Depends
+% only on `parse`, so it firewalls exactly like `program_ast` -- a
+% type-error-only edit (parse tree unchanged) does not recompute this.
+compute(semantic_tokens(File), Tokens) :-
+  query(parse(File), parsed(Tree, _)),
+  classify(Tree, Tokens).
 
 % ===========================================================================
 % Node-at-offset -- locate the cursor in the green tree.

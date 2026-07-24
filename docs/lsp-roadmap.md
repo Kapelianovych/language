@@ -5,9 +5,9 @@ parser → green tree → `lower` to the historical AST (all in `source/syntax/`
 shared with the batch compiler) → demand-driven incremental analysis (single
 full-coverage checker = the batch analyser, cross-file import seeding,
 reader-macro expansion over the dependency closure) → JSON-RPC LSP server
-(diagnostics + hover) (the incremental engine and JSON-RPC loop live in `lsp/`).
-The batch compiler is untouched and its emitted JS is byte-identical to the
-committed baselines.
+(diagnostics + hover + semantic tokens) (the incremental engine and JSON-RPC
+loop live in `lsp/`). The batch compiler is untouched and its emitted JS is
+byte-identical to the committed baselines.
 
 This document tracks what is left. Nothing here is a bug; it is depth and breadth.
 
@@ -53,8 +53,30 @@ This document tracks what is left. Nothing here is a bug; it is depth and breadt
   interface/import machinery.
 
 ### 2.4 Completion, document symbols, signature help, semantic tokens, rename
-- None implemented. Document symbols and semantic tokens are the cheapest (a walk
-  of the green tree); completion and rename depend on 2.1 + 2.3.
+- **Semantic tokens** — DONE (2026-07-24). `source/syntax/semantic_tokens.pl`
+  walks the raw green tree (not the lowered AST — trivia/keywords/operators
+  need colouring too) and emits `tok(Type, Start, End)` for every leaf;
+  `queries:semantic_tokens(File)` memoises it off `parse` (so it firewalls
+  exactly like `program_ast`); `lsp.pl` advertises the legend + `full: true`
+  in `initialize`, serves `textDocument/semanticTokens/full`, and delta-
+  encodes per the LSP wire format in one pass (no re-scan per token). 15
+  token types (namespace/type/typeParameter/parameter/variable/property/
+  enumMember/function/method/macro/keyword/comment/string/number/operator),
+  no modifiers. Most of the tree needs no special case at all — type-shaped
+  green nodes (`type_name`, `type_param`, `variant`, ...) are self-describing
+  regardless of nesting, and a bare identifier defaults to `variable`; only
+  ~15 PARENT kinds whose child's role isn't otherwise visible in the tree
+  shape (a function's parameter list vs. a tuple literal's member list, both
+  `member` nodes; `type_declaration`'s bare name leaf vs. `macro_definition`'s)
+  get an explicit `special/4` override. Verified against the full standard
+  library (850 tokens) and every fixture (`golden/`, `roundtrip/`, including
+  the malformed/error-recovery one) — no crash, strictly ascending `Start`
+  everywhere — plus a real framed JSON-RPC session end to end. Known
+  imprecisions: soft keywords used as an ordinary variable READ (not a
+  declaration) still colour `keyword` by text; `obj.method(...)` colours
+  `method` as `property`; `|` is always `operator` even as an arm/variant
+  separator. Document symbols are the next-cheapest green-tree walk;
+  completion and rename depend on 2.1 + 2.3.
 
 ## 3. Protocol fidelity
 
@@ -86,11 +108,12 @@ This document tracks what is left. Nothing here is a bug; it is depth and breadt
 
 ## Suggested order
 1. ~~**2.1 node-at-offset**~~ — DONE. ~~**4 (spans/messages)**~~ — DONE.
+   ~~**2.4 semantic tokens**~~ — DONE.
 2. **2.3 go-to-definition / find-references** — next; builds on `node_at` (the
    identifier token under the cursor) plus the existing interface/import machinery.
 3. **3.1 UTF-16 positions** — small, improves real-editor fidelity.
-4. **2.4 document symbols / semantic tokens** (cheap green-tree walks), then
-   completion/rename (need 2.3).
+4. **2.4 document symbols** (cheap green-tree walk, same shape as semantic
+   tokens), then completion/rename (need 2.3).
 5. **2.2 exact sub-expression hover** — needs per-node types (see 1.1).
 6. **1.1 per-definition granularity** — the largest analyser change; do last,
    measure first (file-granularity may be fast enough in practice).

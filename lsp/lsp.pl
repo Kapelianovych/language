@@ -12,12 +12,13 @@
                      Value terms: pairs([Key-Value,..]) (object) | list([..]) |
                      string(Chars) | number(N) | boolean(true|false) | null.
       * DISPATCH  -- on `method`: initialize, textDocument/{didOpen,didChange,
-                     didClose,hover}, shutdown, exit.
+                     didClose,hover,semanticTokens/full}, shutdown, exit.
 
     HOW IT USES THE ENGINE
       didOpen / didChange  -> set_input(src(Uri), Text)   (ticks the revision)
                            -> query(diagnostics(Uri))     -> publishDiagnostics
       hover                -> position -> the type of the enclosing definition
+      semanticTokens/full  -> query(semantic_tokens(Uri)) -> delta-encoded ints
     Because `set_input` only bumps the revision and the Salsa firewall recomputes
     just the affected queries, the server stays responsive per keystroke.
 
@@ -33,6 +34,7 @@
 :- use_module(library(lists)).
 :- use_module(library(serialization/json), [json_chars//1]).
 :- use_module('queries', [init_db/0, set_input/2, query/2]).
+:- use_module('../source/syntax/semantic_tokens', [token_type/2]).
 :- use_module('../source/module_paths', [canonical_chars/2]).
 :- use_module('../source/diagnostics', [message_text/2, reason_text/2, type_text/2]).
 
@@ -110,9 +112,11 @@ handle(Message, Out) :-
 handle(_Message, _Out).                                    % a response / unknown: ignore
 
 dispatch('initialize', id(Id), _Msg, Out) :- !,
+  semantic_tokens_capability(SemanticTokens),
   Capabilities = pairs([string("textDocumentSync")-number(1),    % 1 = full sync
                         string("hoverProvider")-boolean(true),
-                        string("diagnosticProvider")-boolean(true)]),
+                        string("diagnosticProvider")-boolean(true),
+                        string("semanticTokensProvider")-SemanticTokens]),
   respond(Out, Id, pairs([string("capabilities")-Capabilities])).
 dispatch('initialized', _Req, _Msg, _Out) :- !.
 dispatch('shutdown', id(Id), _Msg, Out) :- !, respond(Out, Id, null).
@@ -133,6 +137,12 @@ dispatch('textDocument/hover', id(Id), Msg, Out) :- !,
   get(Params, "textDocument", Doc), get_str(Doc, "uri", Uri),
   get(Params, "position", Pos), get_num(Pos, "line", Line), get_num(Pos, "character", Char),
   hover_response(Uri, Line, Char, Result),
+  respond(Out, Id, Result).
+
+dispatch('textDocument/semanticTokens/full', id(Id), Msg, Out) :- !,
+  get(Msg, "params", Params),
+  get(Params, "textDocument", Doc), get_str(Doc, "uri", Uri),
+  semantic_tokens_response(Uri, Result),
   respond(Out, Id, Result).
 
 dispatch(_Method, id(Id), _Msg, Out) :- !, respond(Out, Id, null).   % unimplemented request
@@ -206,6 +216,67 @@ count_position([C | Cs], Remaining, Line0, Char0, Line, Char) :-
   Remaining > 0, Remaining1 is Remaining - 1,
   ( C == '\n' -> Line1 is Line0 + 1, Char1 = 0 ; Line1 = Line0, Char1 is Char0 + 1 ),
   count_position(Cs, Remaining1, Line1, Char1, Line, Char).
+
+% ---------------------------------------------------------------------------
+% Semantic tokens: colour every leaf via `syntax/semantic_tokens.pl`'s
+% classifier over the green tree, delta-encoded per the LSP wire format (each
+% token is 5 ints: deltaLine, deltaStartChar (from the PREVIOUS token's start;
+% absolute when deltaLine > 0), length, legend-index, modifiers -- always 0,
+% no modifiers are used).  `classify/2` already returns tokens in ascending
+% `Start` order (see that module's header), so no sort is needed here either.
+% ---------------------------------------------------------------------------
+semantic_tokens_capability(pairs([string("legend")-Legend, string("full")-boolean(true)])) :-
+  legend_names(Names),
+  atom_names_json(Names, NameJson),
+  Legend = pairs([string("tokenTypes")-list(NameJson), string("tokenModifiers")-list([])]).
+
+% The legend index of a type name IS its position here -- built by walking
+% `token_type/2` from 0 up rather than trusting file order, so the legend
+% can never silently drift out of sync with the encoder below.
+legend_names(Names) :- legend_names(0, Names).
+legend_names(I, [Name | Rest]) :- token_type(Name, I), !, I1 is I + 1, legend_names(I1, Rest).
+legend_names(_, []).
+
+atom_names_json([], []).
+atom_names_json([Name | Names], [string(Chars) | Json]) :-
+  atom_chars(Name, Chars), atom_names_json(Names, Json).
+
+semantic_tokens_response(Uri, pairs([string("data")-list(Data)])) :-
+  uri_to_path(Uri, Path),
+  query(src(Path), Text),
+  query(semantic_tokens(Path), Tokens),
+  encode_tokens(Tokens, Text, Ints),
+  numbers_json(Ints, Data).
+
+numbers_json([], []).
+numbers_json([N | Ns], [number(N) | Js]) :- numbers_json(Ns, Js).
+
+encode_tokens(Toks, Text, Ints) :- encode_tokens(Toks, Text, 0, 0, 0, 0, 0, Ints).
+
+encode_tokens([], _Text, _Off, _Line, _Char, _PrevLine, _PrevChar, []).
+encode_tokens([tok(Type, S, E) | Rest], Text0, Off0, Line0, Char0, PrevLine0, PrevChar0, Ints) :-
+  SkipToStart is S - Off0,
+  consume_chars(Text0, SkipToStart, Line0, Char0, Text1, LineS, CharS),
+  SkipToEnd is E - S,
+  consume_chars(Text1, SkipToEnd, LineS, CharS, Text2, LineE, CharE),
+  DeltaLine is LineS - PrevLine0,
+  ( DeltaLine =:= 0 -> DeltaChar is CharS - PrevChar0 ; DeltaChar = CharS ),
+  Length is E - S,
+  token_type(Type, TypeIndex),
+  Ints = [DeltaLine, DeltaChar, Length, TypeIndex, 0 | IntsRest],
+  encode_tokens(Rest, Text2, E, LineE, CharE, LineS, CharS, IntsRest).
+
+% consume_chars(+Text, +N, +Line0, +Char0, -RestText, -Line, -Char): advance N
+% characters through Text (the SAME line/column counting `count_position/6`
+% does), returning both the new position and the unconsumed suffix, so the
+% next token's scan picks up where this one left off instead of re-scanning
+% from the start of the file (each token is amortised O(its own length), not
+% O(file length), even over hundreds of tokens).
+consume_chars(Text, 0, Line, Char, Text, Line, Char) :- !.
+consume_chars([C | Cs], N, Line0, Char0, Rest, Line, Char) :-
+  N > 0, N1 is N - 1,
+  ( C == '\n' -> Line1 is Line0 + 1, Char1 = 0 ; Line1 = Line0, Char1 is Char0 + 1 ),
+  consume_chars(Cs, N1, Line1, Char1, Rest, Line, Char).
 
 % ---------------------------------------------------------------------------
 % Hover: the type of the definition at the cursor.  (A fuller server locates the
