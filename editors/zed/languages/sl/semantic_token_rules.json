@@ -1,0 +1,17 @@
+[
+  { "token_type": "namespace", "style": ["namespace"] },
+  { "token_type": "type", "style": ["type"] },
+  { "token_type": "typeParameter", "style": ["type.parameter"] },
+  { "token_type": "parameter", "style": ["variable.parameter"] },
+  { "token_type": "variable", "style": ["variable"] },
+  { "token_type": "property", "style": ["property"] },
+  { "token_type": "enumMember", "style": ["constructor"] },
+  { "token_type": "function", "style": ["function"] },
+  { "token_type": "method", "style": ["function.method", "function"] },
+  { "token_type": "macro", "style": ["function.macro"] },
+  { "token_type": "keyword", "style": ["keyword"] },
+  { "token_type": "comment", "style": ["comment"] },
+  { "token_type": "string", "style": ["string"] },
+  { "token_type": "number", "style": ["number"] },
+  { "token_type": "operator", "style": ["operator"] }
+]

@@ -1,0 +1,18 @@
+# No `grammar` key: highlighting is LSP semantic-tokens-only here (see
+# semantic_token_rules.json and ../../extension.toml's comment) -- file-type
+# association, bracket/comment behavior, and the language server all still
+# work without one, the same as Zed's built-in grammar-less "Plain Text".
+name = "SL"
+path_suffixes = ["sl"]
+line_comments = ["# "]
+autoclose_before = ")}>"
+
+# The language has no `[`/`]` at all (see ../../../docs/grammar.md) -- tuples
+# and records use `(...)`, blocks use `{...}`, generics/type-arguments use
+# `<...>`.
+brackets = [
+  { start = "(", end = ")", close = true, newline = false },
+  { start = "{", end = "}", close = true, newline = true },
+  { start = "<", end = ">", close = false, newline = false },
+  { start = "'", end = "'", close = true, newline = false, not_in = ["string"] },
+]

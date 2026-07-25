@@ -62,6 +62,7 @@
 
 :- use_module(library(lists)).
 :- use_module(library(assoc)).
+:- use_module(library(charsio), [write_term_to_chars/3, read_from_chars/2]).
 :- use_module(library(iso_ext), [setup_call_cleanup/3]).
 :- use_module('../source/syntax/lexer',  [tokenize/2]).
 :- use_module('../source/syntax/parser', [parse_tokens/3]).
@@ -89,7 +90,11 @@
 % ---------------------------------------------------------------------------
 :- dynamic(current_revision/1).
 :- dynamic(input/3).                 % input(Key, Value, ChangedAtRevision)
-:- dynamic(memo/5).                  % memo(Key, Value, Deps, VerifiedAt, ChangedAt)
+:- dynamic(memo/5).                  % memo(Key, EncodedValue, Deps, VerifiedAt, ChangedAt)
+                                      % EncodedValue is Value run through
+                                      % `encode_memo_value/2` (see below), NOT
+                                      % the natural term -- `assertz/1` cannot
+                                      % hold most real parse trees otherwise.
 :- dynamic(comp_stack/1).            % comp_stack(ListOfCurrentlyComputingKeys)
 :- dynamic(dep_edge/2).              % dep_edge(ParentKey, ChildKey)
 :- dynamic(exec_log/1).              % exec_log(Key) -- one per actual recompute
@@ -175,18 +180,70 @@ record_dependency(_Key).             % no enclosing computation: nothing to reco
 
 derived(Key, Value) :-
   current_revision(R),
-  ( memo(Key, V, Deps, Verified, Changed) ->
+  ( memo(Key, EncodedV, Deps, Verified, Changed) ->
       ( Verified =:= R ->
-          Value = V                                   % step 1: fresh this revision
+          decode_memo_value(EncodedV, Value)          % step 1: fresh this revision
       ; deps_unchanged_since(Deps, Verified) ->
           % step (a): still valid -- re-stamp verified, keep value & changed_at.
-          retract(memo(Key, V, Deps, Verified, Changed)),
-          assertz(memo(Key, V, Deps, R, Changed)),
-          Value = V
-      ; recompute(Key, R, V, Changed, Value)          % steps (b)/(c)
+          % `EncodedV` is copied through untouched -- it is already in its
+          % assert-safe encoded form (see `encode_memo_value/2` below), so
+          % there is nothing to re-encode here.
+          retract(memo(Key, EncodedV, Deps, Verified, Changed)),
+          assertz(memo(Key, EncodedV, Deps, R, Changed)),
+          decode_memo_value(EncodedV, Value)
+      ; decode_memo_value(EncodedV, OldValue),
+        recompute(Key, R, OldValue, Changed, Value)   % steps (b)/(c)
       )
   ; recompute_fresh(Key, R, Value)
   ).
+
+% ---------------------------------------------------------------------------
+% Memo value encoding.
+%
+% WHY THIS EXISTS: Scryer's `assertz/1` rejects a single ground term once it
+% has more than roughly 500 total nested subterms, raising
+% `representation_error(max_arity)` -- NOT an arity-255 problem with any one
+% functor (this codebase's `node(Kind, Children)` / `token(Kind, Text, Span)`
+% nodes never have more than a handful of arguments each), but a ceiling on
+% the TOTAL number of nested compound subterms reachable from one term handed
+% to a single `assertz` call. A lossless parse tree nests one such wrapper per
+% syntactic construct (every operator, every punctuation token, every bit of
+% trivia is its own `node`/`token`), so it blows through that ceiling on any
+% real `.sl` file -- confirmed by bisection to fail on files as small as
+% ~50 lines, not just large ones like `libraries/Std.sl`. Before this fix,
+% `assertz(memo(Key, Value, ...))` stored `Value` (e.g. a whole `parse(File)`
+% tree) as a live nested term, so opening almost any real file crashed the
+% query engine (and with it, `didOpen`/hover/diagnostics -- the LSP process
+% kept running, but that query's `assertz` threw and the request that
+% triggered it got no response).
+%
+% The limit is specifically about NESTED COMPOUND terms of varying functors --
+% NOT about flat list length: asserting a whole file's raw source text (a
+% single, possibly multi-thousand-character list, via `set_input/2`) has
+% never failed here, in any of this file's callers. So rather than storing a
+% query's result as a live nested term, render it to its TEXTUAL form (one
+% flat character list, however long) with `write_term_to_chars/3`, and store
+% THAT. `read_from_chars/2` parses it straight back into the exact original
+% term. This is transparent to every `compute/2` clause and every caller of
+% `query/2` elsewhere in the codebase: they only ever see the natural,
+% decoded term shape, both in and out -- encoding is purely an implementation
+% detail of how a value is parked inside a `memo/5` fact.
+% ---------------------------------------------------------------------------
+
+% encode_memo_value(+Value, -Chars): render Value to a flat, assert-safe
+% character list. `quoted(true)` makes atoms/char-list text read back
+% faithfully (e.g. an identifier spelled the same as an operator, or a string
+% token's literal text). `write_term_to_chars/3` does not append a
+% clause-terminating full stop, but `read_from_chars/2` (a thin wrapper over
+% the standard term reader) requires one -- so one is appended here, and
+% `decode_memo_value/2` never has to think about it again.
+encode_memo_value(Value, Chars) :-
+  write_term_to_chars(Value, [quoted(true)], Chars0),
+  append(Chars0, " .", Chars).
+
+% decode_memo_value(+Chars, -Value): the inverse of `encode_memo_value/2`.
+decode_memo_value(Chars, Value) :-
+  read_from_chars(Chars, Value).
 
 % A query is still valid if EVERY dependency, brought up to date, has not
 % changed since this query was last verified.
@@ -204,19 +261,24 @@ changed_at(Key, ChangedAt) :-
   !.
 
 % Recompute an existing (stale) query; apply the value-equality FIREWALL.
+% `OldValue` arrives already DECODED (by `derived/2`, the only caller) back to
+% its natural term shape, so the `==` comparison below is the ordinary
+% structural comparison it always was -- encoding is invisible here too.
 recompute(Key, R, OldValue, OldChanged, Value) :-
   run_compute(Key, NewValue, NewDeps),
   ( NewValue == OldValue -> NewChanged = OldChanged   % (b) firewall: no propagation
   ; NewChanged = R                                    % (c) value changed at R
   ),
+  encode_memo_value(NewValue, EncodedNewValue),
   retractall(memo(Key, _, _, _, _)),
-  assertz(memo(Key, NewValue, NewDeps, R, NewChanged)),
+  assertz(memo(Key, EncodedNewValue, NewDeps, R, NewChanged)),
   Value = NewValue.
 
 % Recompute a query that has no memo yet (first demand): it changed "now".
 recompute_fresh(Key, R, Value) :-
   run_compute(Key, Value, Deps),
-  assertz(memo(Key, Value, Deps, R, R)).
+  encode_memo_value(Value, EncodedValue),
+  assertz(memo(Key, EncodedValue, Deps, R, R)).
 
 % Run a compute/2 rule while tracking the queries it reads as dependencies, and
 % counting the recompute.

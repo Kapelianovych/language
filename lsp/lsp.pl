@@ -32,6 +32,7 @@
 :- set_prolog_flag(double_quotes, chars).
 
 :- use_module(library(lists)).
+:- use_module(library(process)).
 :- use_module(library(serialization/json), [json_chars//1]).
 :- use_module('queries', [init_db/0, set_input/2, query/2]).
 :- use_module('../source/syntax/semantic_tokens', [token_type/2]).
@@ -57,10 +58,19 @@ read_message(In, Message) :-
 
 read_headers(In, Acc, Length) :-
   read_line(In, Line),
-  ( Line == eof             -> Length = eof
-  ; Line == []              -> Length = Acc               % blank line ends headers
-  ; content_length(Line, N) -> read_headers(In, N, Length)
-  ; read_headers(In, Acc, Length) ).                       % ignore other headers
+  ( Line == eof              -> Length = eof
+  ; Line == [], Acc == none  -> Length = eof                % blank line, no headers at all:
+                                                            % not a real message (every LSP
+                                                            % message has a Content-Length) --
+                                                            % some streams never surface a true
+                                                            % end_of_file over a closed pipe, so
+                                                            % this is also how that silently
+                                                            % looping "phantom blank line" case
+                                                            % is caught and turned into a clean
+                                                            % shutdown instead of a crash below
+  ; Line == []               -> Length = Acc                % blank line ends headers
+  ; content_length(Line, N)  -> read_headers(In, N, Length)
+  ; read_headers(In, Acc, Length) ).                        % ignore other headers
 
 % A header line, CRLF- or LF-terminated, without its terminator.
 read_line(In, Result) :-
@@ -93,7 +103,25 @@ put_chars(Out, [C | Cs]) :- put_char(Out, C), put_chars(Out, Cs).
 % The loop.
 % ===========================================================================
 
-serve :- current_input(In), current_output(Out), serve_streams(In, Out).
+% Neither `current_input` nor `open('/dev/stdin', ...)` can be used to read a
+% live LSP connection: Scryer's `Stream::InputFile` (what both resolve to)
+% decides end-of-stream by comparing the read position against the open
+% file's `fstat` size -- always 0 for a pipe/FIFO, since pipes have no size.
+% `current_input` (wrapped by the interactive line editor besides) just
+% blocks forever waiting for a real close; `open('/dev/stdin', ...)` returns
+% exactly ONE character correctly, then permanently misreports every
+% following read as `end_of_file` (position 1 > size 0, "past end", latched)
+% -- fatal either way for a server whose client keeps the pipe open for the
+% whole session. `library(process)`'s `pipe(-Stream)` is a distinct stream
+% implementation (a `CharReader<PipeReader>`, not `Stream::InputFile`) that
+% has no such bug, so `cat` is spawned to relay our real stdin through one:
+% its own stdin is our inherited stdin, and its stdout is captured as that
+% pipe stream. (POSIX-only; matches the rest of `bin/` already assuming a
+% Unix-like shell.)
+serve :-
+  process_create("/bin/cat", [], [stdin(std), stdout(pipe(In)), stderr(std)]),
+  current_output(Out),
+  serve_streams(In, Out).
 
 serve_streams(In, Out) :-
   init_db,
@@ -113,9 +141,15 @@ handle(_Message, _Out).                                    % a response / unknow
 
 dispatch('initialize', id(Id), _Msg, Out) :- !,
   semantic_tokens_capability(SemanticTokens),
+  % No `diagnosticProvider` entry: that capability is for the PULL model
+  % (`textDocument/diagnostic`, answered on request), which this server does
+  % not implement. Diagnostics here are PUSHED (`textDocument/publishDiagnostics`
+  % notifications sent from `didOpen`/`didChange`), which needs no capability
+  % advertisement at all -- and per the spec `diagnosticProvider` is a
+  % `DiagnosticOptions` object, never a bare boolean, so sending `true` here
+  % failed to validate against the client's schema entirely.
   Capabilities = pairs([string("textDocumentSync")-number(1),    % 1 = full sync
                         string("hoverProvider")-boolean(true),
-                        string("diagnosticProvider")-boolean(true),
                         string("semanticTokensProvider")-SemanticTokens]),
   respond(Out, Id, pairs([string("capabilities")-Capabilities])).
 dispatch('initialized', _Req, _Msg, _Out) :- !.

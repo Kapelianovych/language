@@ -181,8 +181,70 @@ definition_types([definition_node(identifier_node(Name, _), _, _, _) | Rest], En
       fully_resolve(Body, Context, Resolved)
   ; Resolved = unknown ),
   definition_types(Rest, Environment, Context, DefinitionTypes).
+% An `external Name: Type = ...` (foreign JS import) has no VALUE to check
+% against, but it is bound into `Environment` up front by `seed_externals/7`
+% (called before inference, above) exactly like an ordinary top-level
+% annotation would be -- so the SAME lookup that resolves a `definition_node`
+% above already has its scheme sitting there waiting. Without this clause an
+% external falls through to the catch-all below (which only exists to SKIP
+% node kinds hover has nothing to say about) and hover on e.g. `panic` finds
+% nothing, even though its declared type is right there in the source.
+definition_types([external_node(Name, _Type, _Source, _Span) | Rest], Environment, Context,
+                 [Name - Resolved | DefinitionTypes]) :- !,
+  ( get_assoc(Name, Environment, defined(type_scheme(_, Body))) ->
+      fully_resolve(Body, Context, Resolved)
+  ; Resolved = unknown ),
+  definition_types(Rest, Environment, Context, DefinitionTypes).
+% A `module Name<Params> = { ... }` binds `Name` to the module's own value
+% type via `put_assoc/4` in `infer_sequence_item/9`'s `module_node` clause
+% exactly like a `definition_node` does -- so the module's OWN hover entry
+% (`Box` itself) needs nothing new, same lookup as above.
+%
+% Its MEMBERS (`wrap` inside `Box`) are different: they are type-checked in a
+% private environment local to that same `infer_sequence_item` call (built by
+% `infer_sequence` over the module's own items, then discarded once the
+% module's row is built) -- never merged into `Environment`, so there is no
+% `Name`-keyed scheme for e.g. `wrap` to look up directly here.
+%
+% But a TRANSPARENT module's resolved type already IS that row: one
+% `tuple_field(_, label(MemberName), MemberType)` per public member (see
+% `module_member_row/3`). So once the module's own type is resolved below,
+% each member's type is just a field lookup away (`module_member_types/2`) --
+% no need to reach back into that discarded private environment at all. An
+% OPAQUE module's row is hidden BY DESIGN (its resolved type is a bare
+% `type_constructor(Name, [])`, no fields) -- so its members simply get no
+% entry here, the same graceful "no hover" as any other name this predicate
+% cannot resolve, not a bug: opacity means there is nothing to show.
+%
+% Every member ends up in the SAME flat `Name - Type` list a top-level
+% definition would, with no "Box." qualification -- deliberately, since that
+% is the granularity hover already works at (`node_at` gives a bare
+% identifier's text; see `lsp/lsp.pl`'s `definition_at/4`), so a USE site
+% like `Box.wrap`'s `wrap` token resolves through the exact same lookup as
+% the member's own definition site, for free. Trade-off inherited from that
+% existing flat-by-name design, not introduced here: two distinct modules
+% with a same-named member are ambiguous (the first match in the list wins) --
+% no worse than any other shadowed name already is in this hover model.
+definition_types([module_node(Name, _Parameters, _Opacity, _Ascription, _Items, _Span) | Rest],
+                 Environment, Context, AllDefinitionTypes) :- !,
+  ( get_assoc(Name, Environment, defined(type_scheme(_, Body))) ->
+      fully_resolve(Body, Context, Resolved)
+  ; Resolved = unknown ),
+  module_member_types(Resolved, MemberDefinitionTypes),
+  definition_types(Rest, Environment, Context, RestDefinitionTypes),
+  append([Name - Resolved | MemberDefinitionTypes], RestDefinitionTypes, AllDefinitionTypes).
 definition_types([_Other | Rest], Environment, Context, DefinitionTypes) :-
   definition_types(Rest, Environment, Context, DefinitionTypes).
+
+% module_member_types(+ModuleResolvedType, -MemberDefinitionTypes): pull
+% `MemberName - MemberType` out of a transparent module's own resolved row
+% type. Anything else (an opaque module's synthetic `type_constructor(Name,
+% [])`, or `unknown`) has no derivable members, so yields none.
+module_member_types(tuple_type(Fields, _Tail), MemberDefinitionTypes) :- !,
+  findall(MemberName - MemberType,
+          member(tuple_field(_, label(MemberName), MemberType), Fields),
+          MemberDefinitionTypes).
+module_member_types(_Other, []).
 
 % Seed a term environment from the constructor schemes (each a `defined`
 % binding usable anywhere), starting from the imported value environment.

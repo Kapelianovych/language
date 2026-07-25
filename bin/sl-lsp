@@ -1,0 +1,16 @@
+#!/bin/sh
+# sl-lsp -- run the language server from anywhere.
+#
+# Mirrors bin/slc: exports SL_HOME (the repository root, one directory up
+# from here) so the relative-path assumptions inside the Prolog sources hold
+# regardless of the caller's cwd, then execs scryer-prolog on the LSP entry
+# point. lsp/serve.pl's `:- initialization(serve)` starts serving as soon as
+# it loads -- run this with no arguments; the client speaks the LSP's
+# standard `Content-Length`-framed JSON-RPC over stdin/stdout.
+#
+# An already-set SL_HOME is respected (useful for pointing at a different
+# checkout's standard library).
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
+SL_HOME=${SL_HOME:-$(dirname -- "$HERE")}
+export SL_HOME
+exec scryer-prolog "$SL_HOME/lsp/serve.pl"
