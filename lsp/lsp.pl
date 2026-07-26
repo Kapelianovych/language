@@ -356,6 +356,6 @@ pos_off([C | Cs], Line, Char, Acc, Offset) :-
   pos_off(Cs, Line1, Char, Acc1, Offset).
 pos_off([], _Line, _Char, Acc, Acc).
 
-hover_contents(Name, Type, pairs([string("contents")-string(Contents)])) :-
+hover_contents(_Name, Type, pairs([string("contents")-string(Contents)])) :-
   type_text(Type, TypeText),
-  append(Name, " : ", P), append(P, TypeText, Contents).
+  append([/* Name, " : ", */ "", TypeText], Contents).

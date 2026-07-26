@@ -1,21 +1,14 @@
 id = "sl"
-name = "SL"
+name = "Silent"
 version = "0.0.1"
 schema_version = 1
 authors = ["Yevhen Kapelianovych"]
-description = "SL language support: diagnostics, hover, and semantic tokens via the bundled LSP server"
+description = "Silent language support: diagnostics, hover, and semantic tokens via the bundled LSP server"
 repository = "https://github.com/Kapelianovych/language"
 
 # Deliberately no [grammars.sl]: highlighting comes from the LSP's own
-# `textDocument/semanticTokens/full` (see languages/sl/semantic_token_rules.json
-# and source/syntax/semantic_tokens.pl), not a tree-sitter grammar. A working
-# grammar for SL does exist at ../../tree-sitter-sl (its own git repo, kept
-# around in case it's wanted later for folding/indentation/structural
-# selection, or for editors other than Zed) but building it turned out to
-# require Zed to download a ~100MB WASI SDK on first use, which hung on a
-# truncated/corrupt download here -- not worth the friction just for
-# highlighting when semantic tokens already cover it.
+# semantic token rules, not a tree-sitter grammar.
 
 [language_servers.sl-lsp]
-name = "SL Language Server"
-language = "SL"
+name = "Silent Language Server"
+language = "Silent"

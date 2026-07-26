@@ -761,7 +761,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed_sl"
+name = "zed_silent"
 version = "0.0.1"
 dependencies = [
  "zed_extension_api",

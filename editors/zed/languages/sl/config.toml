@@ -2,12 +2,12 @@
 # semantic_token_rules.json and ../../extension.toml's comment) -- file-type
 # association, bracket/comment behavior, and the language server all still
 # work without one, the same as Zed's built-in grammar-less "Plain Text".
-name = "SL"
+name = "Silent"
 path_suffixes = ["sl"]
 line_comments = ["# "]
 autoclose_before = ")}>"
 
-# The language has no `[`/`]` at all (see ../../../docs/grammar.md) -- tuples
+# The language has no `[`/`]` at all (see grammar) -- tuples
 # and records use `(...)`, blocks use `{...}`, generics/type-arguments use
 # `<...>`.
 brackets = [

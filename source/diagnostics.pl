@@ -98,55 +98,69 @@ reason_words([C | Cs], [C | Ms]) :- reason_words(Cs, Ms).
 
 % ---------------------------------------------------------------------------
 % Rendering the analyser's resolved types (the SINGLE type representation).
-%   number | boolean | string                         base types
-%   function_type(Params, Return)                     `(p, ..) -> r`
-%   tuple_type(Fields, Tail)                           record `(key: t, .. | ..)`
+%   number | boolean | string                          base types
+%   function_type(Params, Return)                      `(p ..) r`
+%   tuple_type(Fields, Tail)                           record `(key: t .. ..)`
 %       Fields = [tuple_field(Mutability, Key, Type)]; Key = index(N) | label(Cs)
 %       Tail   = closed | unification_variable(_)      (open row)
-%   type_constructor(Name, Args)                       nominal `Name(a, ..)`
-%   unification_variable(Id)                           `?Id` (unsolved)
-%   forall_type(_, Body)                               show the body
-%   skolem(Id, _, Name)                                `Name` (rigid; `!Id` if nameless)
+%   type_constructor(Name, Args)                       nominal `Name<a ..>`
+%   unification_variable(Id)                           `_UId` (unsolved)
+%   quantified_variable(Id)                            `_QId`
+%   forall_type(BoundIds, Body)                        `<id ..>Body`
+%   skolem(Id, _, Name)                                `Name` (rigid; `_SId` if nameless)
 % ---------------------------------------------------------------------------
 type_text(Type, Chars) :- phrase(tt(Type), Chars), !.
 type_text(_Type, "?").
 
-tt(number)  --> "number".
-tt(boolean) --> "boolean".
-tt(string)  --> "string".
-tt(unknown) --> "?".
-tt(unification_variable(Id)) --> "?", emit_num(Id).
-tt(skolem(Id, _, anonymous)) --> !, "!", emit_num(Id).
-tt(skolem(_, _, Name))       --> emit_name(Name).
-tt(function_type(Params, Return)) --> "(", tt_seq(Params), ") -> ", tt(Return).
-tt(tuple_type(Fields, Tail))      --> "(", tt_fields(Fields), tt_tail(Tail), ")".
-tt(type_constructor(Name, []))         --> emit_name(Name).
-tt(type_constructor(Name, [A | As]))   --> emit_name(Name), "(", tt_seq([A | As]), ")".
-tt(forall_type(_, Body)) --> tt(Body).
+tt(number)                                  --> "number".
+tt(boolean)                                 --> "boolean".
+tt(string)                                  --> "string".
+tt(unknown)                                 --> "?".
+tt(unification_variable(Id))                --> "_U", emit_number(Id).
+tt(quantified_variable(Id))                 --> "_Q", emit_number(Id).
+tt(skolem(Id, _, anonymous))                --> !, "_S", emit_number(Id).
+tt(skolem(_, _, Name))                      --> emit_name(Name).
+tt(function_type(Params, Return))           --> "(", tt_sequence(Params), ") ", tt(Return).
+tt(tuple_type(Fields, Tail))                --> "(", tt_fields(Fields), tt_tail(Tail), ")".
+tt(type_constructor(Name, []))              --> emit_name(Name).
+tt(type_constructor(Name, TypeParameters))  --> emit_name(Name), "<", tt_sequence(TypeParameters), ">".
+tt(forall_type(BoundIds, Body))             --> "<", { tt_bound_ids(BoundIds, Ids) }, tt_sequence(Ids), ">", tt(Body).
 tt(_) --> "?".
+% tt(X) --> { format(user_error, "tt fallback hit for: ~q~n", [X]) }, "?".
+% tt(type_lambda([], Body)) --> tt(Body).
+% tt(type_lambda(TypeArguments, Body)) --> tt(Body), "<", tt_sequence(TypeArguments), ">".
 
-tt_seq([])            --> [].
-tt_seq([T])           --> tt(T).
-tt_seq([T, U | Ts])   --> tt(T), ", ", tt_seq([U | Ts]).
+% Wraps bound identifiers into quantified variables, so they will have same name
+% as types reported from type body.
+tt_bound_ids([], []).
+tt_bound_ids([Id | Ids], [quantified_variable(Id) | QuantifiedIds]) :-
+  tt_bound_ids(Ids, QuantifiedIds).
+
+tt_sequence([])            --> [].
+tt_sequence([T])           --> tt(T).
+tt_sequence([T, U | Ts])   --> tt(T), " ", tt_sequence([U | Ts]).
 
 tt_fields([])          --> [].
 tt_fields([F])         --> tt_field(F).
-tt_fields([F, G | Fs]) --> tt_field(F), ", ", tt_fields([G | Fs]).
+tt_fields([F, G | Fs]) --> tt_field(F), "\n", tt_fields([G | Fs]).
 
-tt_field(tuple_field(_, Key, Type)) --> tt_key(Key), ": ", tt(Type).
+tt_field(tuple_field(Mutability, Key, Type)) --> tt_field_mutability(Mutability), tt_key(Key), ": ", tt(Type).
+
+tt_field_mutability(readonly) --> [].
+tt_field_mutability(mutable)  --> "mutable ".
 
 tt_key(label(Name)) --> !, emit_name(Name).
-tt_key(index(N))    --> !, emit_num(N).
+tt_key(index(N))    --> !, emit_number(N).
 tt_key(Other)       --> emit_name(Other).
 
 tt_tail(closed)                    --> [].
-tt_tail(unification_variable(_))   --> " | ..".
+tt_tail(unification_variable(_))   --> " ..".
 tt_tail(_)                         --> [].
 
-emit_name(Name) --> { name_chars(Name, Cs) }, emit(Cs).
-emit_num(N)     --> { number_chars(N, Cs) }, emit(Cs).
-emit([])        --> [].
-emit([C | Cs])  --> [C], emit(Cs).
+emit_name(Name)    --> { name_chars(Name, Cs) }, emit(Cs).
+emit_number(N)     --> { number_chars(N, Cs) }, emit(Cs).
+emit([])           --> [].
+emit([C | Cs])     --> [C], emit(Cs).
 
 % A name in the AST is a char list; base-type tags are atoms -- accept either.
 name_chars(Name, Chars) :- ( atom(Name) -> atom_chars(Name, Chars) ; Chars = Name ).

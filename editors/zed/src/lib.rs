@@ -1,10 +1,10 @@
 use zed_extension_api as zed;
 
-struct SlExtension;
+struct SilentExtension;
 
-impl zed::Extension for SlExtension {
+impl zed::Extension for SilentExtension {
     fn new() -> Self {
-        SlExtension
+        SilentExtension
     }
 
     fn language_server_command(
@@ -29,4 +29,4 @@ impl zed::Extension for SlExtension {
     }
 }
 
-zed::register_extension!(SlExtension);
+zed::register_extension!(SilentExtension);
