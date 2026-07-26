@@ -32,7 +32,7 @@
 :- set_prolog_flag(double_quotes, chars).
 
 :- use_module(library(lists)).
-:- use_module(library(process)).
+:- use_module(library(charsio), [get_n_chars/3]).
 :- use_module(library(serialization/json), [json_chars//1]).
 :- use_module('queries', [init_db/0, set_input/2, query/2]).
 :- use_module('../source/syntax/semantic_tokens', [token_type/2]).
@@ -74,7 +74,7 @@ read_headers(In, Acc, Length) :-
 
 % A header line, CRLF- or LF-terminated, without its terminator.
 read_line(In, Result) :-
-  get_char(In, C),
+  read_char(In, C),
   ( C == end_of_file -> Result = eof
   ; C == '\n'        -> Result = []
   ; C == '\r'        -> read_line(In, _DropLF), Result = []
@@ -86,7 +86,17 @@ content_length(Line, N) :-
 
 read_n(_In, 0, []) :- !.
 read_n(In, K, [C | Cs]) :-
-  K > 0, get_char(In, C), C \== end_of_file, K1 is K - 1, read_n(In, K1, Cs).
+  K > 0, read_char(In, C), C \== end_of_file, K1 is K - 1, read_n(In, K1, Cs).
+
+% `get_char/2` on a stream opened via `open('/dev/stdin', ...)` reads exactly
+% one character correctly, then permanently misreports every following read
+% as `end_of_file` (see the `serve/0` comment below) -- `get_n_chars/3` reads
+% the same stream correctly, but returns the char wrapped in a list (`[C]`,
+% or `[]` at real EOF) rather than `get_char/2`'s bare atom (`C`, or the atom
+% `end_of_file`), so this normalizes it back to that atom-based shape.
+read_char(In, C) :-
+  get_n_chars(In, 1, Cs),
+  ( Cs = [C] -> true ; C = end_of_file ).
 
 write_message(Out, Value) :-
   phrase(json_chars(Value), Body),
@@ -103,23 +113,19 @@ put_chars(Out, [C | Cs]) :- put_char(Out, C), put_chars(Out, Cs).
 % The loop.
 % ===========================================================================
 
-% Neither `current_input` nor `open('/dev/stdin', ...)` can be used to read a
-% live LSP connection: Scryer's `Stream::InputFile` (what both resolve to)
-% decides end-of-stream by comparing the read position against the open
-% file's `fstat` size -- always 0 for a pipe/FIFO, since pipes have no size.
-% `current_input` (wrapped by the interactive line editor besides) just
-% blocks forever waiting for a real close; `open('/dev/stdin', ...)` returns
-% exactly ONE character correctly, then permanently misreports every
-% following read as `end_of_file` (position 1 > size 0, "past end", latched)
-% -- fatal either way for a server whose client keeps the pipe open for the
-% whole session. `library(process)`'s `pipe(-Stream)` is a distinct stream
-% implementation (a `CharReader<PipeReader>`, not `Stream::InputFile`) that
-% has no such bug, so `cat` is spawned to relay our real stdin through one:
-% its own stdin is our inherited stdin, and its stdout is captured as that
-% pipe stream. (POSIX-only; matches the rest of `bin/` already assuming a
-% Unix-like shell.)
+% `current_input` can't be used to read a live LSP connection: on a real
+% stream close it never surfaces the atom `end_of_file` at all, just an
+% endless run of a synthetic `'\n'` (harmless here only because
+% `read_headers`'s "blank line, no headers at all" branch below happens to
+% treat that as a shutdown signal too). `open('/dev/stdin', ...)` gives a
+% correctly-behaving stream -- but only when read through `get_n_chars/3`
+% (see `read_char/2` above); `get_char/2` on that same stream reads exactly
+% ONE character correctly, then permanently misreports every following read
+% as `end_of_file`, which is fatal for a client that keeps the pipe open for
+% the whole session (it looks like the server drops the connection after the
+% first byte of the first message).
 serve :-
-  process_create("/bin/cat", [], [stdin(std), stdout(pipe(In)), stderr(std)]),
+  open('/dev/stdin', read, In),
   current_output(Out),
   serve_streams(In, Out).
 
