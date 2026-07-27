@@ -99,7 +99,7 @@ reason_words([C | Cs], [C | Ms]) :- reason_words(Cs, Ms).
 % ---------------------------------------------------------------------------
 % Rendering the analyser's resolved types (the SINGLE type representation).
 %   number | boolean | string                          base types
-%   function_type(Params, Return)                      `(p ..) r`
+%   function_type(Params, Return)                      `(p ..): r`
 %   tuple_type(Fields, Tail)                           record `(key: t .. ..)`
 %       Fields = [tuple_field(Mutability, Key, Type)]; Key = index(N) | label(Cs)
 %       Tail   = closed | unification_variable(_)      (open row)
@@ -120,7 +120,7 @@ tt(unification_variable(Id))                --> "_U", emit_number(Id).
 tt(quantified_variable(Id))                 --> "_Q", emit_number(Id).
 tt(skolem(Id, _, anonymous))                --> !, "_S", emit_number(Id).
 tt(skolem(_, _, Name))                      --> emit_name(Name).
-tt(function_type(Params, Return))           --> "(", tt_sequence(Params), ") ", tt(Return).
+tt(function_type(Params, Return))           --> "(", tt_sequence(Params), "): ", tt(Return).
 tt(tuple_type(Fields, Tail))                --> "(", tt_fields(Fields), tt_tail(Tail), ")".
 tt(type_constructor(Name, []))              --> emit_name(Name).
 tt(type_constructor(Name, TypeParameters))  --> emit_name(Name), "<", tt_sequence(TypeParameters), ">".
