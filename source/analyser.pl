@@ -1,4 +1,4 @@
-:- module(analyser, [analyse/2, analyse_module/5, analyse_accumulating/6]).
+:- module(analyser, [analyse/2, analyse_module/5, analyse_accumulating/7]).
 
 /*  analyser.pl  --  Type checker entry point.
 
@@ -38,15 +38,17 @@
 :- use_module(analyser/types, [
   empty_context/1,
   fully_resolve/3,
+  collect_quantified_ids/2,
+  quantified_name_table/3,
   scheme_free_unification_variables/2,
   context_substitution/2
 ]).
 :- use_module(analyser/type_environment, [
   build_type_environment/4,
-  convert_annotation_type/6,
-  seed_externals/7
+  build_type_environment/5,
+  seed_externals/9
 ]).
-:- use_module(analyser/infer, [infer_program/6, infer_program_accumulating/7]).
+:- use_module(analyser/infer, [infer_program/8, infer_program_accumulating/9]).
 
 % analyse(+AST, -Result).
 %
@@ -88,44 +90,140 @@ analyse_module(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment,
   % `external` declarations have no body to infer: their ascribed type is taken
   % on trust and seeded into the environment as a normal (generalised) scheme,
   % so the rest of the module sees them like any other top-level binding.
-  seed_externals(CleanItems, TypeEnvironment, 0, ConstructorEnvironment, Context0, InitialEnvironment, Context1),
+  % This (throwing, batch-compiler) path never needs hover, so it threads a
+  % throwaway scratch pair through -- unlike `analyse_accumulating/7` below.
+  seed_externals(CleanItems, TypeEnvironment, 0, ConstructorEnvironment, Context0, InitialEnvironment, Context1, [], _Hover1),
   infer_program(CleanAST, TypeEnvironment, InitialEnvironment, Context1,
-                program_type(LastType, Context), FinalEnvironment),
+                program_type(LastType, Context), FinalEnvironment, [], _Hover2),
   fully_resolve(LastType, Context, Type),
   context_substitution(Context, Substitution),
   collect_exports(PublicValueNames, PublicTypeDeclarations, FinalEnvironment, TypeEnvironment,
                   ValueEntries, TypeEntries).
 
-% analyse_accumulating(+AST, +SeedValueEnv, +SeedTypeEnv, -Errors, -DefinitionTypes, -Exports).
+% analyse_accumulating(+AST, +SeedValueEnv, +SeedTypeEnv, -Errors, -DefinitionTypes, -Exports, -HoverEntries).
 %
 % The SAME checker as `analyse_module/5` -- identical environment setup and the
 % identical inference rules -- but it ACCUMULATES type errors instead of
-% throwing on the first (via `infer:infer_program_accumulating/7`).  `Errors` is
+% throwing on the first (via `infer:infer_program_accumulating/9`).  `Errors` is
 % a list of `error_at(Span, Reason)`.  `DefinitionTypes` is `Name - ResolvedType`
-% for each top-level definition (for editor hover).  `Exports` is this module's
-% `module_exports(ValueEntries, TypeEntries)` -- exactly the shape
-% `analyse_module/5` produces -- so the incremental engine can seed an importing
-% file's environment from it (cross-file imports).  This is the single
-% full-coverage checker the LSP / incremental engine uses; the batch compiler
-% keeps `analyse/2` (which throws on the first error).
+% for each top-level definition (the legacy name-keyed hover lookup).
+% `Exports` is this module's `module_exports(ValueEntries, TypeEntries)` --
+% exactly the shape `analyse_module/5` produces -- so the incremental engine
+% can seed an importing file's environment from it (cross-file imports).
+% This is the single full-coverage checker the LSP / incremental engine uses;
+% the batch compiler keeps `analyse/2` (which throws on the first error).
+%
+% `HoverEntries` is the SPAN-keyed hover index: every `hover_entry(Span, Kind,
+% semantic(Type, NamesTable))` recorded while inferring this file, PLUS one
+% per top-level declaration's own name span (`declaration_hover_entries/4`,
+% reusing `DefinitionTypes`' already-resolved types rather than re-deriving
+% them).  Everything recorded during inference is RAW (pre-final-
+% substitution, see `infer.pl`/`type_environment.pl`'s `hover_note/5`) --
+% `finalize_raw_hover_entries/3` is the ONE place they are resolved, here,
+% against the FINAL context, once inference has fully completed.  A `type`
+% declaration's OWN body/bounds are validated (and hover-recorded) in a
+% SEPARATE throwaway context per declaration, so `build_type_environment/5`
+% already returns its entries pre-finalized (see `type_environment.pl`'s
+% `validate_declarations/3`) -- those are merged in as-is, not re-resolved
+% against this file's (unrelated) context.
 %
 % Export collection here is BEST-EFFORT (unlike `collect_exports/6`, which
 % throws): in an editor a module is often mid-edit, so a public name whose body
 % failed to type is simply omitted from the exports rather than aborting the
 % whole analysis.
 analyse_accumulating(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment, Errors, DefinitionTypes,
-                     module_exports(ValueEntries, TypeEntries)) :-
+                     module_exports(ValueEntries, TypeEntries), HoverEntries) :-
   normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
   CleanAST = program_node(CleanItems),
-  build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),
+  build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings, DeclarationHover),
   constructor_environment(ConstructorBindings, SeedValueEnvironment, ConstructorEnvironment),
   empty_context(Context0),
-  seed_externals(CleanItems, TypeEnvironment, 0, ConstructorEnvironment, Context0, InitialEnvironment, Context1),
+  seed_externals(CleanItems, TypeEnvironment, 0, ConstructorEnvironment, Context0, InitialEnvironment, Context1, [], Hover1),
   infer_program_accumulating(CleanAST, TypeEnvironment, InitialEnvironment, Context1,
-                             program_type(_LastType, Context), FinalEnvironment, Errors),
+                             program_type(_LastType, Context), FinalEnvironment, Errors, Hover1, RawHover),
   definition_types(CleanItems, FinalEnvironment, Context, DefinitionTypes),
+  finalize_raw_hover_entries(RawHover, Context, InferenceHover),
+  declaration_hover_entries(CleanItems, DefinitionTypes, Context, NameSpanHover),
+  append(DeclarationHover, InferenceHover, Hover2),
+  append(Hover2, NameSpanHover, HoverEntries),
   collect_exports_best_effort(PublicValueNames, PublicTypeDeclarations, FinalEnvironment, TypeEnvironment,
                               ValueEntries, TypeEntries).
+
+% finalize_raw_hover_entries(+RawEntries, +Context, -HoverEntries).
+%
+% Resolve every raw entry recorded during real inference against the file's
+% FINAL context, and attach a names/bounds table for whatever quantified
+% generics its resolved type mentions -- see `quantified_name_table/3`'s doc
+% in types.pl for why this travels WITH the entry rather than being looked
+% up lazily later (by the time hover is rendered, `Context` is long gone).
+finalize_raw_hover_entries([], _Context, []).
+finalize_raw_hover_entries([raw_hover_entry(Span, Kind, Type) | Rest], Context,
+                          [hover_entry(Span, Kind, semantic(Resolved, NamesTable)) | Entries]) :-
+  fully_resolve(Type, Context, Resolved),
+  collect_quantified_ids(Resolved, Ids),
+  quantified_name_table(Context, Ids, NamesTable),
+  finalize_raw_hover_entries(Rest, Context, Entries).
+
+% declaration_hover_entries(+Items, +DefinitionTypes, +Context, -HoverEntries).
+%
+% One entry per top-level definition/external/module's OWN name span,
+% reusing `DefinitionTypes`' already-resolved type (so a top-level name's
+% hover matches exactly what `type_at/2`, the legacy lookup, already
+% reports) -- a module's individual MEMBERS are deliberately excluded here
+% (they have no span of their own among `Items`; see `definition_types/4`'s
+% own doc on why they share the top-level's flat name list) and a bare
+% `type` declaration's own name is likewise left to the generic syntax
+% fallback, since `DefinitionTypes` carries no entry for it either.
+declaration_hover_entries(Items, DefinitionTypes, Context, HoverEntries) :-
+  declaration_name_spans(Items, NameSpans),
+  declaration_hover_entries_for(NameSpans, DefinitionTypes, Context, HoverEntries).
+
+declaration_name_spans([], []).
+declaration_name_spans([definition_node(identifier_node(Name, Span), _, _, _) | Rest], [Name - Span | NameSpans]) :- !,
+  declaration_name_spans(Rest, NameSpans).
+declaration_name_spans([external_node(Name, _, _, _, NameSpan) | Rest], [Name - NameSpan | NameSpans]) :- !,
+  declaration_name_spans(Rest, NameSpans).
+% Tagged `module(Name)`, not a bare `Name`, so `declaration_hover_entries_for/4`
+% can tell a MODULE's own name apart from an ordinary definition's -- its
+% resolved type renders with `{}`, not a plain record value's `()` (see
+% `display_module_type/2`), even though both are the SAME `record_type/2`
+% term (a module IS structurally just a record; the distinction only exists
+% here, at the declaration site, never at an arbitrary reference/use site,
+% which cannot tell the two apart any more than this predicate could without
+% the tag).
+declaration_name_spans([module_node(Name, _, _, _, _, Span) | Rest], [module(Name) - Span | NameSpans]) :- !,
+  declaration_name_spans(Rest, NameSpans).
+declaration_name_spans([_ | Rest], NameSpans) :-
+  declaration_name_spans(Rest, NameSpans).
+
+declaration_hover_entries_for([], _DefinitionTypes, _Context, []).
+declaration_hover_entries_for([module(Name) - Span | Rest], DefinitionTypes, Context, Entries) :- !,
+  ( member(Name - Type, DefinitionTypes), Type \== unknown ->
+      display_module_type(Type, DisplayType),
+      collect_quantified_ids(Type, Ids),
+      quantified_name_table(Context, Ids, NamesTable),
+      Entries = [hover_entry(Span, declaration, semantic(DisplayType, NamesTable)) | Rest1]
+  ; Entries = Rest1
+  ),
+  declaration_hover_entries_for(Rest, DefinitionTypes, Context, Rest1).
+declaration_hover_entries_for([Name - Span | Rest], DefinitionTypes, Context, Entries) :-
+  ( member(Name - Type, DefinitionTypes), Type \== unknown ->
+      collect_quantified_ids(Type, Ids),
+      quantified_name_table(Context, Ids, NamesTable),
+      Entries = [hover_entry(Span, declaration, semantic(Type, NamesTable)) | Rest1]
+  ; Entries = Rest1
+  ),
+  declaration_hover_entries_for(Rest, DefinitionTypes, Context, Rest1).
+
+% display_module_type(+Type, -DisplayType): swap a module's own resolved
+% RECORD type for the display-only `module_row/2` marker (braces, not
+% parens) -- an opaque module's `type_constructor(Name, [])` (nothing to
+% swap) and a generic module's `forall_type` wrapper (swap under the
+% quantifier) both pass through unchanged/recursed.
+display_module_type(record_type(Fields, Tail), module_row(Fields, Tail)) :- !.
+display_module_type(forall_type(Ids, Body), forall_type(Ids, DisplayBody)) :- !,
+  display_module_type(Body, DisplayBody).
+display_module_type(Type, Type).
 
 % Like `collect_exports/6`, but omits any name that is missing or ambiguous
 % rather than throwing (see `analyse_accumulating/6`).
@@ -193,7 +291,7 @@ definition_types([definition_node(identifier_node(Name, _), _, _, _) | Rest], En
 % external falls through to the catch-all below (which only exists to SKIP
 % node kinds hover has nothing to say about) and hover on e.g. `panic` finds
 % nothing, even though its declared type is right there in the source.
-definition_types([external_node(Name, _Type, _Source, _Span) | Rest], Environment, Context,
+definition_types([external_node(Name, _Type, _Source, _Span, _NameSpan) | Rest], Environment, Context,
                  [Name - Resolved | DefinitionTypes]) :- !,
   ( get_assoc(Name, Environment, defined(type_scheme(QuantifiedIdentifiers, Body))) ->
       fully_resolve(Body, Context, ResolvedBody),
@@ -294,8 +392,8 @@ normalise_items([public_node(type_declaration_node(Name, Parameters, Opacity, Bo
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
 % A `public external` exports a value (its name); the external itself stays in
 % the clean items so `seed_externals` binds it and codegen emits it.
-normalise_items([public_node(external_node(Name, Type, Source, ESpan), _) | Rest],
-                [external_node(Name, Type, Source, ESpan) | CleanItems],
+normalise_items([public_node(external_node(Name, Type, Source, ESpan, NameSpan), _) | Rest],
+                [external_node(Name, Type, Source, ESpan, NameSpan) | CleanItems],
                 [Name | ValueNames], TypeDeclarations) :- !,
   normalise_items(Rest, CleanItems, ValueNames, TypeDeclarations).
 % A module is an ordinary VALUE (see infer.pl's `module_node` inference); a

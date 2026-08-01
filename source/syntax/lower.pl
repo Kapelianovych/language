@@ -78,6 +78,15 @@ child_token([_ | Cs], K, Tok) :- child_token(Cs, K, Tok).
 item_name(Ch, Name) :-
   findall(N, member(t(ident, N, _, _), Ch), [_Keyword, Name | _]).
 
+% Like item_name/2, but keeps the declared name's OWN span (just the name
+% token, not the whole declaration) -- see `type_declaration_node`'s use of
+% this below; unlike `module_declared_name`/`module_name_span`, `type`'s
+% keyword never has an optional `opaque` before it (opaque only appears
+% inside the BODY, after `=` -- see parser.pl's `type_body//1`), so the
+% plain "second identifier" reading is already correct here.
+item_name_span(Ch, span(S, E)) :-
+  findall(tok(N, S1, E1), member(t(ident, N, S1, E1), Ch), [_Keyword, tok(_, S, E) | _]).
+
 % Direct-child identifier tokens after the first `(` (import names / macro params).
 names_in_parens(Ch, Names) :-
   ( append(_, [t('(', _, _, _) | After], Ch) ->
@@ -135,7 +144,7 @@ lower_item(node(module, Ch), module_node(Name, Parameters, Opacity, Ascription, 
   ; Ascription = none ),
   module_body_nodes(Ch, BodyNodes),
   maplist_lower_item(BodyNodes, Items),
-  gspan(node(module, Ch), Span).
+  module_name_span(Ch, Span).
 lower_item(node(macro_definition, Ch), macro_definition_node(Name, Params, Body, Span)) :- !,
   item_name(Ch, Name),
   names_in_parens(Ch, Params),
@@ -152,6 +161,16 @@ lower_item(Green, Node) :- lower_expr(Green, Node).      % a bare-expression ite
 module_declared_name(Ch, Name) :-
   findall(N, member(t(ident, N, _, _), Ch), Idents),
   append(_, ["module", Name | _], Idents).
+
+% The declared name's OWN span (just `Combo`, not the whole `opaque module
+% Combo: .. = { .. }` declaration) -- `module_node/6`'s `Span` field is this,
+% not the whole-node `gspan/2`, since analyser.pl's `declaration_hover_
+% entries/4` (the only reader of that field) needs a span narrow enough to
+% win against the name's own identifier token when hovered; nothing else
+% reads this field (every other consumer discards it as `_Span`).
+module_name_span(Ch, span(S, E)) :-
+  findall(tok(N, S1, E1), member(t(ident, N, S1, E1), Ch), Toks),
+  append(_, [tok("module", _, _), tok(_, S, E) | _], Toks).
 
 % A module body's item nodes are every sub-node after the module name, minus
 % the `opaque` / `type_params` / `ascription` meta-nodes (the name
@@ -503,9 +522,13 @@ lower_match_pattern(node(binding_pattern, Ch), binding_pattern(Name, Span)) :- !
   child_token(Ch, ident, t(ident, Name, _, _)), gspan(node(binding_pattern, Ch), Span).
 % The constructor name may be QUALIFIED (`math.Some`); its ident / `.` leaves
 % are direct children (subpatterns are nested nodes), so concatenating them
-% yields the dotted name.
-lower_match_pattern(node(constructor_pattern, Ch), constructor_pattern(Name, Subs, Span)) :- !,
+% yields the dotted name. `NameSpan` covers just that dotted name (not the
+% parens/subpatterns), so hover on the constructor itself -- not just the
+% whole `Some(_)` pattern -- has a span to attach to (see infer.pl's
+% `type_pattern(constructor_pattern(...))`).
+lower_match_pattern(node(constructor_pattern, Ch), constructor_pattern(Name, NameSpan, Subs, Span)) :- !,
   qualified_name_text(Ch, Name),
+  qualified_name_span(Ch, NameSpan),
   child_nodes(Ch, SubGreens),
   maplist_lower_match_pattern(SubGreens, Subs),
   gspan(node(constructor_pattern, Ch), Span).
@@ -557,8 +580,15 @@ macro_call_following(Ch, Source) :-
 % ===========================================================================
 % External / type declaration / type expressions.
 % ===========================================================================
-lower_external(node(external, Ch), external_node(Name, Type, Source, Span)) :-
+% `Span` is the WHOLE declaration (used by `infer.pl`'s `item_span/2` to
+% locate a `try_item/13` error); `NameSpan` is just the declared name (used by
+% `analyser.pl`'s `declaration_hover_entries/4` for hover) -- unlike
+% `module_node`/`type_declaration_node`, an external's `Span` field already
+% has a real, OTHER consumer, so its name gets its OWN extra field instead of
+% reusing/narrowing `Span` the way those two were fixed.
+lower_external(node(external, Ch), external_node(Name, Type, Source, Span, NameSpan)) :-
   item_name(Ch, Name),
+  item_name_span(Ch, NameSpan),
   child_nodes(Ch, Nodes), Nodes = [TypeGreen | _],
   lower_type(TypeGreen, Type),
   external_source(Ch, Source),
@@ -614,7 +644,7 @@ lower_type_declaration(node(type_declaration, Ch), type_declaration_node(Name, P
   ; % No body at all: an ABSTRACT (FFI) type -- nominal, with no constructors
     % anywhere; its values arrive only through `external`s.
     Opacity = opaque, Body = no_body ),
-  gspan(node(type_declaration, Ch), Span).
+  item_name_span(Ch, Span).
 
 % The alias body type node: the sole type node among the declaration's children
 % once the type-parameter list and the `opaque` marker are removed.
@@ -699,6 +729,14 @@ qualified_name_text(Ch, Name) :-
   concat_chars(Parts, Name).
 name_leaf_kind(ident).
 name_leaf_kind('.').
+
+% The span from the first to the last name leaf (ident/`.`), i.e. just the
+% dotted name itself, excluding any sibling leaves/nodes (parens, `<...>`
+% type arguments, subpatterns) that share the same child list.
+qualified_name_span(Ch, span(S, E)) :-
+  findall(tok(S1, E1), ( member(t(K, _, S1, E1), Ch), name_leaf_kind(K) ), Toks),
+  Toks = [tok(S, _) | _],
+  append(_, [tok(_, E)], Toks).
 
 concat_chars([], []).
 concat_chars([P | Ps], All) :- concat_chars(Ps, Rest), append(P, Rest, All).

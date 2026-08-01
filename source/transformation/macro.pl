@@ -740,7 +740,7 @@ patterns_variables([Pattern | Patterns], Variables) :-
 pattern_variables(wildcard_pattern(_), []).
 pattern_variables(binding_pattern(Name, _), [Name]).
 pattern_variables(literal_pattern(_, _), []).
-pattern_variables(constructor_pattern(_Name, SubPatterns, _), Variables) :-
+pattern_variables(constructor_pattern(_Name, _NameSpan, SubPatterns, _), Variables) :-
   patterns_variables(SubPatterns, Variables).
 pattern_variables(record_pattern(Members, _), Variables) :-
   member_pattern_variables(Members, Variables).

@@ -74,7 +74,7 @@ statements([namespace_import_node(JsPath, Renames) | Expressions]) -->
   statements(Expressions).
 % A foreign (`external`) declaration: bind the name to its JavaScript source,
 % wrapping a function source in a currying shim (see external_definition//3).
-statements([external_node(Name, Type, Source, _) | Expressions]) -->
+statements([external_node(Name, Type, Source, _, _) | Expressions]) -->
   external_definition(Name, Type, Source),
   statements(Expressions).
 % A tagged-union declaration emits one `const` per constructor (a curried
@@ -105,7 +105,7 @@ statements([public_node(definition_node(Identifier, Annotation, Value, DSpan), _
   "\n",
   statements(Expressions).
 % A `public external` becomes an exported foreign binding.
-statements([public_node(external_node(Name, Type, Source, _), _) | Expressions]) -->
+statements([public_node(external_node(Name, Type, Source, _, _), _) | Expressions]) -->
   exported_external_definition(Name, Type, Source),
   statements(Expressions).
 % A MODULE is a genuine record value: see `module_expression//1`.  Its type
@@ -289,9 +289,9 @@ module_item_statements([Item | Items]) -->
 % (a bare definition, destructuring, or expression statement, and a `public`
 % definition once unwrapped) falls through to the ordinary `statement//1`
 % dispatch used at the top level.
-module_item_statement(external_node(Name, Type, Source, _)) -->
+module_item_statement(external_node(Name, Type, Source, _, _)) -->
   external_definition(Name, Type, Source).
-module_item_statement(public_node(external_node(Name, Type, Source, _), _)) -->
+module_item_statement(public_node(external_node(Name, Type, Source, _, _), _)) -->
   external_definition(Name, Type, Source).
 module_item_statement(module_node(Name, _Parameters, _Opacity, _Ascription, Items, _)) -->
   "const ", module_const_binding(Name, Items), ";".
@@ -300,8 +300,8 @@ module_item_statement(public_node(module_node(Name, _Parameters, _Opacity, _Ascr
 module_item_statement(public_node(definition_node(Identifier, Annotation, Value, Span), _)) -->
   statement(definition_node(Identifier, Annotation, Value, Span)).
 module_item_statement(Item) -->
-  { Item \= external_node(_, _, _, _),
-    Item \= public_node(external_node(_, _, _, _), _),
+  { Item \= external_node(_, _, _, _, _),
+    Item \= public_node(external_node(_, _, _, _, _), _),
     Item \= module_node(_, _, _, _, _, _),
     Item \= public_node(module_node(_, _, _, _, _, _), _),
     Item \= public_node(definition_node(_, _, _, _), _) },
@@ -313,7 +313,7 @@ module_item_statement(Item) -->
 module_public_names([], []).
 module_public_names([public_node(definition_node(identifier_node(Name, _), _, _, _), _) | Items], [Name | Names]) :- !,
   module_public_names(Items, Names).
-module_public_names([public_node(external_node(Name, _, _, _), _) | Items], [Name | Names]) :- !,
+module_public_names([public_node(external_node(Name, _, _, _, _), _) | Items], [Name | Names]) :- !,
   module_public_names(Items, Names).
 module_public_names([public_node(module_node(Name, _, _, _, _, _), _) | Items], [Name | Names]) :- !,
   module_public_names(Items, Names).
@@ -788,7 +788,7 @@ pattern_bindings(binding_pattern(Name, _), Path) -->
   "const $", chars(Name), " = ", chars(Path), "; ".
 pattern_bindings(record_pattern(Members, _), Path) -->
   record_pattern_bindings(Members, 0, Path).
-pattern_bindings(constructor_pattern(_Name, SubPatterns, _), Path) -->
+pattern_bindings(constructor_pattern(_Name, _NameSpan, SubPatterns, _), Path) -->
   constructor_sub_bindings(SubPatterns, 0, Path).
 
 constructor_sub_bindings([], _Index, _Path) --> [].
@@ -820,7 +820,7 @@ pattern_conjuncts(literal_pattern(Node, _), Path) -->
   " && (", chars(Path), " === ", literal_value(Node), ")".
 pattern_conjuncts(record_pattern(Members, _), Path) -->
   record_pattern_conjuncts(Members, 0, Path).
-pattern_conjuncts(constructor_pattern(Name, SubPatterns, _), Path) -->
+pattern_conjuncts(constructor_pattern(Name, _NameSpan, SubPatterns, _), Path) -->
   " && (", chars(Path), "[\"$tag\"] === \"", chars(Name), "\")",
   constructor_sub_conjuncts(SubPatterns, 0, Path).
 

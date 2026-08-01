@@ -34,10 +34,10 @@
 :- use_module(library(lists)).
 :- use_module(library(charsio), [get_n_chars/3]).
 :- use_module(library(serialization/json), [json_chars//1]).
-:- use_module('queries', [init_db/0, set_input/2, query/2]).
+:- use_module('queries', [init_db/0, set_input/2, query/2, hover_at/3]).
 :- use_module('../source/syntax/semantic_tokens', [token_type/2]).
 :- use_module('../source/module_paths', [canonical_chars/2]).
-:- use_module('../source/diagnostics', [message_text/2, reason_text/2, type_text/2]).
+:- use_module('../source/diagnostics', [message_text/2, reason_text/2, type_text/3]).
 
 % ===========================================================================
 % Object accessors over the json_chars/1 term shape.
@@ -229,7 +229,7 @@ diagnostics_json([D | Ds], Text, [J | Js]) :-
 
 % Parse diagnostics and type errors both reduce to a [Start,End] char span + text.
 % Parse diagnostics come from the recovering parser; `error_at` comes from the
-% analyser (`analyse_accumulating/5`), which records one per type error instead
+% analyser (`analyse_accumulating/7`), which records one per type error instead
 % of throwing on the first.
 diagnostic_json(diagnostic(Start, End, What), Text, Json) :- !,
   message_text(What, Msg), diag_object(Start, End, Msg, Text, Json).
@@ -319,34 +319,17 @@ consume_chars([C | Cs], N, Line0, Char0, Rest, Line, Char) :-
   consume_chars(Cs, N1, Line1, Char1, Rest, Line, Char).
 
 % ---------------------------------------------------------------------------
-% Hover: the type of the definition at the cursor.  (A fuller server locates the
-% exact green-tree node by offset; this returns the enclosing definition's type,
-% the common useful case.)
+% Hover is an offset query: the query layer chooses the smallest source span
+% and has a parser fallback, so punctuation and grammar nodes remain useful
+% even when inference cannot produce a type during an in-progress edit.
 % ---------------------------------------------------------------------------
 hover_response(Uri, Line, Char, Result) :-
   uri_to_path(Uri, Path),
   query(src(Path), Text),
   position_to_offset(Text, Line, Char, Offset),
-  ( definition_at(Path, Offset, Name, Type) ->
-      hover_contents(Name, Type, Result)
+  ( hover_at(Path, Offset, Hover), Hover \== none ->
+      hover_contents(Hover, Result)
   ; Result = null ).
-
-% Resolve the definition/type under the cursor.  PRECISE path: `node_at` gives
-% the identifier token the cursor is on (works at a USE site, not only on the
-% definition line); if that name is a known top-level definition, report its
-% type.  FALLBACK: the older line heuristic (the cursor is somewhere on a
-% definition's line but not on its name token -- e.g. on the value).
-definition_at(Path, Offset, Name, Type) :-
-  query(node_at(Path, Offset), found(_Kind, _Span, token(ident, Name, _))),
-  query(type_at(Path, Name), Type),
-  Type \== unknown, !.
-definition_at(Path, Offset, Name, Type) :-
-  query(src(Path), Text),
-  offset_to_position(Text, Offset, pairs([string("line")-number(Line) | _])),
-  query(program_ast(Path), program_node(Items)),
-  member(definition_node(identifier_node(Name, span(S, _)), _, _, _), Items),
-  offset_to_position(Text, S, pairs([string("line")-number(Line) | _])), !,
-  query(type_at(Path, Name), Type).
 
 position_to_offset(Text, Line, Char, Offset) :- pos_off(Text, Line, Char, 0, Offset).
 pos_off(_, 0, Char, Acc, Offset) :- !, Offset is Acc + Char.
@@ -356,6 +339,18 @@ pos_off([C | Cs], Line, Char, Acc, Offset) :-
   pos_off(Cs, Line1, Char, Acc1, Offset).
 pos_off([], _Line, _Char, Acc, Acc).
 
-hover_contents(_Name, Type, pairs([string("contents")-string(Contents)])) :-
-  type_text(Type, TypeText),
-  append([/* Name, " : ", */ "", TypeText], Contents).
+% `Metadata` is the names/bounds table `analyser.pl`'s `finalize_raw_hover_
+% entries/3`/`declaration_hover_entries/6` attaches to every semantic entry
+% (see `types.pl`'s `quantified_name_table/3`) -- `type_text/3` uses it to
+% print a bounded generic's declared name (`<A: Logger + Named>`) instead of
+% a synthetic `_Q<Id>`.  A function type's parameters render as bare types,
+% never parameter names, simply because `function_type`'s own DCG clause in
+% diagnostics.pl only ever prints the params' types -- nothing extra needed
+% here for that.
+hover_contents(semantic(Type, NamesTable), pairs([string("contents")-string(Contents)])) :- !,
+  type_text(Type, NamesTable, Contents).
+hover_contents(syntax(_Kind, Help), pairs([string("contents")-string(Help)])) :- !.
+hover_contents(error(parse(Reason)), pairs([string("contents")-string(Contents)])) :- !,
+  message_text(Reason, Contents).
+hover_contents(error(Reason), pairs([string("contents")-string(Contents)])) :-
+  reason_text(Reason, Contents).

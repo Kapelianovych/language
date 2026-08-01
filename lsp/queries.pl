@@ -3,6 +3,7 @@
   set_input/2,
   set_prelude_modules/1,
   query/2,
+  hover_at/3,
   reset_exec_log/0,
   exec_count/2
 ]).
@@ -68,7 +69,7 @@
 :- use_module('../source/syntax/parser', [parse_tokens/3]).
 :- use_module('../source/syntax/lower',  [lower/2, parse_source/2]).
 :- use_module('../source/syntax/semantic_tokens', [classify/2]).
-:- use_module('../source/analyser', [analyse_accumulating/6]).
+:- use_module('../source/analyser', [analyse_accumulating/7]).
 :- use_module('../source/module_paths', [
   read_source_chars/2,
   canonical_chars/2,
@@ -577,7 +578,14 @@ dependency_exports_of(Directory, Path, Exports) :-
 % qualified identifiers (so `Math.add` resolves to the seeded `Math.add`).  A
 % catch guards against an unexpected throw so one malformed construct cannot take
 % the whole editor session down.
-compute(analysis(File), analysis(Errors, DefinitionTypes, Exports)) :-
+%
+% `HoverEntries` is the analyser's own span-indexed hover index (see
+% `source/analyser.pl`'s `analyse_accumulating/7` doc) -- already fully
+% resolved and self-contained (`hover_entry(Span, Kind, semantic(Type,
+% NamesTable))`), so `compute(hover_index(File), ...)` below only has to
+% merge it with the green-tree syntax fallback and this file's own
+% diagnostics, not re-derive anything from the AST itself.
+compute(analysis(File), analysis(Errors, DefinitionTypes, Exports, HoverEntries)) :-
   query(expanded_ast(File), Expansion),
   ( Expansion = expanded(Ast) ->
       query(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members, ImportErrors)),
@@ -588,34 +596,228 @@ compute(analysis(File), analysis(Errors, DefinitionTypes, Exports)) :-
       % Import errors (a name not exported by a dependency) lead the list, so the
       % `use`-site diagnostic shows even when the same name later also trips an
       % `unbound_variable` at its use sites.
-      ( catch(analyse_accumulating(ResolvedAst, SeedValues, SeedTypes, Es, Ds, Exports), Reason,
-              ( Es = [error_at(span(0, 0), Reason)], Ds = [], Exports = module_exports([], []) ))
-        -> append(ImportErrors, Es, Errors), DefinitionTypes = Ds, Exports = Exports
+      ( catch(analyse_accumulating(ResolvedAst, SeedValues, SeedTypes, Es, Ds, Exports, Hs), Reason,
+              ( Es = [error_at(span(0, 0), Reason)], Ds = [], Exports = module_exports([], []), Hs = [] ))
+        -> append(ImportErrors, Es, Errors), DefinitionTypes = Ds, Exports = Exports, HoverEntries = Hs
         ;  append(ImportErrors, [error_at(span(0, 0), analysis_failed)], Errors), DefinitionTypes = [],
-           Exports = module_exports([], []) )
+           Exports = module_exports([], []), HoverEntries = [] )
   ; % Expansion = macro_error(Span, Reason) -- Span points at the offending
     % `@invocation` (file start for a whole-program macro error).
     Expansion = macro_error(MacroSpan, MacroReason),
     Errors = [error_at(MacroSpan, MacroReason)], DefinitionTypes = [],
-    Exports = module_exports([], []) ).
+    Exports = module_exports([], []), HoverEntries = [] ).
 
 % A PROJECTION of `analysis` to just the module exports.  Importers depend on
 % this, not on the full `analysis`, so the firewall holds: a change inside a
 % dependency that leaves its public exports equal does NOT advance this query's
 % `changed_at`, and the importers are not re-checked.
 compute(exports(File), Exports) :-
-  query(analysis(File), analysis(_, _, Exports)).
+  query(analysis(File), analysis(_, _, Exports, _)).
 
 % All diagnostics for a file: parse errors first, then type errors.
 compute(diagnostics(File), All) :-
   query(parse(File), parsed(_, ParseDiagnostics)),
-  query(analysis(File), analysis(TypeErrors, _, _)),
+  query(analysis(File), analysis(TypeErrors, _, _, _)),
   append(ParseDiagnostics, TypeErrors, All).
 
-% The resolved type of a top-level definition (for hover); `unknown` if absent.
+% The legacy name query remains useful to small clients, but hover itself is
+% span-indexed below.  In particular, a name is not a stable identity in a
+% lexically-scoped language, so new callers must use hover_at/3.
 compute(type_at(File, Name), Type) :-
-  query(analysis(File), analysis(_, DefinitionTypes, _)),
+  query(analysis(File), analysis(_, DefinitionTypes, _, _)),
   ( member(Name - Type, DefinitionTypes) -> true ; Type = unknown ).
+
+% hover_at(+File, +Offset, -Hover) is the public, offset-based hover contract.
+% Keeping the index as a query matters for incremental invalidation: an edit
+% changes parse/analysis, and only then replaces the derived entries, never a
+% mutable editor-side cache.
+hover_at(File, Offset, Hover) :- query(hover_at(File, Offset), Hover).
+
+compute(hover_at(File, Offset), Hover) :-
+  query(node_at(File, Offset), Node),
+  ( Node = found(_, _, token(Kind, _, _)), trivia_kind(Kind) -> Hover = none
+  ; Node = found(_, _, token(missing, _, _)) -> Hover = none
+  ; query(hover_index(File), Entries),
+    ( smallest_hover(Offset, Entries, Hover) -> true ; Hover = none )
+  ).
+
+% `hover_index/1` deliberately starts with the green tree, not the lowered
+% AST.  Lowering discards punctuation, while the lossless tree gives every
+% meaningful node and token a future-proof fallback.  The analyser's own
+% span-indexed `HoverEntries` (see `analysis/1`'s doc above) are overlaid on
+% top and win at an equal span (see `hover_priority/2`) -- these already
+% cover every expression result, identifier use, binding, pattern, call,
+% declaration, and annotation the analyser walks (recorded via `hover_note/5`
+% in `infer.pl`/`type_environment.pl`, resolved once in
+% `analyser.pl`'s `finalize_raw_hover_entries/3`), so this predicate no
+% longer re-derives anything from the AST itself the way the old
+% `ast_semantic_entries/3` walk did (name-based, top-level-only, and blind
+% to shadowing).
+compute(hover_index(File), Entries) :-
+  query(parse(File), parsed(Tree, ParseDiagnostics)),
+  syntax_hover_entries(Tree, SyntaxEntries),
+  query(analysis(File), analysis(TypeErrors, _DefinitionTypes, _, SemanticEntries)),
+  diagnostic_hover_entries(ParseDiagnostics, ParseEntries),
+  diagnostic_hover_entries(TypeErrors, TypeEntries),
+  append(SyntaxEntries, SemanticEntries, E1),
+  append(E1, ParseEntries, E2),
+  append(E2, TypeEntries, Entries).
+
+trivia_kind(whitespace).
+trivia_kind(comment).
+trivia_kind(eof).
+
+smallest_hover(Offset, Entries, BestPayload) :-
+  findall(candidate(Width, Priority, Payload),
+          ( member(hover_entry(span(S, E), _Kind, Payload), Entries),
+            Offset >= S, Offset < E, Width is E - S,
+            hover_priority(Payload, Priority) ),
+          Candidates),
+  Candidates \== [],
+  best_candidate(Candidates, candidate(_, _, BestPayload)).
+
+% Prefer an error at a shared span, then semantic data, then syntax help.  The
+% width comparison comes first, so a token's concise syntax help remains more
+% useful than an enclosing expression's broad type.
+hover_priority(error(_), 3).
+hover_priority(semantic(_, _), 2).
+hover_priority(syntax(_, _), 1).
+
+best_candidate([C | Cs], Best) :- best_candidate(Cs, C, Best).
+best_candidate([], Best, Best).
+best_candidate([candidate(W, P, X) | Cs], candidate(BW, BP, BX), Best) :-
+  ( ( W < BW ; W =:= BW, P > BP ) -> Next = candidate(W, P, X) ; Next = candidate(BW, BP, BX) ),
+  best_candidate(Cs, Next, Best).
+
+syntax_hover_entries(Tree, Entries) :- syntax_entries(Tree, Entries).
+syntax_entries(t(Kind, Text, S, E), Entries) :- !,
+  ( trivia_kind(Kind) ; Kind == missing ; S =:= E -> Entries = []
+  ; token_help(Kind, Text, Help) -> Entries = [hover_entry(span(S, E), Kind, syntax(Kind, Help))]
+  ; Entries = [] ).
+syntax_entries(node(Kind, Children), Entries) :- !,
+  significant_span(node(Kind, Children), Span),
+  syntax_children_entries(Children, ChildEntries),
+  ( Span = span(S, E), S < E, node_help(Kind, Help) -> Entries = [hover_entry(Span, Kind, syntax(Kind, Help)) | ChildEntries]
+  ; Entries = ChildEntries ).
+syntax_entries(_, []).
+syntax_children_entries([], []).
+syntax_children_entries([C | Cs], Entries) :-
+  syntax_entries(C, E1), syntax_children_entries(Cs, E2), append(E1, E2, Entries).
+
+% Bespoke node help: one short sentence for the grammar constructs whose
+% shape isn't self-evident. Node kinds with no clause here simply produce no
+% hover entry (the node's children still do) -- there is deliberately no
+% generic filler text, since "Syntax: identifier." teaches nothing a reader
+% doesn't already know.
+node_help(function_type, "Function type: `(Param ..): Return`.").
+node_help(quantified_type, "Quantified (generic) type: `<A ..> Body`.").
+node_help(intersection_type, "Intersection type: satisfies every listed member (`A + B`).").
+node_help(type_record, "Anonymous record type: `(label: Type ..)`.").
+node_help(type_name, "Named type reference, optionally applied to type arguments (`Name<Arg ..>`).").
+node_help(type_param, "Type parameter, optionally bounded (`A` or `A: Bound`).").
+node_help(type_param_kind, "Higher-kinded type parameter's arity: `<_ ..>` counts its own type arguments.").
+node_help(type_params, "A declaration's or function's type parameter list (`<A B ..>`).").
+node_help(type_apply, "Explicit type application at a call site (`f<Type ..>(..)`).").
+node_help(type_args, "Explicit type argument list at a call site (`<Type ..>`).").
+node_help(record_pattern, "Record (destructuring) pattern: `(label: Pattern ..)`.").
+node_help(constructor_pattern, "Constructor pattern: matches a tagged-union case.").
+node_help(labeled_pattern, "A labeled member inside a record pattern.").
+node_help(literal_pattern, "A literal value pattern (matches only that exact value).").
+node_help(wildcard_pattern, "Wildcard pattern `_`: matches anything, binds nothing.").
+node_help(binding_pattern, "Binding pattern: matches anything, binds it to a name.").
+node_help(module_type, "Module type: a structural or nominal contract for a module's shape.").
+node_help(module_type_member, "A module type's declared member.").
+node_help(variant, "Tagged-union constructor declaration.").
+node_help(function, "Function (lambda) expression.").
+node_help(call, "Function call/application.").
+node_help(access, "Member access (`target.label` or `target.index`).").
+node_help(member, "Accessed member (a label or index).").
+node_help(binary, "Binary operator expression.").
+node_help(unary, "Unary operator expression.").
+node_help(conditional, "Conditional (`if`/`else`) expression.").
+node_help(match, "Pattern-matching expression.").
+node_help(arm, "A single match arm: pattern, optional guard, and result.").
+node_help(guard, "A match arm's guard condition.").
+node_help(block, "Block expression: its own nested scope.").
+node_help(definition, "Value definition (`name = value`, optionally annotated).").
+node_help(ascription, "Type annotation (`: Type`).").
+node_help(external, "Foreign (JS) declaration: its type is trusted, not checked.").
+node_help(macro_definition, "Reader-macro definition.").
+node_help(macro_call, "Reader-macro invocation (`@name(..)`), expanded before type-checking.").
+node_help(quote, "Quasiquote: builds an `Ast` value from a syntax template.").
+node_help(unquote, "Unquote `~expr`: splices a checked `Ast` expression into a template.").
+node_help(spread, "Spread `..value`: splices a record's fields into a new one.").
+node_help(placeholder, "Placeholder `_`: a call argument hole, producing a partial application.").
+node_help(use, "Import declaration.").
+node_help(module, "Module declaration: a record value with its own nested scope.").
+node_help(opaque, "Opacity modifier: hides a declaration's structural shape from other names.").
+node_help(public, "Export modifier: makes a declaration visible to importers.").
+node_help(type_declaration, "Type declaration.").
+node_help(type_hole, "Type argument hole `_`: this position is inferred, not supplied.").
+node_help(type_label, "A record/module type member's label.").
+node_help(type_member, "A record type's declared member.").
+node_help(type_rest, "A record type's open-row tail (`..` or `..R`).").
+node_help(mutability, "Field mutability modifier (`mutable`, or readonly by default).").
+node_help(group, "Parenthesised expression.").
+node_help(error, "Malformed syntax (a parse error).").
+node_help(program, "The whole source file.").
+
+token_help(ident, Text, Help) :- keyword_help(Text, Help), !.
+token_help(ident, _Text, "Identifier.").
+token_help(number, _Text, "Number literal.").
+token_help(string, _Text, "String literal.").
+token_help(underscore, _Text, "Placeholder or wildcard.").
+% Bespoke token help, kept only for punctuation/operators whose meaning is
+% NOT self-evident from ordinary language experience (overloaded, doubled, or
+% otherwise surprising). Plain structural punctuation (`(`, `.`, `=`, ...) and
+% conventional arithmetic/comparison operators produce no hover entry -- see
+% `syntax_entries/2`'s handling of a failed `token_help/3` lookup.
+%
+% Kind is an ATOM (the lexer builds it via `atom_chars(Kind, Text)`, see
+% lexer.pl) -- NOT a char list, so these heads are quoted atoms despite this
+% file's `double_quotes(chars)` flag, unlike every other (string) argument
+% in this predicate.
+token_help('<', _Text, "Opens a type-parameter/type-argument list, or the less-than operator.").
+token_help('>', _Text, "Closes a type-parameter/type-argument list, or the greater-than operator.").
+token_help(',', _Text, "Digit-group separator inside a number literal (e.g. `1,000`); this language has no list/argument-separator comma.").
+token_help('->', _Text, "Pipe: `x -> f` applies `f` to `x`.").
+token_help('+', _Text, "Addition, or an intersection type's `+`.").
+% `&&`/`^^`/`||` are the BOOLEAN and/xor/or family; `&`/`^`/`|` below are the
+% separate BITWISE family, at lower precedence (see binary_operator/3 in
+% parser.pl) -- the doubled spelling is the only thing marking which is which.
+token_help('&&', _Text, "Boolean and (bitwise and is `&`).").
+token_help('^^', _Text, "Boolean xor (bitwise xor is `^`).").
+token_help('||', _Text, "Boolean or (bitwise or is `|`).").
+token_help('!', _Text, "Boolean negation (bit inversion is `!!`).").
+token_help('!!', _Text, "Bit inversion (boolean negation is `!`).").
+token_help('&', _Text, "Bitwise and (boolean and is `&&`).").
+token_help('^', _Text, "Bitwise xor (boolean xor is `^^`).").
+token_help('|', _Text, "Bitwise or (boolean or is `||`).").
+% `~` is NOT bitwise negation (that's `!!`, see above) -- it only introduces
+% an unquote, inside or outside a quasiquote.
+token_help('~', _Text, "Unquote: `~expr` splices a checked expression into a quasiquote template.").
+token_help('`', _Text, "Opens a quasiquote.").
+token_help('@', _Text, "Reader-macro invocation prefix.").
+keyword_help("if", "Conditional expression.").
+keyword_help("else", "Alternative conditional branch.").
+keyword_help("match", "Pattern matching expression.").
+keyword_help("type", "Type declaration.").
+keyword_help("module", "Module declaration.").
+keyword_help("use", "Import declaration.").
+keyword_help("public", "Public export modifier.").
+keyword_help("external", "Foreign declaration.").
+keyword_help("macro", "Reader macro declaration.").
+keyword_help("opaque", "Nominal visibility modifier.").
+keyword_help("mutable", "Mutable field modifier.").
+keyword_help("true", "Boolean literal.").
+keyword_help("false", "Boolean literal.").
+
+diagnostic_hover_entries([], []).
+diagnostic_hover_entries([diagnostic(S, E, Reason) | Rest], [hover_entry(span(S, E), error, error(parse(Reason))) | Entries]) :- !,
+  diagnostic_hover_entries(Rest, Entries).
+diagnostic_hover_entries([error_at(Span, Reason) | Rest], [hover_entry(Span, error, error(Reason)) | Entries]) :- !,
+  diagnostic_hover_entries(Rest, Entries).
+diagnostic_hover_entries([_ | Rest], Entries) :- diagnostic_hover_entries(Rest, Entries).
 
 % Semantic-highlighting tokens: an ascending-Start `tok(Type, Start, End)`
 % list over the file's green tree (see `syntax/semantic_tokens.pl`).  Depends

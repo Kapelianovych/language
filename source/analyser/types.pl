@@ -3,6 +3,10 @@
   fresh_unification_variable/4,
   fresh_bound_id/3,
   fresh_named_bound_id/4,
+  fresh_named_bound_id/5,
+  record_variable_bound/5,
+  variable_bound_info/4,
+  any_bound/3,
   resolve_head/3,
   fully_resolve/3,
   unify/4,
@@ -15,6 +19,8 @@
   instantiate/5,
   instantiate_positional/6,
   monomorphic_type_scheme/2,
+  collect_quantified_ids/2,
+  quantified_name_table/3,
   scheme_free_unification_variables/2,
   context_substitution/2
 ]).
@@ -134,17 +140,67 @@ fresh_bound_id(context(Id, Store), Id, context(NextId, Store)) :-
 % fresh_named_bound_id(+ContextIn, +Name, -Id, -ContextOut).
 %
 % Like fresh_bound_id, but records the bound variable's source name in the
-% store (as `bound_name(Name)`), so a later skolemisation of the enclosing
-% `forall_type` can carry the name into error messages (see
-% fresh_skolem_mapping).
-fresh_named_bound_id(context(Id, Store), Name, Id, context(NextId, Store1)) :-
+% store (as `bound_name(Name, no_bound)`), so a later skolemisation of the
+% enclosing `forall_type` can carry the name into error messages (see
+% fresh_skolem_mapping). Kept for callers that have no bound expression to
+% preserve; `fresh_named_bound_id/5` is the general form.
+fresh_named_bound_id(ContextIn, Name, Id, ContextOut) :-
+  fresh_named_bound_id(ContextIn, Name, no_bound, Id, ContextOut).
+
+% fresh_named_bound_id(+ContextIn, +Name, +Bound, -Id, -ContextOut).
+%
+% `Bound` is the parameter's declared bound, ALREADY CONVERTED to a type by
+% the caller (`no_bound` or a fully-formed monotype).  Used for an id that is
+% NOT also a live unification variable (a standalone `<A: Bound>` quantified
+% type expression, or a definition's forward-reference scheme; see
+% `bind_quantifier_parameters/6` in type_environment.pl) -- such an id never
+% gets an `unsolved`/`solved` store entry, so its metadata can live directly
+% under its own key.  `record_variable_bound/5` is the sibling for an id that
+% DOES already own that key.
+fresh_named_bound_id(context(Id, Store), Name, Bound, Id, context(NextId, Store1)) :-
   NextId is Id + 1,
-  put_assoc(Id, Store, bound_name(Name), Store1).
+  put_assoc(Id, Store, bound_name(Name, Bound), Store1).
+
+% record_variable_bound(+ContextIn, +Id, +Name, +Bound, -ContextOut).
+%
+% Attach a declared NAME and BOUND to an id that is ALREADY a live unification
+% variable (minted by `fresh_unification_variable/4`, so it owns an
+% `unsolved(Level)`/`solved(Type)` entry under the plain `Id` key) -- stored
+% under the DISTINCT key `bound_of(Id)` so it cannot clobber that tracking.
+%
+% This is how a function/module's OWN explicit generic (`<A: Bound>`) keeps
+% its identity: `bind_type_parameters_rigid` checks the body against a rigid
+% SKOLEM (which carries `Name` directly in its own term), then swaps that
+% skolem back to this flexible id before generalising -- so the skolem's name
+% and bound would otherwise vanish the instant it is discarded.  Recording
+% them here lets both hover (hover shows `Name`, `Bound` at the definition)
+% and enforcement (`any_bound/3`, consulted by `bind_unification_variable/4`
+% and the instantiation helpers below) survive past that swap, and further
+% survive re-instantiation at every later call site or re-generalisation.
+record_variable_bound(context(NextId, Store), Id, Name, Bound, context(NextId, Store1)) :-
+  put_assoc(bound_of(Id), Store, Name - Bound, Store1).
+
+% variable_bound_info(+Context, +Id, -Name, -Bound).
+%
+% Read either storage shape transparently: `Name` is `anonymous` and `Bound`
+% is `no_bound` when neither has an entry for `Id` (an ordinary, unbounded,
+% unnamed variable).
+variable_bound_info(context(_, Store), Id, Name, Bound) :-
+  ( get_assoc(bound_of(Id), Store, Name0 - Bound0) -> Name = Name0, Bound = Bound0
+  ; get_assoc(Id, Store, bound_name(Name0, Bound0)) -> Name = Name0, Bound = Bound0
+  ; Name = anonymous, Bound = no_bound
+  ).
 
 % The recorded source name of a bound id, or `anonymous` when it was minted
 % nameless (synthetic type-lambda positions, imported schemes).
-bound_id_name(context(_, Store), Id, Name) :-
-  ( get_assoc(Id, Store, bound_name(Name0)) -> Name = Name0 ; Name = anonymous ).
+bound_id_name(Context, Id, Name) :- variable_bound_info(Context, Id, Name, _Bound).
+
+% any_bound(+Context, +Id, -Bound).
+%
+% Just the bound half of `variable_bound_info/4` -- what `bind_unification_
+% variable/4` and the instantiation helpers below consult to decide whether
+% a freshly solved/instantiated id has anything to enforce.
+any_bound(Context, Id, Bound) :- variable_bound_info(Context, Id, _Name, Bound).
 
 % monomorphic_type_scheme(+Type, -Scheme).
 monomorphic_type_scheme(Type, type_scheme([], Type)).
@@ -501,12 +557,26 @@ fresh_common_tail(unification_variable(Id1), unification_variable(Id2),
   put_assoc(NextId, Store, unsolved(Level), Store1).
 
 % bind_unification_variable(+Id, +Type, +ContextIn, -ContextOut).
+%
+% Solve `Id` to `Type`.  If `Id` carries a BOUND (a proper generic
+% parameter's declared `<A: Bound>` -- see `any_bound/3`), the solution must
+% SATISFY it.  This is the ONE place every solution to a bounded generic
+% variable passes through, no matter how it got here -- a call argument, an
+% annotation, a nested structural unification deep inside a record/function
+% shape, a chain of aliased variables -- so it is the correct (and only
+% necessary) place to enforce it; there is no need to track "obligations"
+% separately at each call site.
 bind_unification_variable(Id, Type, ContextIn, ContextOut) :-
   ContextIn = context(_, Store),
   get_assoc(Id, Store, unsolved(Level)),
   occurs_check_and_adjust_levels(Id, Level, Type, ContextIn, context(NextId, Store1)),
   put_assoc(Id, Store1, solved(Type), Store2),
-  ContextOut = context(NextId, Store2).
+  Context1 = context(NextId, Store2),
+  any_bound(Context1, Id, Bound),
+  ( Bound == no_bound ->
+      ContextOut = Context1
+  ; subsume(Type, Bound, Level, Context1, ContextOut)
+  ).
 
 % occurs_check_and_adjust_levels(+Id, +MaxLevel, +Type, +ContextIn, -ContextOut).
 occurs_check_and_adjust_levels(Id, MaxLevel, Type, ContextIn, ContextOut) :-
@@ -591,6 +661,60 @@ generalize(Type, OuterLevel, Context, type_scheme(QuantifiedIds, Body), Context)
 % `generalize/5` leaves it).
 scheme_free_unification_variables(type_scheme(_BoundIds, Body), Ids) :-
   collect_unification_variable_ids(Body, [], Ids).
+
+% collect_quantified_ids(+Type, -Ids).
+%
+% Every `quantified_variable`/`forall_type`-bound id reachable in a resolved
+% hover type -- used to build a names/bounds table for RENDERING (see
+% `quantified_name_table/3`), since a hover entry travels far from the
+% analyser's own `Context` (across module boundaries, into the LSP query
+% layer) by the time it is displayed, so the lookup this needs has to be
+% packaged alongside the type itself rather than done lazily against Context.
+collect_quantified_ids(Type, Ids) :-
+  collect_quantified_ids(Type, [], Ids0),
+  sort(Ids0, Ids).
+
+collect_quantified_ids(Type, Accumulator, Ids) :-
+  ( Type = quantified_variable(Id) ->
+      ( memberchk(Id, Accumulator) -> Ids = Accumulator ; Ids = [Id | Accumulator] )
+  ; Type = function_type(Parameters, Return) ->
+      collect_quantified_ids_list(Parameters, Accumulator, Accumulator1),
+      collect_quantified_ids(Return, Accumulator1, Ids)
+  ; Type = record_type(Fields, Tail) ->
+      field_monotypes(Fields, Monotypes),
+      collect_quantified_ids_list(Monotypes, Accumulator, Accumulator1),
+      collect_quantified_ids(Tail, Accumulator1, Ids)
+  ; Type = type_constructor(_, Arguments) ->
+      collect_quantified_ids_list(Arguments, Accumulator, Ids)
+  ; Type = type_application(Head, Arguments) ->
+      collect_quantified_ids(Head, Accumulator, Accumulator1),
+      collect_quantified_ids_list(Arguments, Accumulator1, Ids)
+  ; Type = forall_type(BoundIds, Body) ->
+      append(BoundIds, Accumulator, Accumulator1),
+      collect_quantified_ids(Body, Accumulator1, Ids)
+  ; Type = type_lambda(_BoundIds, Body) ->
+      collect_quantified_ids(Body, Accumulator, Ids)
+  ; Type = intersection_type(Members) ->
+      collect_quantified_ids_list(Members, Accumulator, Ids)
+  ; Ids = Accumulator
+  ).
+
+collect_quantified_ids_list([], Accumulator, Accumulator).
+collect_quantified_ids_list([Type | Types], Accumulator, Ids) :-
+  collect_quantified_ids(Type, Accumulator, Accumulator1),
+  collect_quantified_ids_list(Types, Accumulator1, Ids).
+
+% quantified_name_table(+Context, +Ids, -Table).
+%
+% Table = list of `Id - Name - Bound` triples (`Bound` itself fully resolved,
+% since it may still contain unification variables solved after it was first
+% recorded), one per id -- the self-contained payload hover rendering needs
+% to print `<A: Logger + Named>` without access to the live analyser Context.
+quantified_name_table(_Context, [], []).
+quantified_name_table(Context, [Id | Ids], [Id - Name - ResolvedBound | Rest]) :-
+  variable_bound_info(Context, Id, Name, Bound),
+  ( Bound == no_bound -> ResolvedBound = no_bound ; fully_resolve(Bound, Context, ResolvedBound) ),
+  quantified_name_table(Context, Ids, Rest).
 
 collect_unification_variable_ids(Type, Accumulator, Ids) :-
   ( Type = unification_variable(Id) ->
@@ -711,20 +835,36 @@ instantiate_positional(type_scheme(QuantifiedIds, Body), Provided, Level, Contex
   positional_quantified_mapping(QuantifiedIds, Provided, Level, ContextIn, Mapping, ContextOut),
   substitute_quantified_variables(Body, Mapping, Type).
 
+% Each fresh id minted below INHERITS the quantified id's name/bound (even
+% when the bound is `no_bound`, so a plain `<A>`'s name still survives for
+% hover through re-instantiation) -- see `record_variable_bound/5`.  A
+% PROVIDED type argument is not a variable this predicate mints, so its bound
+% (if any) is checked immediately via `subsume/5` rather than propagated.
 positional_quantified_mapping([], _, _Level, Context, [], Context).
 positional_quantified_mapping([Quantified | Rest], [], Level, ContextIn,
                               [Quantified - Fresh | Mapping], ContextOut) :-
   fresh_unification_variable(ContextIn, Level, Fresh, Context1),
-  positional_quantified_mapping(Rest, [], Level, Context1, Mapping, ContextOut).
+  Fresh = unification_variable(FreshId),
+  variable_bound_info(Context1, Quantified, Name, Bound),
+  record_variable_bound(Context1, FreshId, Name, Bound, Context2),
+  positional_quantified_mapping(Rest, [], Level, Context2, Mapping, ContextOut).
 positional_quantified_mapping([Quantified | Rest], [Provided | Others], Level, ContextIn,
                               [Quantified - Provided | Mapping], ContextOut) :-
-  positional_quantified_mapping(Rest, Others, Level, ContextIn, Mapping, ContextOut).
+  any_bound(ContextIn, Quantified, Bound),
+  ( Bound == no_bound ->
+      Context1 = ContextIn
+  ; subsume(Provided, Bound, Level, ContextIn, Context1)
+  ),
+  positional_quantified_mapping(Rest, Others, Level, Context1, Mapping, ContextOut).
 
 fresh_quantified_mapping([], _, Context, [], Context).
 fresh_quantified_mapping([Quantified | Rest], Level, ContextIn,
                          [Quantified - Fresh | Mapping], ContextOut) :-
   fresh_unification_variable(ContextIn, Level, Fresh, Context1),
-  fresh_quantified_mapping(Rest, Level, Context1, Mapping, ContextOut).
+  Fresh = unification_variable(FreshId),
+  variable_bound_info(Context1, Quantified, Name, Bound),
+  record_variable_bound(Context1, FreshId, Name, Bound, Context2),
+  fresh_quantified_mapping(Rest, Level, Context2, Mapping, ContextOut).
 
 substitute_quantified_variables(Type, Mapping, Out) :-
   ( Type = quantified_variable(Quantified) ->
@@ -894,6 +1034,20 @@ subsume_resolved(Actual, forall_type(BoundIds, Body), Level, ContextIn, ContextO
   Level1 is Level + 1,
   skolemize_forall(BoundIds, Body, Level1, ContextIn, SkolemBody, Context1),
   subsume(Actual, SkolemBody, Level1, Context1, ContextOut).
+% EXPECTED is a still-unresolved flexible variable: there is no shape yet to
+% check Actual's capabilities AGAINST, so subsumption reduces to plain
+% unification -- binding Expected to Actual's WHOLE type (via
+% `bind_unification_variable/4`, which is exactly where a BOUNDED Expected
+% would itself get enforced, see its own doc comment).  This must be tried
+% BEFORE the ACTUAL-is-intersection width-subtyping rule below: without this
+% clause, an unconstrained Expected meeting an intersection Actual (e.g.
+% instantiating a bounded generic `<A: Logger + Named>` at a call site, where
+% the call argument's own type happens to be an intersection too) would fall
+% into `subsume_any_member`'s per-member backtracking, which tries binding
+% Expected to just ONE member at a time -- succeeding or failing depending on
+% which member is tried first, rather than being bound to Actual as a whole.
+subsume_resolved(Actual, unification_variable(Id), _Level, ContextIn, ContextOut) :- !,
+  unify(Actual, unification_variable(Id), ContextIn, ContextOut).
 % Both functions: contravariant in arguments (expected ⊑ actual), covariant in
 % the result.  This is what lets a less-polymorphic argument position accept a
 % more-polymorphic expectation, and propagates rank-N through nested arrows.

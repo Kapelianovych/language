@@ -13,6 +13,7 @@
 :- use_module(roundtrip,    [roundtrip_results/1]).
 :- use_module(prelude,      [prelude_results/1]).
 :- use_module(errors,       [error_results/1]).
+:- use_module(hover,        [hover_results/1]).
 :- use_module(test_harness, [report/1]).
 
 :- initialization(main).
@@ -26,10 +27,12 @@ main :-
     roundtrip_results(RoundTrip),
     prelude_results(Prelude),
     error_results(Errors),
+    hover_results(Hover),
     report([
       suite('Golden (compile/3 -> .js.expected)', Golden),
       suite('Round-trip (lexer & parser losslessness)', RoundTrip),
       suite('Prelude (compile/4 -> implicit imports)', Prelude),
-      suite('Errors (rejected programs throw, never bare-fail)', Errors)
+      suite('Errors (rejected programs throw, never bare-fail)', Errors),
+      suite('Hover (lsp/queries.pl hover_at/3)', Hover)
     ])
   ).

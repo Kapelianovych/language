@@ -1,7 +1,7 @@
 :- module(infer, [
-  infer_program/6,
-  infer_program_accumulating/7,
-  infer/8
+  infer_program/8,
+  infer_program_accumulating/9,
+  infer/10
 ]).
 
 /*  infer.pl  --  The level-indexed inference judgement.
@@ -58,6 +58,7 @@
   fully_resolve/3,
   unify/4,
   subsume/5,
+  any_bound/3,
   instantiate_forall/5,
   instantiate_forall_positional/6,
   skolemize_forall/6,
@@ -72,16 +73,28 @@
   binary_signature/7
 ]).
 :- use_module(type_environment, [
-  convert_annotation_type/6,
-  bind_type_parameters_rigid/8,
-  declared_function_scheme/6,
-  instantiate_constructor/7,
+  convert_annotation_type/8,
+  bind_type_parameters_rigid/10,
+  declared_function_scheme/8,
+  instantiate_constructor/9,
   union_constructor_names/3,
   module_type_row_for/7,
-  seed_externals/7
+  bound_row_fields/6,
+  seed_externals/9
 ]).
 
-% infer_program(+ProgramNode, +TypeEnvironment, +InitialEnvironment, +ContextIn, -Result, -FinalEnvironment).
+% hover_note(+Span, +Kind, +Type, +HoverIn, -HoverOut).
+%
+% See the identical helper (and its doc) in `type_environment.pl` -- this
+% module records the value-level half of hover: every expression result,
+% identifier use, pattern binding, and so on, at that node's own span, using
+% its type as computed at that point (not yet fully resolved).  Resolution
+% happens once, at the very end of the whole file's analysis, against the
+% FINAL context (see `analyser.pl`'s `analyse_accumulating/7`) -- exactly
+% mirroring how `type_environment.pl`'s annotation-conversion entries defer.
+hover_note(Span, Kind, Type, HoverIn, [raw_hover_entry(Span, Kind, Type) | HoverIn]).
+
+% infer_program(+ProgramNode, +TypeEnvironment, +InitialEnvironment, +ContextIn, -Result, -FinalEnvironment, +HoverIn, -HoverOut).
 %
 % Entry point for a whole program: a sequence of top-level expressions
 % evaluated at level 0.  `Result` is `program_type(LastType, ContextOut)`.
@@ -89,57 +102,61 @@
 % with every top-level definition bound to its generalised scheme -- the
 % module system reads exported value schemes from it.
 infer_program(program_node(Expressions), TypeEnvironment, InitialEnvironment, ContextIn,
-              program_type(LastType, ContextOut), FinalEnvironment) :-
-  infer_sequence(Expressions, 0, false, InitialEnvironment, TypeEnvironment, ContextIn, LastType, FinalEnvironment, ContextOut).
+              program_type(LastType, ContextOut), FinalEnvironment, HoverIn, HoverOut) :-
+  infer_sequence(Expressions, 0, false, InitialEnvironment, TypeEnvironment, ContextIn, LastType, FinalEnvironment, ContextOut, HoverIn, HoverOut).
 
 % infer_program_accumulating(+ProgramNode, +TypeEnvironment, +InitialEnvironment,
-%                            +ContextIn, -Result, -FinalEnvironment, -Errors).
+%                            +ContextIn, -Result, -FinalEnvironment, -Errors, +HoverIn, -HoverOut).
 %
-% Same inference as `infer_program/6` -- the SAME judgement, environment and
+% Same inference as `infer_program/8` -- the SAME judgement, environment and
 % unifier -- but instead of letting the first `analysis_error` propagate, each
 % TOP-LEVEL item is wrapped so an error is RECORDED (`error_at(Span, Reason)`)
 % and the walk continues with that name left as its forward placeholder.  This
 % is what the LSP/incremental path uses to report errors in several definitions
-% at once; the batch compiler keeps using the throwing `infer_program/6`.
-% (One error per top-level item: a thrown error abandons that item's body.)
+% at once; the batch compiler keeps using the throwing `infer_program/8`.
+% (One error per top-level item: a thrown error abandons that item's body --
+% and, symmetrically, any hover entries recorded while inferring it, since
+% `try_item/13` resets `HoverOut = HoverIn` in its error branch below exactly
+% as it already resets `EnvironmentOut`/`ContextOut`.)
 infer_program_accumulating(program_node(Expressions), TypeEnvironment, InitialEnvironment, ContextIn,
-                           program_type(LastType, ContextOut), FinalEnvironment, Errors) :-
-  prebind_forward(Expressions, 0, InitialEnvironment, TypeEnvironment, ContextIn, Environment1, Context1),
+                           program_type(LastType, ContextOut), FinalEnvironment, Errors, HoverIn, HoverOut) :-
+  prebind_forward(Expressions, 0, InitialEnvironment, TypeEnvironment, ContextIn, Environment1, Context1, HoverIn, Hover1),
   walk_accumulating(Expressions, 0, false, Environment1, TypeEnvironment, Context1,
-                    LastType, FinalEnvironment, ContextOut, [], ReverseErrors),
+                    LastType, FinalEnvironment, ContextOut, [], ReverseErrors, Hover1, HoverOut),
   reverse(ReverseErrors, Errors).
 
 walk_accumulating([], _Level, _InsideFunction, Environment, _TypeEnvironment, Context,
-                  record_type([], closed), Environment, Context, Errors, Errors).
+                  record_type([], closed), Environment, Context, Errors, Errors, Hover, Hover).
 walk_accumulating([Expression], Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
-                  ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut) :-
+                  ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut, HoverIn, HoverOut) :-
   try_item(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
-           ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut).
+           ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut, HoverIn, HoverOut).
 walk_accumulating([Expression, Next | Rest], Level, InsideFunction, Environment, TypeEnvironment,
-                  ContextIn, ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut) :-
+                  ContextIn, ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut, HoverIn, HoverOut) :-
   try_item(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
-           _Type, Environment1, Context1, ErrorsIn, Errors1),
+           _Type, Environment1, Context1, ErrorsIn, Errors1, HoverIn, Hover1),
   walk_accumulating([Next | Rest], Level, InsideFunction, Environment1, TypeEnvironment,
-                    Context1, ResultType, FinalEnvironment, ContextOut, Errors1, ErrorsOut).
+                    Context1, ResultType, FinalEnvironment, ContextOut, Errors1, ErrorsOut, Hover1, HoverOut).
 
 % Infer one top-level item; on an analysis error, record it (with the item's
 % span) and continue from the PRE-item environment/context so later items are
-% still checked.  Reuses the ordinary `infer_sequence_item/9` (same rules).
+% still checked.  Reuses the ordinary `infer_sequence_item/11` (same rules).
 try_item(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
-         Type, EnvironmentOut, ContextOut, ErrorsIn, ErrorsOut) :-
+         Type, EnvironmentOut, ContextOut, ErrorsIn, ErrorsOut, HoverIn, HoverOut) :-
   catch(
     ( infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironment,
-                          ContextIn, Type, EnvironmentOut, ContextOut),
+                          ContextIn, Type, EnvironmentOut, ContextOut, HoverIn, HoverOut),
       ErrorsOut = ErrorsIn ),
     analysis_error(Reason),
     ( EnvironmentOut = Environment, ContextOut = ContextIn, Type = record_type([], closed),
+      HoverOut = HoverIn,
       item_span(Expression, Span),
       ErrorsOut = [error_at(Span, Reason) | ErrorsIn] )
   ).
 
 item_span(definition_node(_, _, _, Span), Span) :- !.
 item_span(destructuring_node(_, _, Span), Span) :- !.
-item_span(external_node(_, _, _, Span), Span) :- !.
+item_span(external_node(_, _, _, Span, _), Span) :- !.
 item_span(Node, Span) :- Node =.. Args, append(_, [Last], Args), Last = span(_, _), !, Span = Last.
 item_span(_Node, span(0, 0)).
 
@@ -147,7 +164,7 @@ item_span(_Node, span(0, 0)).
 % Sequences: programs and blocks  (this is where `let` lives)
 % ---------------------------------------------------------------------------
 
-% infer_sequence(+Expressions, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -FinalEnvironment, -ContextOut).
+% infer_sequence(+Expressions, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -FinalEnvironment, -ContextOut, +HoverIn, -HoverOut).
 %
 % A sequence is the scope shared by a group of definitions.  We first
 % pre-bind every definition name as a `forward` placeholder (so earlier
@@ -157,10 +174,10 @@ item_span(_Node, span(0, 0)).
 % collected and validated into `TypeEnvironment`).  `FinalEnvironment` is the
 % environment after the last item (with all definitions bound).
 infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment,
-               ContextIn, ResultType, FinalEnvironment, ContextOut) :-
-  prebind_forward(Expressions, Level, Environment, TypeEnvironment, ContextIn, Environment1, Context1),
+               ContextIn, ResultType, FinalEnvironment, ContextOut, HoverIn, HoverOut) :-
+  prebind_forward(Expressions, Level, Environment, TypeEnvironment, ContextIn, Environment1, Context1, HoverIn, Hover1),
   infer_sequence_walk(Expressions, Level, InsideFunction, Environment1, TypeEnvironment,
-                      Context1, ResultType, FinalEnvironment, ContextOut).
+                      Context1, ResultType, FinalEnvironment, ContextOut, Hover1, HoverOut).
 
 % Pre-bind each value definition's name, tagged `forward`.  A fully annotated
 % generic function literal contributes its DECLARED scheme, so a recursive
@@ -169,41 +186,51 @@ infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment,
 % outer-level placeholder.  Any other definition gets a fresh placeholder
 % variable and recursion through it stays monomorphic, as before.  A bad
 % annotation is ignored HERE (placeholder fallback) so the error surfaces at
-% the definition item, which reports it with its span.
-prebind_forward([], _Level, Environment, _TypeEnvironment, Context, Environment, Context).
+% the definition item, which reports it with its span.  A successful
+% `declared_function_scheme` DOES thread real hover entries (the parameter/
+% return annotations it converts are the same ones the real body-check will
+% converge on) -- harmless, minor duplication with the real per-item pass
+% below, not a correctness concern (see `hover_note/5`'s doc in
+% type_environment.pl on why duplicate entries at the same span are fine).
+prebind_forward([], _Level, Environment, _TypeEnvironment, Context, Environment, Context, Hover, Hover).
 prebind_forward([definition_node(identifier_node(Name, _), _, Value, _) | Expressions], Level,
-                Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut) :- !,
-  ( catch(declared_function_scheme(Value, TypeEnvironment, Level, ContextIn, DeclaredScheme, Context1),
+                Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut, HoverIn, HoverOut) :- !,
+  ( catch(declared_function_scheme(Value, TypeEnvironment, Level, ContextIn, DeclaredScheme, Context1, HoverIn, Hover1),
           analysis_error(_),
           fail) ->
       Scheme = DeclaredScheme
   ; fresh_unification_variable(ContextIn, Level, Placeholder, Context1),
-    monomorphic_type_scheme(Placeholder, Scheme)
+    monomorphic_type_scheme(Placeholder, Scheme),
+    Hover1 = HoverIn
   ),
   put_assoc(Name, Environment, forward(Scheme), Environment1),
-  prebind_forward(Expressions, Level, Environment1, TypeEnvironment, Context1, EnvironmentOut, ContextOut).
-prebind_forward([_ | Expressions], Level, Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut) :-
-  prebind_forward(Expressions, Level, Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut).
+  prebind_forward(Expressions, Level, Environment1, TypeEnvironment, Context1, EnvironmentOut, ContextOut, Hover1, HoverOut).
+prebind_forward([_ | Expressions], Level, Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut, HoverIn, HoverOut) :-
+  prebind_forward(Expressions, Level, Environment, TypeEnvironment, ContextIn, EnvironmentOut, ContextOut, HoverIn, HoverOut).
 
 % Walk the sequence, threading the (growing) environment and reporting the
 % last expression's type.  An empty sequence has the unit type `()`.
 infer_sequence_walk([], _Level, _InsideFunction, Environment, _TypeEnvironment,
-                    Context, record_type([], closed), Environment, Context).
+                    Context, record_type([], closed), Environment, Context, Hover, Hover).
 infer_sequence_walk([Expression], Level, InsideFunction, Environment, TypeEnvironment,
-                    ContextIn, ResultType, FinalEnvironment, ContextOut) :-
+                    ContextIn, ResultType, FinalEnvironment, ContextOut, HoverIn, HoverOut) :-
   infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironment,
-                      ContextIn, ResultType, FinalEnvironment, ContextOut).
+                      ContextIn, ResultType, FinalEnvironment, ContextOut, HoverIn, HoverOut).
 infer_sequence_walk([Expression, Next | Rest], Level, InsideFunction, Environment,
-                    TypeEnvironment, ContextIn, ResultType, FinalEnvironment, ContextOut) :-
+                    TypeEnvironment, ContextIn, ResultType, FinalEnvironment, ContextOut, HoverIn, HoverOut) :-
   infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironment,
-                      ContextIn, _Type, Environment1, Context1),
+                      ContextIn, _Type, Environment1, Context1, HoverIn, Hover1),
   infer_sequence_walk([Next | Rest], Level, InsideFunction, Environment1, TypeEnvironment,
-                      Context1, ResultType, FinalEnvironment, ContextOut).
+                      Context1, ResultType, FinalEnvironment, ContextOut, Hover1, HoverOut).
 
 % Process one sequence element, returning its type and the environment to
-% use for the rest of the sequence.
+% use for the rest of the sequence.  A definition/external/module's OWN
+% name-span hover entry is NOT recorded here -- it comes from
+% `analyser.pl`'s `declaration_hover_entries/6`, reusing the SAME resolved
+% type `definition_types/4` already computes, rather than duplicating that
+% resolution here.
 infer_sequence_item(type_declaration_node(_, _, _, _, _), _Level, _InsideFunction,
-                    Environment, _TypeEnvironment, Context, record_type([], closed), Environment, Context) :- !.
+                    Environment, _TypeEnvironment, Context, record_type([], closed), Environment, Context, Hover, Hover) :- !.
 % A MODULE is a genuine record VALUE: its body is its own nested scope (own
 % `let`-like sequence, one level deeper, seeded with its own `external`s
 % exactly like the top level), and its type is a row built from its PUBLIC
@@ -241,27 +268,27 @@ infer_sequence_item(type_declaration_node(_, _, _, _, _), _Level, _InsideFunctio
 % `type_application_node` support) instantiates positionally against.
 infer_sequence_item(module_node(Name, Parameters, Opacity, Ascription, Items, _Span),
                     Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
-                    ModuleType, EnvironmentOut, ContextOut) :- !,
+                    ModuleType, EnvironmentOut, ContextOut, HoverIn, HoverOut) :- !,
   normalise_module_items(Items, CleanItems, PublicValueNames),
   Level1 is Level + 1,
   ( Parameters == [] ->
       % The common (non-generic) case: nothing to bind rigidly, so this is
       % exactly the module's ORIGINAL (pre-generic) setup, byte-for-byte --
       % zero behavioural change for every module that doesn't declare `<T>`.
-      ScopedTypeEnvironment = TypeEnvironment, SkolemPairs = [], BodyLevel = Level1, Context0 = ContextIn
+      ScopedTypeEnvironment = TypeEnvironment, SkolemPairs = [], BodyLevel = Level1, Context0 = ContextIn, Hover0 = HoverIn
   ; BodyLevel is Level1 + 1,
     bind_type_parameters_rigid(Parameters, TypeEnvironment, Level1, BodyLevel, ContextIn,
-                               ScopedTypeEnvironment, SkolemPairs, Context0)
+                               ScopedTypeEnvironment, SkolemPairs, Context0, HoverIn, Hover0)
   ),
-  seed_externals(CleanItems, ScopedTypeEnvironment, BodyLevel, Environment, Context0, SeededEnvironment, Context1),
+  seed_externals(CleanItems, ScopedTypeEnvironment, BodyLevel, Environment, Context0, SeededEnvironment, Context1, Hover0, Hover0a),
   infer_sequence(CleanItems, BodyLevel, InsideFunction, SeededEnvironment, ScopedTypeEnvironment, Context1,
-                _BodyLastType, BodyEnvironment, Context2),
+                _BodyLastType, BodyEnvironment, Context2, Hover0a, Hover0b),
   module_member_row(PublicValueNames, BodyEnvironment, MemberFieldsRaw),
   ( Ascription = some(ModuleTypeExpression) ->
       % The ascription is converted in `ScopedTypeEnvironment` too (not the
       % plain outer one) -- it may itself reference the module's own `T`,
       % e.g. `module Stack<T>: Container<T> = {...}`.
-      convert_annotation_type(ModuleTypeExpression, ScopedTypeEnvironment, BodyLevel, Context2, ModuleTypeRaw, Context3),
+      convert_annotation_type(ModuleTypeExpression, ScopedTypeEnvironment, BodyLevel, Context2, ModuleTypeRaw, Context3, Hover0b, Hover1),
       % `ModuleTypeRaw` is either a SINGLE module type (`module A: B = {...}`,
       % `type_constructor` if `B` is opaque, `record_type` if transparent) or,
       % when the ascription used `+`, an `intersection_type(Members)` (each
@@ -291,7 +318,7 @@ infer_sequence_item(module_node(Name, Parameters, Opacity, Ascription, Items, _S
       % or without a type parameter, so there is nothing extra to get right
       % here for the generic case specifically).
       ModuleType0 = type_constructor(Name, []),
-      Context5 = Context2
+      Context5 = Context2, Hover1 = Hover0b
   ; % Transparent, unascribed: the module's own row IS its type, so `T`
     % needs the same skolem-back-to-flexible swap the ascribed branch does,
     % just applied to the row directly (wrapping/unwrapping a throwaway
@@ -299,35 +326,47 @@ infer_sequence_item(module_node(Name, Parameters, Opacity, Ascription, Items, _S
     % recursion is reused here, without needing a new exported helper).
     substitute_skolems(record_type(MemberFieldsRaw, closed), SkolemPairs, record_type(MemberFields, closed)),
     ModuleType0 = record_type(MemberFields, closed),
-    Context5 = Context2
+    Context5 = Context2, Hover1 = Hover0b
   ),
   generalize(ModuleType0, Level, Context5, Scheme, Context6),
   put_assoc(Name, Environment, defined(Scheme), EnvironmentOut),
   ModuleType = ModuleType0,
-  ContextOut = Context6.
+  ContextOut = Context6,
+  HoverOut = Hover1.
 % An `external` declaration carries no inferable body; its (trusted) type was
 % already seeded into the environment before the walk, so there is nothing to
 % do here.  Its "value" is unit, like a type declaration.
-infer_sequence_item(external_node(_, _, _, _), _Level, _InsideFunction,
-                    Environment, _TypeEnvironment, Context, record_type([], closed), Environment, Context) :- !.
+infer_sequence_item(external_node(_, _, _, _, _), _Level, _InsideFunction,
+                    Environment, _TypeEnvironment, Context, record_type([], closed), Environment, Context, Hover, Hover) :- !.
 % A destructuring definition binds the pattern's variables for the rest of
 % the sequence (monomorphically); its value is the matched value's type.
 infer_sequence_item(destructuring_node(Pattern, Value, _), Level, InsideFunction,
-                    Environment, TypeEnvironment, ContextIn, ValueType, EnvironmentOut, ContextOut) :- !,
-  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
-  type_pattern(Pattern, ValueType, Level, TypeEnvironment, Environment, Context1, EnvironmentOut, ContextOut).
-infer_sequence_item(definition_node(identifier_node(Name, _), Annotation, Value, _),
+                    Environment, TypeEnvironment, ContextIn, ValueType, EnvironmentOut, ContextOut, HoverIn, HoverOut) :- !,
+  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1, HoverIn, Hover1),
+  type_pattern(Pattern, ValueType, Level, TypeEnvironment, Environment, Context1, EnvironmentOut, ContextOut, Hover1, HoverOut).
+infer_sequence_item(definition_node(identifier_node(Name, Span), Annotation, Value, _),
                     Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
-                    ValueType, EnvironmentOut, ContextOut) :- !,
+                    ValueType, EnvironmentOut, ContextOut, HoverIn, HoverOut) :- !,
   Level1 is Level + 1,
-  define_value(Annotation, Value, Level1, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context2),
+  define_value(Annotation, Value, Level1, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context2, HoverIn, Hover1),
   tie_forward_knot(Name, Environment, ValueType, Context2, Context3),
-  generalize(ValueType, Level, Context3, Scheme, Context4),
-  put_assoc(Name, Environment, defined(Scheme), EnvironmentOut),
+  generalize(ValueType, Level, Context3, type_scheme(QuantifiedIds, Body), Context4),
+  % The binding's OWN name span -- previously discarded here, which left every
+  % NESTED definition's name (a module member, a block-scoped `x = ..`) with
+  % no semantic hover entry of its own: `analyser.pl`'s `declaration_hover_
+  % entries/4` only covers TOP-LEVEL names by its own doc, and (unlike that
+  % predicate) this fires regardless of the enclosing module's opacity, since
+  % a member's own declaration site always knows its own type. Wrapped in the
+  % SAME `forall_type` shape `declaration_hover_entries/4` uses (not the raw,
+  % ungeneralized `ValueType`), so a polymorphic binding's hover shows its
+  % quantified form, not a bare unification variable.
+  ( QuantifiedIds == [] -> DeclType = Body ; DeclType = forall_type(QuantifiedIds, Body) ),
+  hover_note(Span, declaration, DeclType, Hover1, HoverOut),
+  put_assoc(Name, Environment, defined(type_scheme(QuantifiedIds, Body)), EnvironmentOut),
   ContextOut = Context4.
 infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironment,
-                    ContextIn, Type, Environment, ContextOut) :-
-  infer(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Type, ContextOut).
+                    ContextIn, Type, Environment, ContextOut, HoverIn, HoverOut) :-
+  infer(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Type, ContextOut, HoverIn, HoverOut).
 
 % If this definition's name was referenced forward (its placeholder is
 % already solved), unify the placeholder with the value's type to close the
@@ -378,8 +417,8 @@ normalise_module_items([public_node(definition_node(identifier_node(Name, NSpan)
                       [definition_node(identifier_node(Name, NSpan), Annotation, Value, DSpan) | CleanItems],
                       [Name | PublicNames]) :- !,
   normalise_module_items(Rest, CleanItems, PublicNames).
-normalise_module_items([public_node(external_node(Name, Type, Source, ESpan), _) | Rest],
-                      [external_node(Name, Type, Source, ESpan) | CleanItems], [Name | PublicNames]) :- !,
+normalise_module_items([public_node(external_node(Name, Type, Source, ESpan, NameSpan), _) | Rest],
+                      [external_node(Name, Type, Source, ESpan, NameSpan) | CleanItems], [Name | PublicNames]) :- !,
   normalise_module_items(Rest, CleanItems, PublicNames).
 normalise_module_items([public_node(module_node(Name, Parameters, Opacity, Ascription, Items, MSpan), _) | Rest],
                       [module_node(Name, Parameters, Opacity, Ascription, Items, MSpan) | CleanItems], [Name | PublicNames]) :- !,
@@ -460,22 +499,30 @@ check_module_satisfies_each([ModuleType | Rest], MemberFields, Name, TypeEnviron
 % The per-node inference rules
 % ---------------------------------------------------------------------------
 
-% Literals: a constant base type, context unchanged.
-infer(number_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, number, Context).
-infer(boolean_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, boolean, Context).
+% Literals: a constant base type, context unchanged.  Every clause below
+% records a hover entry at its OWN node's span, using the type it just
+% computed -- see `hover_note/5`'s doc above for why this is deferred
+% (resolved once, at the end of the whole file's analysis) rather than
+% resolved immediately.
+infer(number_node(_, Span), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, number, Context, HoverIn, HoverOut) :-
+  hover_note(Span, literal, number, HoverIn, HoverOut).
+infer(boolean_node(_, Span), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, boolean, Context, HoverIn, HoverOut) :-
+  hover_note(Span, literal, boolean, HoverIn, HoverOut).
 
 % String literal: the result is `string`, but each interpolated `{ expr }`
 % must itself be well-typed, so we still infer through it.
-infer(string_node(Parts, _), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, string, ContextOut) :-
-  infer_string_parts(Parts, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut).
+infer(string_node(Parts, Span), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, string, ContextOut, HoverIn, HoverOut) :-
+  infer_string_parts(Parts, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, Hover1),
+  hover_note(Span, literal, string, Hover1, HoverOut).
 
 % Variable: look the name up and instantiate its scheme with fresh
 % variables at the current level.  A `forward` binding may only be used
 % inside a function body.
-infer(identifier_node(Name, _), Level, InsideFunction, Environment, _TypeEnvironment, ContextIn, Type, ContextOut) :-
+infer(identifier_node(Name, Span), Level, InsideFunction, Environment, _TypeEnvironment, ContextIn, Type, ContextOut, HoverIn, HoverOut) :-
   ( get_assoc(Name, Environment, Binding) ->
       binding_scheme(Binding, InsideFunction, Name, Scheme),
-      instantiate(Scheme, Level, ContextIn, Type, ContextOut)
+      instantiate(Scheme, Level, ContextIn, Type, ContextOut),
+      hover_note(Span, identifier, Type, HoverIn, HoverOut)
   ; throw(analysis_error(unbound_variable(Name)))
   ).
 
@@ -483,12 +530,13 @@ infer(identifier_node(Name, _), Level, InsideFunction, Environment, _TypeEnviron
 % its annotation if present; the body is typed with those bound and with
 % `InsideFunction = true`.  A return annotation, if present, is unified
 % against the inferred body type.
-infer(function_node([], Parameters, ReturnAnnotation, Body, _), Level, _InsideFunction,
+infer(function_node([], Parameters, ReturnAnnotation, Body, Span), Level, _InsideFunction,
       Environment, TypeEnvironment, ContextIn,
-      function_type(ParameterTypes, BodyType), ContextOut) :- !,
+      function_type(ParameterTypes, BodyType), ContextOut, HoverIn, HoverOut) :- !,
   bind_parameters(Parameters, Level, TypeEnvironment, Environment, ContextIn,
-                  ParameterTypes, Environment1, Context1),
-  type_function_body(ReturnAnnotation, Body, Level, Environment1, TypeEnvironment, Context1, BodyType, ContextOut).
+                  ParameterTypes, Environment1, Context1, HoverIn, Hover1),
+  type_function_body(ReturnAnnotation, Body, Level, Environment1, TypeEnvironment, Context1, BodyType, ContextOut, Hover1, Hover2),
+  hover_note(Span, function, function_type(ParameterTypes, BodyType), Hover2, HoverOut).
 
 % Lambda with explicit generics (`<A B>(..)`): each unbounded proper
 % parameter is a RIGID skolem while the body is checked -- one level deeper,
@@ -500,30 +548,33 @@ infer(function_node([], Parameters, ReturnAnnotation, Body, _), Level, _InsideFu
 % are swapped back to the flexible variables paired with them (minted first,
 % in declaration order, so the scheme's quantifiers stay positional for
 % explicit type arguments), and the type generalises exactly as before.
-infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body, _), Level, _InsideFunction,
-      Environment, TypeEnvironment, ContextIn, ResultType, ContextOut) :-
+infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body, Span), Level, _InsideFunction,
+      Environment, TypeEnvironment, ContextIn, ResultType, ContextOut, HoverIn, HoverOut) :-
   Level1 is Level + 1,
   bind_type_parameters_rigid(TypeParameters, TypeEnvironment, Level, Level1, ContextIn,
-                             TypeEnvironment1, SkolemPairs, Context1),
+                             TypeEnvironment1, SkolemPairs, Context1, HoverIn, Hover1),
   bind_parameters(Parameters, Level1, TypeEnvironment1, Environment, Context1,
-                  ParameterTypes, Environment1, Context2),
-  type_function_body(ReturnAnnotation, Body, Level1, Environment1, TypeEnvironment1, Context2, BodyType, ContextOut),
+                  ParameterTypes, Environment1, Context2, Hover1, Hover2),
+  type_function_body(ReturnAnnotation, Body, Level1, Environment1, TypeEnvironment1, Context2, BodyType, ContextOut, Hover2, Hover3),
   fully_resolve(function_type(ParameterTypes, BodyType), ContextOut, ResolvedType),
-  substitute_skolems(ResolvedType, SkolemPairs, ResultType).
+  substitute_skolems(ResolvedType, SkolemPairs, ResultType),
+  hover_note(Span, function, ResultType, Hover3, HoverOut).
 
 % Record: infer each member into a field.  A literal is a CLOSED record, so
 % its tail is `closed`.  Positional members get sequential `index` keys;
 % labeled members get `label` keys.  Labels must be unique.
-infer(record_node(Members, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, record_type(Fields, Tail), ContextOut) :-
-  infer_record_members(Members, 0, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Fields, SpreadTypes, ContextOut),
+infer(record_node(Members, Span), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, record_type(Fields, Tail), ContextOut, HoverIn, HoverOut) :-
+  infer_record_members(Members, 0, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Fields, SpreadTypes, ContextOut, HoverIn, Hover1),
   check_unique_labels(Fields, []),
-  spread_tail(SpreadTypes, Tail).
+  spread_tail(SpreadTypes, Tail),
+  hover_note(Span, record, record_type(Fields, Tail), Hover1, HoverOut).
 
 % Block: its own lexical scope, behaving like a sequence.
-infer(block_node(Expressions, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, Type, ContextOut) :-
-  infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Type, _FinalEnvironment, ContextOut).
+infer(block_node(Expressions, Span), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, Type, ContextOut, HoverIn, HoverOut) :-
+  infer_sequence(Expressions, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Type, _FinalEnvironment, ContextOut, HoverIn, Hover1),
+  hover_note(Span, block, Type, Hover1, HoverOut).
 
 % Member access `target.label` / `target.index`: constrain the target to be
 % a record having AT LEAST this field (an open row tail), with any
@@ -535,9 +586,9 @@ infer(block_node(Expressions, _), Level, InsideFunction, Environment, TypeEnviro
 % inspected only through `match`), its row is looked up regardless of its own
 % opacity: opacity governs whether some OTHER, differently-named value may
 % substitute for it, not whether ITS OWN values support member access.
-infer(access_node(Target, Accessor, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, FieldType, ContextOut) :-
-  infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
+infer(access_node(Target, Accessor, Span), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, FieldType, ContextOut, HoverIn, HoverOut) :-
+  infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1, HoverIn, Hover1),
   accessor_key(Accessor, Key),
   resolve_head(TargetType, Context1, ResolvedTarget),
   ( ResolvedTarget = type_constructor(TypeName, TypeArguments) ->
@@ -546,47 +597,69 @@ infer(access_node(Target, Accessor, _), Level, InsideFunction, Environment, Type
           true
       ; throw(analysis_error(unknown_member(TypeName, Key)))
       )
+  ; ResolvedTarget = skolem(SkolemId, _SkolemLevel, SkolemName), any_bound(Context1, SkolemId, Bound), Bound \== no_bound ->
+      % A BOUNDED generic parameter (`<A: Logger + Named>`) is rigid but not
+      % capability-less: its bound (not the skolem itself, which has no
+      % fields of its own) tells us what member access is allowed -- this is
+      % what lets a function use its own generic's bound's capabilities
+      % (`x.info(..)` for `x: A`, `A: Logger`) while `A` still keeps its own
+      % distinct identity for the rest of the body (see
+      % `bind_type_parameters_rigid`, which is what attaches this bound to
+      % the skolem in the first place).
+      bound_row_fields(Bound, TypeEnvironment, Level, Context1, Fields, ContextOut),
+      ( memberchk(record_field(_, Key, FieldType), Fields) ->
+          true
+      ; throw(analysis_error(unknown_member(SkolemName, Key)))
+      )
   ; fresh_unification_variable(Context1, Level, FieldType, Context2),
     fresh_unification_variable(Context2, Level, AnyMutability, Context3),
     fresh_unification_variable(Context3, Level, RestTail, Context4),
     unify(TargetType, record_type([record_field(AnyMutability, Key, FieldType)], RestTail), Context4, ContextOut)
-  ).
+  ),
+  accessor_span(Accessor, AccessorSpan),
+  hover_note(AccessorSpan, member, FieldType, Hover1, Hover2),
+  hover_note(Span, member_access, FieldType, Hover2, HoverOut).
 
 % Member assignment `target.member = value`: like access, but the member's
 % mutability is required to be `mutable`, and the value's type must match.
-infer(assignment_node(access_node(Target, Accessor, _), Value, _), Level, InsideFunction,
-      Environment, TypeEnvironment, ContextIn, ValueType, ContextOut) :-
-  infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
+infer(assignment_node(access_node(Target, Accessor, _), Value, Span), Level, InsideFunction,
+      Environment, TypeEnvironment, ContextIn, ValueType, ContextOut, HoverIn, HoverOut) :-
+  infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1, HoverIn, Hover1),
   accessor_key(Accessor, Key),
   fresh_unification_variable(Context1, Level, FieldType, Context2),
   fresh_unification_variable(Context2, Level, RestTail, Context3),
   unify(TargetType, record_type([record_field(mutable, Key, FieldType)], RestTail), Context3, Context4),
-  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, Context4, ValueType, Context5),
-  unify(ValueType, FieldType, Context5, ContextOut).
+  accessor_span(Accessor, AccessorSpan),
+  hover_note(AccessorSpan, member, FieldType, Hover1, Hover2),
+  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, Context4, ValueType, Context5, Hover2, Hover3),
+  unify(ValueType, FieldType, Context5, ContextOut),
+  hover_note(Span, assignment, ValueType, Hover3, HoverOut).
 
 % Match: the scrutinee's type must satisfy every arm's pattern, each guard
 % must be boolean, and every arm's result has the match's (shared) type.
 % Patterns are type-consistent with the scrutinee -- there are no union
 % types, so all arms describe the same scrutinee type.
-infer(match_node(Scrutinee, RawArms, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, ResultType, ContextOut) :-
-  infer(Scrutinee, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ScrutineeType, Context1),
+infer(match_node(Scrutinee, RawArms, Span), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, ResultType, ContextOut, HoverIn, HoverOut) :-
+  infer(Scrutinee, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ScrutineeType, Context1, HoverIn, Hover1),
   fresh_unification_variable(Context1, Level, ResultType, Context2),
   % An or-pattern's alternatives must bind the same variables; then we desugar
   % each alternative into its own single-pattern arm, which makes the existing
   % typing (per-alternative body), exhaustiveness and codegen sound for free.
   check_or_pattern_bindings(RawArms),
   desugar_arms(RawArms, Arms),
-  infer_match_arms(Arms, ScrutineeType, ResultType, Level, InsideFunction, Environment, TypeEnvironment, Context2, Context3),
+  infer_match_arms(Arms, ScrutineeType, ResultType, Level, InsideFunction, Environment, TypeEnvironment, Context2, Context3, Hover1, Hover2),
   check_exhaustiveness(Arms, ScrutineeType, TypeEnvironment, Context3),
-  ContextOut = Context3.
+  ContextOut = Context3,
+  hover_note(Span, match, ResultType, Hover2, HoverOut).
 
 % A destructuring reached in expression position cannot bind anything
 % visible, so it just contributes the matched value's type.
-infer(destructuring_node(Pattern, Value, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, ValueType, ContextOut) :-
-  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
-  type_pattern(Pattern, ValueType, Level, TypeEnvironment, Environment, Context1, _DiscardedEnvironment, ContextOut).
+infer(destructuring_node(Pattern, Value, Span), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, ValueType, ContextOut, HoverIn, HoverOut) :-
+  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1, HoverIn, Hover1),
+  type_pattern(Pattern, ValueType, Level, TypeEnvironment, Environment, Context1, _DiscardedEnvironment, ContextOut, Hover1, Hover2),
+  hover_note(Span, destructuring, ValueType, Hover2, HoverOut).
 
 % Explicit TYPE APPLICATION at a call site: `foo<number>(1)` fixes the
 % callee's type parameters positionally; a hole (`bar<_ boolean>(..)`) and
@@ -596,68 +669,75 @@ infer(destructuring_node(Pattern, Value, _), Level, InsideFunction, Environment,
 % annotated parameter -- resolves to a forall_type, whose bound ids are in
 % annotation source order.  Supplying more arguments than there are
 % quantifiers, or type-applying a monomorphic value, is an error.
-infer(type_application_node(Target, TypeArguments, _), Level, InsideFunction, Environment,
-      TypeEnvironment, ContextIn, Type, ContextOut) :-
-  convert_type_arguments(TypeArguments, TypeEnvironment, Level, ContextIn, Provided, Context1),
+infer(type_application_node(Target, TypeArguments, Span), Level, InsideFunction, Environment,
+      TypeEnvironment, ContextIn, Type, ContextOut, HoverIn, HoverOut) :-
+  convert_type_arguments(TypeArguments, TypeEnvironment, Level, ContextIn, Provided, Context1, HoverIn, HoverA),
   ( Target = identifier_node(Name, _),
     get_assoc(Name, Environment, Binding),
     binding_scheme(Binding, InsideFunction, Name, type_scheme(QuantifiedIds, SchemeBody)),
     QuantifiedIds \== [] ->
       check_type_argument_count(QuantifiedIds, Provided),
-      instantiate_positional(type_scheme(QuantifiedIds, SchemeBody), Provided, Level, Context1, Type, ContextOut)
-  ; infer(Target, Level, InsideFunction, Environment, TypeEnvironment, Context1, TargetType, Context2),
+      instantiate_positional(type_scheme(QuantifiedIds, SchemeBody), Provided, Level, Context1, Type, ContextOut),
+      Hover1 = HoverA
+  ; infer(Target, Level, InsideFunction, Environment, TypeEnvironment, Context1, TargetType, Context2, HoverA, Hover1),
     resolve_head(TargetType, Context2, Resolved),
     ( Resolved = forall_type(BoundIds, _) ->
         check_type_argument_count(BoundIds, Provided),
         instantiate_forall_positional(Resolved, Provided, Level, Context2, Type, ContextOut)
     ; throw(analysis_error(type_arguments_on_monomorphic_value))
     )
-  ).
+  ),
+  hover_note(Span, type_application, Type, Hover1, HoverOut).
 
 % Application, with partial application and argument PLACEHOLDERS.  A `_`
 % argument is a hole: the call is applied to all positions (holes as fresh
 % variables), and the whole expression becomes a function awaiting the holes,
 % in order.  With no holes this is ordinary application.
-infer(function_call_node(Target, Arguments, _), Level, InsideFunction, Environment,
-      TypeEnvironment, ContextIn, ResultType, ContextOut) :-
-  infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
-  apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut).
+infer(function_call_node(Target, Arguments, Span), Level, InsideFunction, Environment,
+      TypeEnvironment, ContextIn, ResultType, ContextOut, HoverIn, HoverOut) :-
+  infer(Target, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1, HoverIn, Hover1),
+  apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut, Hover1, Hover2),
+  hover_note(Span, call, ResultType, Hover2, HoverOut).
 
 % Conditional: the condition must be boolean and the two branches must agree.
-infer(conditional_node(Condition, Then, Else, _), Level, InsideFunction, Environment,
-      TypeEnvironment, ContextIn, BranchType, ContextOut) :-
-  infer(Condition, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ConditionType, Context1),
+infer(conditional_node(Condition, Then, Else, Span), Level, InsideFunction, Environment,
+      TypeEnvironment, ContextIn, BranchType, ContextOut, HoverIn, HoverOut) :-
+  infer(Condition, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ConditionType, Context1, HoverIn, Hover1),
   unify(ConditionType, boolean, Context1, Context2),
-  infer(Then, Level, InsideFunction, Environment, TypeEnvironment, Context2, BranchType, Context3),
-  infer(Else, Level, InsideFunction, Environment, TypeEnvironment, Context3, ElseType, Context4),
-  unify(BranchType, ElseType, Context4, ContextOut).
+  infer(Then, Level, InsideFunction, Environment, TypeEnvironment, Context2, BranchType, Context3, Hover1, Hover2),
+  infer(Else, Level, InsideFunction, Environment, TypeEnvironment, Context3, ElseType, Context4, Hover2, Hover3),
+  unify(BranchType, ElseType, Context4, ContextOut),
+  hover_note(Span, conditional, BranchType, Hover3, HoverOut).
 
 % Unary operator.
-infer(unary_node(Operator, Operand, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, ResultType, ContextOut) :-
+infer(unary_node(Operator, Operand, Span), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, ResultType, ContextOut, HoverIn, HoverOut) :-
   unary_signature(Operator, Level, OperandType, ResultType),
-  infer(Operand, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ActualOperandType, Context1),
-  unify(ActualOperandType, OperandType, Context1, ContextOut).
+  infer(Operand, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ActualOperandType, Context1, HoverIn, Hover1),
+  unify(ActualOperandType, OperandType, Context1, ContextOut),
+  hover_note(Span, operator, ResultType, Hover1, HoverOut).
 
 % The pipe `x -> f` IS application -- codegen emits exactly `f(x)` -- so it is
-% typed by the same `apply_call/9` a call expression uses.  That instantiates a
+% typed by the same `apply_call/11` a call expression uses.  That instantiates a
 % polymorphic callee (a `forall_type`, e.g. a generic `external`) before
 % applying, and CHECKS the piped value against the parameter, identically to
 % `f(x)`.  Routing pipe through the generic binary rule instead would unify the
 % callee against a bare `(A) -> B` monotype, which a forall head never matches.
-infer(binary_node(pipe, Left, Right, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, ResultType, ContextOut) :- !,
-  infer(Right, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1),
-  apply_call(TargetType, [Left], Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut).
+infer(binary_node(pipe, Left, Right, Span), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, ResultType, ContextOut, HoverIn, HoverOut) :- !,
+  infer(Right, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, TargetType, Context1, HoverIn, Hover1),
+  apply_call(TargetType, [Left], Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut, Hover1, Hover2),
+  hover_note(Span, operator, ResultType, Hover2, HoverOut).
 
 % Binary operator.
-infer(binary_node(Operator, Left, Right, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, ResultType, ContextOut) :-
-  infer(Left, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, LeftActual, Context1),
-  infer(Right, Level, InsideFunction, Environment, TypeEnvironment, Context1, RightActual, Context2),
+infer(binary_node(Operator, Left, Right, Span), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, ResultType, ContextOut, HoverIn, HoverOut) :-
+  infer(Left, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, LeftActual, Context1, HoverIn, Hover1),
+  infer(Right, Level, InsideFunction, Environment, TypeEnvironment, Context1, RightActual, Context2, Hover1, Hover2),
   binary_signature(Operator, Level, Context2, LeftExpected, RightExpected, ResultType, Context3),
   unify(LeftActual, LeftExpected, Context3, Context4),
-  unify(RightActual, RightExpected, Context4, ContextOut).
+  unify(RightActual, RightExpected, Context4, ContextOut),
+  hover_note(Span, operator, ResultType, Hover2, HoverOut).
 
 % A malformed node the lowerer could not recognise (`error_node`, from a syntax
 % error).  The batch compiler rejects a program with parse diagnostics BEFORE
@@ -666,20 +746,20 @@ infer(binary_node(Operator, Left, Right, _), Level, InsideFunction, Environment,
 % LSP checker records as an `error_at` diagnostic) instead of bare-failing and
 % collapsing the whole analysis to a silent `false`.
 infer(error_node(Span), _Level, _InsideFunction, _Environment, _TypeEnvironment,
-      _Context, _ResultType, _ContextOut) :-
+      _Context, _ResultType, _ContextOut, _HoverIn, _HoverOut) :-
   throw(analysis_error(malformed_syntax(Span))).
 
 % A type declaration reached in expression position carries no value.
 infer(type_declaration_node(_, _, _, _, _), _Level, _InsideFunction, _Environment, _TypeEnvironment,
-      Context, record_type([], closed), Context).
+      Context, record_type([], closed), Context, Hover, Hover).
 
 % A definition reached *outside* a sequence position (e.g. as a function
 % argument): it cannot bind anything visible, so it just contributes the
 % type of its value (still honouring any annotation on it).
 infer(definition_node(_Target, Annotation, Value, _), Level, InsideFunction, Environment,
-      TypeEnvironment, ContextIn, ValueType, ContextOut) :-
-  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
-  apply_annotation(Annotation, ValueType, TypeEnvironment, Level, Context1, ContextOut).
+      TypeEnvironment, ContextIn, ValueType, ContextOut, HoverIn, HoverOut) :-
+  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1, HoverIn, Hover1),
+  apply_annotation(Annotation, ValueType, TypeEnvironment, Level, Context1, ContextOut, Hover1, HoverOut).
 
 % ---------------------------------------------------------------------------
 % Reader-macro forms (only reachable while type-checking a MACRO BODY -- see
@@ -691,15 +771,18 @@ infer(definition_node(_Target, Annotation, Value, _), Level, InsideFunction, Env
 % `Ast` value, so its TYPE is `Ast`.  The quoted `Template` is NOT type-checked
 % as runtime code -- it may mention names that exist only in the expanded
 % program -- so we do not infer it.  We only descend into it to find UNQUOTES
-% and require each spliced sub-expression to itself be an `Ast`.
+% and require each spliced sub-expression to itself be an `Ast`.  Not itself
+% given its own hover entry beyond the generic syntax fallback (the LSP query
+% layer's green-tree walk already covers `quote_node`/`unquote_node` as
+% syntax) -- there is no richer TYPE to show here beyond the constant `Ast`.
 infer(quote_node(Template, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, AstType, ContextOut) :-
+      ContextIn, AstType, ContextOut, HoverIn, HoverOut) :-
   macro_ast_type(AstType),
-  check_template_unquotes(Template, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut).
+  check_template_unquotes(Template, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut).
 
 % An unquote reached on its own (not collected by an enclosing quasiquote) is a
 % misplaced `~` -- a static error.
-infer(unquote_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, _ContextIn, _Type, _ContextOut) :-
+infer(unquote_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, _ContextIn, _Type, _ContextOut, _HoverIn, _HoverOut) :-
   throw(analysis_error(unquote_outside_quasiquote)).
 
 % The monotype of an `Ast` value.  A nullary nominal type, distinct from every
@@ -711,45 +794,45 @@ macro_ast_type(type_constructor("Ast", [])).
 % and leaving all other (template) syntax untouched.  A NESTED quasiquote is
 % opaque here (its unquotes belong to its own level) -- tier-1 does not support
 % nested-quote splicing.
-check_template_unquotes(unquote_node(Expression, _), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :- !,
-  infer(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ExpressionType, Context1),
+check_template_unquotes(unquote_node(Expression, _), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut) :- !,
+  infer(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ExpressionType, Context1, HoverIn, HoverOut),
   macro_ast_type(AstType),
   unify(ExpressionType, AstType, Context1, ContextOut).
-check_template_unquotes(quote_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context) :- !.
-check_template_unquotes(Template, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
+check_template_unquotes(quote_node(_, _), _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context, Hover, Hover) :- !.
+check_template_unquotes(Template, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut) :-
   compound(Template), !,
   Template =.. [_Functor | Arguments],
-  check_template_unquotes_each(Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut).
-check_template_unquotes(_Atomic, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context).
+  check_template_unquotes_each(Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut).
+check_template_unquotes(_Atomic, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context, Hover, Hover).
 
-check_template_unquotes_each([], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context).
-check_template_unquotes_each([Argument | Arguments], Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
-  check_template_unquotes(Argument, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Context1),
-  check_template_unquotes_each(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut).
+check_template_unquotes_each([], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context, Hover, Hover).
+check_template_unquotes_each([Argument | Arguments], Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut) :-
+  check_template_unquotes(Argument, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Context1, HoverIn, Hover1),
+  check_template_unquotes_each(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut, Hover1, HoverOut).
 
 % ---------------------------------------------------------------------------
 % Annotations
 % ---------------------------------------------------------------------------
 
-% apply_annotation(+Annotation, +InferredType, +TypeEnvironment, +Level, +ContextIn, -ContextOut).
+% apply_annotation(+Annotation, +InferredType, +TypeEnvironment, +Level, +ContextIn, -ContextOut, +HoverIn, -HoverOut).
 %
 % Unify an explicit annotation (if any) against an inferred type.  The
 % annotation is converted to a closed monotype via `type_environment.pl`.
-apply_annotation(no_annotation, _InferredType, _TypeEnvironment, _Level, Context, Context).
-apply_annotation(type_annotation(TypeExpression), InferredType, TypeEnvironment, Level, ContextIn, ContextOut) :-
-  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, AnnotatedType, Context1),
+apply_annotation(no_annotation, _InferredType, _TypeEnvironment, _Level, Context, Context, Hover, Hover).
+apply_annotation(type_annotation(TypeExpression), InferredType, TypeEnvironment, Level, ContextIn, ContextOut, HoverIn, HoverOut) :-
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, AnnotatedType, Context1, HoverIn, HoverOut),
   unify(AnnotatedType, InferredType, Context1, ContextOut).
 
 % Convert each explicit type argument of a type application; a hole `_`
 % becomes a fresh variable, i.e. that position is inferred like an omitted
 % trailing one.
-convert_type_arguments([], _TypeEnvironment, _Level, Context, [], Context).
-convert_type_arguments([type_hole(_) | Rest], TypeEnvironment, Level, ContextIn, [Fresh | Types], ContextOut) :- !,
+convert_type_arguments([], _TypeEnvironment, _Level, Context, [], Context, Hover, Hover).
+convert_type_arguments([type_hole(_) | Rest], TypeEnvironment, Level, ContextIn, [Fresh | Types], ContextOut, HoverIn, HoverOut) :- !,
   fresh_unification_variable(ContextIn, Level, Fresh, Context1),
-  convert_type_arguments(Rest, TypeEnvironment, Level, Context1, Types, ContextOut).
-convert_type_arguments([TypeExpression | Rest], TypeEnvironment, Level, ContextIn, [Type | Types], ContextOut) :-
-  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, Type, Context1),
-  convert_type_arguments(Rest, TypeEnvironment, Level, Context1, Types, ContextOut).
+  convert_type_arguments(Rest, TypeEnvironment, Level, Context1, Types, ContextOut, HoverIn, HoverOut).
+convert_type_arguments([TypeExpression | Rest], TypeEnvironment, Level, ContextIn, [Type | Types], ContextOut, HoverIn, HoverOut) :-
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, Type, Context1, HoverIn, Hover1),
+  convert_type_arguments(Rest, TypeEnvironment, Level, Context1, Types, ContextOut, Hover1, HoverOut).
 
 check_type_argument_count(Quantifiers, Provided) :-
   length(Quantifiers, Arity),
@@ -772,17 +855,17 @@ check_type_argument_count(Quantifiers, Provided) :-
 % When the callee's type is still unknown we fall back to synthesising the
 % argument types and unifying, exactly as before.
 
-% apply_call(+TargetType, +Arguments, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -ContextOut).
-apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut) :-
+% apply_call(+TargetType, +Arguments, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ResultType, -ContextOut, +HoverIn, -HoverOut).
+apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut, HoverIn, HoverOut) :-
   resolve_head(TargetType, ContextIn, Resolved),
   ( Resolved = forall_type(_, _) ->
       instantiate_forall(Resolved, Level, ContextIn, Opened, Context1),
-      apply_call(Opened, Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut)
+      apply_call(Opened, Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ResultType, ContextOut, HoverIn, HoverOut)
   ; Resolved = function_type(Parameters, Return) ->
-      apply_known(Parameters, Return, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut)
+      apply_known(Parameters, Return, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut, HoverIn, HoverOut)
   ; % Unknown callee, or a non-function: synthesise argument types and let
     % unify settle it or report a mismatch.
-    infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ArgumentTypes, HoleTypes, Context1),
+    infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ArgumentTypes, HoleTypes, Context1, HoverIn, HoverOut),
     fresh_unification_variable(Context1, Level, Result, Context2),
     unify(Resolved, function_type(ArgumentTypes, Result), Context2, Context3),
     section_result(HoleTypes, Result, ResultType),
@@ -792,13 +875,13 @@ apply_call(TargetType, Arguments, Level, InsideFunction, Environment, TypeEnviro
 % Apply a callee whose parameter list is known: exact, partial, or
 % over-application.  Holes (`_`) and missing trailing parameters both feed the
 % resulting section type via `section_result`.
-apply_known(Parameters, Return, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut) :-
+apply_known(Parameters, Return, Arguments, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ResultType, ContextOut, HoverIn, HoverOut) :-
   length(Parameters, ParameterCount),
   length(Arguments, ArgumentCount),
   ( ArgumentCount =< ParameterCount ->
       length(Used, ArgumentCount),
       append(Used, Remaining, Parameters),
-      check_arguments(Arguments, Used, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, ContextOut),
+      check_arguments(Arguments, Used, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, ContextOut, HoverIn, HoverOut),
       ( Remaining = [] ->
           Applied = Return
       ; Applied = function_type(Remaining, Return)
@@ -806,62 +889,65 @@ apply_known(Parameters, Return, Arguments, Level, InsideFunction, Environment, T
       section_result(HoleTypes, Applied, ResultType)
   ; length(Used, ParameterCount),
     append(Used, SurplusArguments, Arguments),
-    check_arguments(Used, Parameters, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, Context1),
-    apply_call(Return, SurplusArguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, Applied, ContextOut),
+    check_arguments(Used, Parameters, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, Context1, HoverIn, Hover1),
+    apply_call(Return, SurplusArguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, Applied, ContextOut, Hover1, HoverOut),
     section_result(HoleTypes, Applied, ResultType)
   ).
 
 % Check each argument NODE against the parameter type it fills.  A placeholder
 % `_` is a hole: it consumes its parameter but constrains nothing, and that
 % parameter's type becomes (in order) part of the resulting section's domain.
-check_arguments([], [], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], Context).
+check_arguments([], [], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], Context, Hover, Hover).
 check_arguments([placeholder_node(_) | Arguments], [Parameter | Parameters], Level, InsideFunction, Environment, TypeEnvironment,
-                ContextIn, [Parameter | HoleTypes], ContextOut) :- !,
-  check_arguments(Arguments, Parameters, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, ContextOut).
+                ContextIn, [Parameter | HoleTypes], ContextOut, HoverIn, HoverOut) :- !,
+  check_arguments(Arguments, Parameters, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, HoleTypes, ContextOut, HoverIn, HoverOut).
 check_arguments([Argument | Arguments], [Parameter | Parameters], Level, InsideFunction, Environment, TypeEnvironment,
-                ContextIn, HoleTypes, ContextOut) :-
-  check_expr(Argument, Parameter, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Context1),
-  check_arguments(Arguments, Parameters, Level, InsideFunction, Environment, TypeEnvironment, Context1, HoleTypes, ContextOut).
+                ContextIn, HoleTypes, ContextOut, HoverIn, HoverOut) :-
+  check_expr(Argument, Parameter, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Context1, HoverIn, Hover1),
+  check_arguments(Arguments, Parameters, Level, InsideFunction, Environment, TypeEnvironment, Context1, HoleTypes, ContextOut, Hover1, HoverOut).
 
 % ---------------------------------------------------------------------------
 % Bidirectional checking
 % ---------------------------------------------------------------------------
 
-% check_expr(+Node, +ExpectedType, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ContextOut).
+% check_expr(+Node, +ExpectedType, +Level, +InsideFunction, +Environment, +TypeEnvironment, +ContextIn, -ContextOut, +HoverIn, -HoverOut).
 %
 % Check that `Node` has type `ExpectedType`.  When the expectation is a
 % polytype we SKOLEMISE it (one level deeper) and check the node against the
 % rigid body -- so `Node` must work for an arbitrary type, and a skolem may not
 % escape into the surrounding scope.  Otherwise we synthesise the node's type
 % and `subsume` it against the expectation (the rank-N generalisation of a
-% plain annotation unify; for first-order types this IS a unify).
-check_expr(Node, ExpectedType, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
+% plain annotation unify; for first-order types this IS a unify).  Not itself
+% given a hover entry -- `Node` is whatever expression/pattern is being
+% checked, and its own `infer`/`type_pattern` clause already records one at
+% its own span with its own (checked) type.
+check_expr(Node, ExpectedType, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut) :-
   resolve_head(ExpectedType, ContextIn, Expected),
   ( Expected = forall_type(BoundIds, Body) ->
       Level1 is Level + 1,
       skolemize_forall(BoundIds, Body, Level1, ContextIn, SkolemBody, Context1),
-      check_expr(Node, SkolemBody, Level1, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut)
-  ; infer(Node, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ActualType, Context1),
+      check_expr(Node, SkolemBody, Level1, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut, HoverIn, HoverOut)
+  ; infer(Node, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ActualType, Context1, HoverIn, HoverOut),
     subsume(ActualType, Expected, Level, Context1, ContextOut)
   ).
 
 % A value definition with an explicit annotation is CHECKED against it (so a
 % polytype annotation skolemises and the value is verified polymorphic); its
 % declared type is the annotation.  Without an annotation we just synthesise.
-define_value(no_annotation, Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, ContextOut) :-
-  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, ContextOut).
-define_value(type_annotation(TypeExpression), Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, AnnotatedType, ContextOut) :-
-  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, AnnotatedType, Context1),
-  check_expr(Value, AnnotatedType, Level, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut).
+define_value(no_annotation, Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, ContextOut, HoverIn, HoverOut) :-
+  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, ContextOut, HoverIn, HoverOut).
+define_value(type_annotation(TypeExpression), Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, AnnotatedType, ContextOut, HoverIn, HoverOut) :-
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, AnnotatedType, Context1, HoverIn, Hover1),
+  check_expr(Value, AnnotatedType, Level, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut, Hover1, HoverOut).
 
 % A function body is CHECKED against its return annotation when one is written
 % (so a function may return a polymorphic value), else synthesised.  The body
 % is always typed with `InsideFunction = true`.
-type_function_body(no_annotation, Body, Level, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut) :-
-  infer(Body, Level, true, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut).
-type_function_body(type_annotation(TypeExpression), Body, Level, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut) :-
-  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, BodyType, Context1),
-  check_expr(Body, BodyType, Level, true, Environment, TypeEnvironment, Context1, ContextOut).
+type_function_body(no_annotation, Body, Level, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut, HoverIn, HoverOut) :-
+  infer(Body, Level, true, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut, HoverIn, HoverOut).
+type_function_body(type_annotation(TypeExpression), Body, Level, Environment, TypeEnvironment, ContextIn, BodyType, ContextOut, HoverIn, HoverOut) :-
+  convert_annotation_type(TypeExpression, TypeEnvironment, Level, ContextIn, BodyType, Context1, HoverIn, Hover1),
+  check_expr(Body, BodyType, Level, true, Environment, TypeEnvironment, Context1, ContextOut, Hover1, HoverOut).
 
 % ---------------------------------------------------------------------------
 % Helpers
@@ -880,25 +966,25 @@ binding_scheme(forward(Scheme), InsideFunction, Name, Scheme) :-
 % assigned sequential `index` keys (skipping labeled members, which keep the
 % counter unchanged); labeled members get `label` keys.  Mutability is
 % recorded as the base type `readonly` / `mutable`.
-infer_record_members([], _Index, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], [], Context).
+infer_record_members([], _Index, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], [], Context, Hover, Hover).
 % A spread `..value`: the value must be a record, and its fields are spliced
 % in.  We collect its type to use as the new record's tail (see spread_tail).
 infer_record_members([spread_member(Value, _) | Members], Index, Level,
                     InsideFunction, Environment, TypeEnvironment, ContextIn,
-                    Fields, [SpreadType | SpreadTypes], ContextOut) :-
-  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, SpreadType, Context1),
+                    Fields, [SpreadType | SpreadTypes], ContextOut, HoverIn, HoverOut) :-
+  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, SpreadType, Context1, HoverIn, Hover1),
   % The spread value must be a record; assert that by unifying it with an
   % open empty record, so spreading a non-record is rejected.
   fresh_unification_variable(Context1, Level, AssertTail, Context2),
   unify(SpreadType, record_type([], AssertTail), Context2, Context3),
-  infer_record_members(Members, Index, Level, InsideFunction, Environment, TypeEnvironment, Context3, Fields, SpreadTypes, ContextOut).
+  infer_record_members(Members, Index, Level, InsideFunction, Environment, TypeEnvironment, Context3, Fields, SpreadTypes, ContextOut, Hover1, HoverOut).
 infer_record_members([record_member(Mutability, Label, Annotation, Value, _) | Members], Index, Level,
                     InsideFunction, Environment, TypeEnvironment, ContextIn,
-                    [record_field(Mutability, Key, ValueType) | Fields], SpreadTypes, ContextOut) :-
+                    [record_field(Mutability, Key, ValueType) | Fields], SpreadTypes, ContextOut, HoverIn, HoverOut) :-
   member_key(Label, Index, Key, NextIndex),
-  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
-  apply_annotation(Annotation, ValueType, TypeEnvironment, Level, Context1, Context2),
-  infer_record_members(Members, NextIndex, Level, InsideFunction, Environment, TypeEnvironment, Context2, Fields, SpreadTypes, ContextOut).
+  infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1, HoverIn, Hover1),
+  apply_annotation(Annotation, ValueType, TypeEnvironment, Level, Context1, Context2, Hover1, Hover2),
+  infer_record_members(Members, NextIndex, Level, InsideFunction, Environment, TypeEnvironment, Context2, Fields, SpreadTypes, ContextOut, Hover2, HoverOut).
 
 % The explicit fields are the head of the record; a single spread provides
 % the tail (so the result is "these fields, then all of the spread's").  A
@@ -918,6 +1004,14 @@ member_key(labeled(Name), Index, label(Name), Index).
 accessor_key(label(Name, _), label(Name)).
 accessor_key(index(Index, _), index(Index)).
 
+% The accessor's OWN span (just `.info`'s `info`, not the whole `target.info`
+% expression) -- this is what lets hovering the member name itself show the
+% field's type instead of falling through to the generic identifier-token
+% syntax help (see the `access_node`/`assignment_node`-over-`access_node`
+% clauses below, the only two places a `FieldType` is known at this span).
+accessor_span(label(_, Span), Span).
+accessor_span(index(_, Span), Span).
+
 % Reject a record that labels two members with the same name.
 check_unique_labels([], _).
 check_unique_labels([record_field(_, index(_), _) | Fields], Seen) :-
@@ -930,15 +1024,15 @@ check_unique_labels([record_field(_, label(Name), _) | Fields], Seen) :-
 
 % Collect call-argument types in order; a placeholder `_` contributes a fresh
 % variable to BOTH the argument list and the (ordered) hole list.
-infer_call_arguments([], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], [], Context).
+infer_call_arguments([], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], [], Context, Hover, Hover).
 infer_call_arguments([placeholder_node(_) | Arguments], Level, InsideFunction, Environment, TypeEnvironment,
-                     ContextIn, [HoleType | ArgumentTypes], [HoleType | HoleTypes], ContextOut) :- !,
+                     ContextIn, [HoleType | ArgumentTypes], [HoleType | HoleTypes], ContextOut, HoverIn, HoverOut) :- !,
   fresh_unification_variable(ContextIn, Level, HoleType, Context1),
-  infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ArgumentTypes, HoleTypes, ContextOut).
+  infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ArgumentTypes, HoleTypes, ContextOut, HoverIn, HoverOut).
 infer_call_arguments([Argument | Arguments], Level, InsideFunction, Environment, TypeEnvironment,
-                     ContextIn, [ArgumentType | ArgumentTypes], HoleTypes, ContextOut) :-
-  infer(Argument, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ArgumentType, Context1),
-  infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ArgumentTypes, HoleTypes, ContextOut).
+                     ContextIn, [ArgumentType | ArgumentTypes], HoleTypes, ContextOut, HoverIn, HoverOut) :-
+  infer(Argument, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ArgumentType, Context1, HoverIn, Hover1),
+  infer_call_arguments(Arguments, Level, InsideFunction, Environment, TypeEnvironment, Context1, ArgumentTypes, HoleTypes, ContextOut, Hover1, HoverOut).
 
 % With no holes the result is the application's; with holes it is a function
 % from the hole types (in order) to the application's result.
@@ -954,35 +1048,39 @@ infer_each([E | Es], Level, InsideFunction, Environment, TypeEnvironment, Contex
 % Bind lambda parameters: each parameter gets a fresh type, constrained by
 % its annotation if present, then its pattern is matched against that type to
 % bind the parameter's variables (a plain identifier just binds the whole
-% parameter; a record pattern destructures it).
-bind_parameters([], _Level, _TypeEnvironment, Environment, Context, [], Environment, Context).
-bind_parameters([parameter_node(Pattern, Annotation, _) | Parameters], Level,
+% parameter; a record pattern destructures it).  The parameter's own span
+% gets a hover entry too (its declared annotation if written, else the
+% inferred type) -- `type_pattern` records the SUB-BINDING spans inside a
+% destructured parameter separately.
+bind_parameters([], _Level, _TypeEnvironment, Environment, Context, [], Environment, Context, Hover, Hover).
+bind_parameters([parameter_node(Pattern, Annotation, Span) | Parameters], Level,
                 TypeEnvironment, Environment, ContextIn,
-                [ParameterType | ParameterTypes], EnvironmentOut, ContextOut) :-
+                [ParameterType | ParameterTypes], EnvironmentOut, ContextOut, HoverIn, HoverOut) :-
   fresh_unification_variable(ContextIn, Level, ParameterType, Context1),
-  apply_annotation(Annotation, ParameterType, TypeEnvironment, Level, Context1, Context2),
-  type_pattern(Pattern, ParameterType, Level, TypeEnvironment, Environment, Context2, Environment1, Context3),
+  apply_annotation(Annotation, ParameterType, TypeEnvironment, Level, Context1, Context2, HoverIn, Hover1),
+  type_pattern(Pattern, ParameterType, Level, TypeEnvironment, Environment, Context2, Environment1, Context3, Hover1, Hover2),
+  hover_note(Span, parameter, ParameterType, Hover2, Hover3),
   bind_parameters(Parameters, Level, TypeEnvironment, Environment1, Context3,
-                  ParameterTypes, EnvironmentOut, ContextOut).
+                  ParameterTypes, EnvironmentOut, ContextOut, Hover3, HoverOut).
 
 % ---------------------------------------------------------------------------
 % Match arms and patterns
 % ---------------------------------------------------------------------------
 
-infer_match_arms([], _ScrutineeType, _ResultType, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context).
+infer_match_arms([], _ScrutineeType, _ResultType, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context, Hover, Hover).
 infer_match_arms([match_arm(Pattern, Guard, Result, _Span) | Arms], ScrutineeType, ResultType, Level,
-                 InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
-  type_pattern(Pattern, ScrutineeType, Level, TypeEnvironment, Environment, ContextIn, ArmEnvironment, Context1),
-  apply_guard(Guard, Level, InsideFunction, ArmEnvironment, TypeEnvironment, Context1, Context2),
-  infer(Result, Level, InsideFunction, ArmEnvironment, TypeEnvironment, Context2, ArmResultType, Context3),
+                 InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut) :-
+  type_pattern(Pattern, ScrutineeType, Level, TypeEnvironment, Environment, ContextIn, ArmEnvironment, Context1, HoverIn, Hover1),
+  apply_guard(Guard, Level, InsideFunction, ArmEnvironment, TypeEnvironment, Context1, Context2, Hover1, Hover2),
+  infer(Result, Level, InsideFunction, ArmEnvironment, TypeEnvironment, Context2, ArmResultType, Context3, Hover2, Hover3),
   unify(ArmResultType, ResultType, Context3, Context4),
-  infer_match_arms(Arms, ScrutineeType, ResultType, Level, InsideFunction, Environment, TypeEnvironment, Context4, ContextOut).
+  infer_match_arms(Arms, ScrutineeType, ResultType, Level, InsideFunction, Environment, TypeEnvironment, Context4, ContextOut, Hover3, HoverOut).
 
 % A guard, if present, must be boolean and is typed with the arm's bindings
 % in scope.
-apply_guard(no_guard, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context).
-apply_guard(guard(Expression), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
-  infer(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, GuardType, Context1),
+apply_guard(no_guard, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context, Hover, Hover).
+apply_guard(guard(Expression), Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut) :-
+  infer(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, GuardType, Context1, HoverIn, HoverOut),
   unify(GuardType, boolean, Context1, ContextOut).
 
 % Expand each arm's alternative patterns into separate single-pattern arms
@@ -1026,7 +1124,7 @@ require_same_bindings([Pattern | Patterns], Set) :-
 pattern_variables(wildcard_pattern(_), []).
 pattern_variables(binding_pattern(Name, _), [Name]).
 pattern_variables(literal_pattern(_, _), []).
-pattern_variables(constructor_pattern(_Name, SubPatterns, _), Variables) :-
+pattern_variables(constructor_pattern(_Name, _NameSpan, SubPatterns, _), Variables) :-
   patterns_variables(SubPatterns, Variables).
 pattern_variables(record_pattern(Members, _), Variables) :-
   member_patterns_variables(Members, Variables).
@@ -1073,7 +1171,7 @@ has_catch_all([_ | Arms]) :-
   has_catch_all(Arms).
 
 covered_constructors([], []).
-covered_constructors([match_arm(constructor_pattern(Name, _, _), no_guard, _, _) | Arms], [Name | Covered]) :- !,
+covered_constructors([match_arm(constructor_pattern(Name, _, _, _), no_guard, _, _) | Arms], [Name | Covered]) :- !,
   covered_constructors(Arms, Covered).
 covered_constructors([_ | Arms], Covered) :-
   covered_constructors(Arms, Covered).
@@ -1086,67 +1184,80 @@ missing_constructors([Name | Names], Covered, Missing) :-
     missing_constructors(Names, Covered, Rest)
   ).
 
-% type_pattern(+Pattern, +ExpectedType, +Level, +TypeEnvironment, +EnvironmentIn, +ContextIn, -EnvironmentOut, -ContextOut).
+% type_pattern(+Pattern, +ExpectedType, +Level, +TypeEnvironment, +EnvironmentIn, +ContextIn, -EnvironmentOut, -ContextOut, +HoverIn, -HoverOut).
 %
 % Constrain `ExpectedType` to match `Pattern`, extending the environment with
-% the pattern's bindings (monomorphic).
+% the pattern's bindings (monomorphic).  Every clause records a hover entry
+% at the PATTERN's own span, using `ExpectedType` -- this is what gives a
+% match arm's/parameter's/destructuring's pattern bindings their own hover
+% coverage, independent of whatever expression is being matched against.
 % A malformed pattern (`error_node`, from a syntax error) throws so pattern
 % typing stays TOTAL, mirroring the `infer(error_node, ..)` guard above.
-type_pattern(error_node(Span), _ExpectedType, _Level, _TypeEnvironment, _Environment, _Context, _EnvironmentOut, _ContextOut) :-
+type_pattern(error_node(Span), _ExpectedType, _Level, _TypeEnvironment, _Environment, _Context, _EnvironmentOut, _ContextOut, _HoverIn, _HoverOut) :-
   throw(analysis_error(malformed_syntax(Span))).
-type_pattern(wildcard_pattern(_), _ExpectedType, _Level, _TypeEnvironment, Environment, Context, Environment, Context).
-type_pattern(binding_pattern(Name, _), ExpectedType, _Level, _TypeEnvironment, EnvironmentIn, Context, EnvironmentOut, Context) :-
+type_pattern(wildcard_pattern(Span), ExpectedType, _Level, _TypeEnvironment, Environment, Context, Environment, Context, HoverIn, HoverOut) :-
+  hover_note(Span, pattern, ExpectedType, HoverIn, HoverOut).
+type_pattern(binding_pattern(Name, Span), ExpectedType, _Level, _TypeEnvironment, EnvironmentIn, Context, EnvironmentOut, Context, HoverIn, HoverOut) :-
   monomorphic_type_scheme(ExpectedType, Scheme),
-  put_assoc(Name, EnvironmentIn, defined(Scheme), EnvironmentOut).
-type_pattern(literal_pattern(Node, _), ExpectedType, _Level, _TypeEnvironment, Environment, ContextIn, Environment, ContextOut) :-
+  put_assoc(Name, EnvironmentIn, defined(Scheme), EnvironmentOut),
+  hover_note(Span, pattern, ExpectedType, HoverIn, HoverOut).
+type_pattern(literal_pattern(Node, Span), ExpectedType, _Level, _TypeEnvironment, Environment, ContextIn, Environment, ContextOut, HoverIn, HoverOut) :-
   literal_type(Node, LiteralType),
-  unify(ExpectedType, LiteralType, ContextIn, ContextOut).
+  unify(ExpectedType, LiteralType, ContextIn, ContextOut),
+  hover_note(Span, pattern, ExpectedType, HoverIn, HoverOut).
 % A constructor pattern: the scrutinee must be the constructor's union type,
-% and each sub-pattern matches the corresponding field type.
-type_pattern(constructor_pattern(CtorName, SubPatterns, _), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
-  instantiate_constructor(CtorName, TypeEnvironment, Level, ContextIn, UnionType, FieldTypes, Context1),
+% and each sub-pattern matches the corresponding field type. `NameSpan`
+% covers just the constructor name (`Some`, not the whole `Some(_)`), so it
+% gets its own hover entry -- otherwise the ctor name falls through to the
+% generic ident-token syntax help, exactly like `member_access_label` did
+% before it was given the same treatment (see `test/hover.pl`).
+type_pattern(constructor_pattern(CtorName, NameSpan, SubPatterns, Span), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut, HoverIn, HoverOut) :-
+  instantiate_constructor(CtorName, TypeEnvironment, Level, ContextIn, UnionType, FieldTypes, Context1, HoverIn, Hover1),
   ( same_length(SubPatterns, FieldTypes) ->
       true
   ; throw(analysis_error(constructor_pattern_arity_mismatch(CtorName)))
   ),
   unify(ExpectedType, UnionType, Context1, Context2),
-  type_pattern_each(SubPatterns, FieldTypes, Level, TypeEnvironment, EnvironmentIn, Context2, EnvironmentOut, ContextOut).
-type_pattern(record_pattern(Members, _), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
-  type_pattern_members(Members, 0, Level, TypeEnvironment, EnvironmentIn, ContextIn, Fields, EnvironmentOut, Context1),
-  unify(ExpectedType, record_type(Fields, closed), Context1, ContextOut).
+  hover_note(NameSpan, identifier, UnionType, Hover1, Hover2),
+  type_pattern_each(SubPatterns, FieldTypes, Level, TypeEnvironment, EnvironmentIn, Context2, EnvironmentOut, ContextOut, Hover2, Hover3),
+  hover_note(Span, pattern, ExpectedType, Hover3, HoverOut).
+type_pattern(record_pattern(Members, Span), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut, HoverIn, HoverOut) :-
+  type_pattern_members(Members, 0, Level, TypeEnvironment, EnvironmentIn, ContextIn, Fields, EnvironmentOut, Context1, HoverIn, Hover1),
+  unify(ExpectedType, record_type(Fields, closed), Context1, ContextOut),
+  hover_note(Span, pattern, ExpectedType, Hover1, HoverOut).
 
 literal_type(number_node(_, _), number).
 literal_type(boolean_node(_, _), boolean).
 literal_type(string_node(_, _), string).
 
 % Match a list of sub-patterns against a list of (field) types in order.
-type_pattern_each([], [], _Level, _TypeEnvironment, Environment, Context, Environment, Context).
-type_pattern_each([Pattern | Patterns], [Type | Types], Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
-  type_pattern(Pattern, Type, Level, TypeEnvironment, EnvironmentIn, ContextIn, Environment1, Context1),
-  type_pattern_each(Patterns, Types, Level, TypeEnvironment, Environment1, Context1, EnvironmentOut, ContextOut).
+type_pattern_each([], [], _Level, _TypeEnvironment, Environment, Context, Environment, Context, Hover, Hover).
+type_pattern_each([Pattern | Patterns], [Type | Types], Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut, HoverIn, HoverOut) :-
+  type_pattern(Pattern, Type, Level, TypeEnvironment, EnvironmentIn, ContextIn, Environment1, Context1, HoverIn, Hover1),
+  type_pattern_each(Patterns, Types, Level, TypeEnvironment, Environment1, Context1, EnvironmentOut, ContextOut, Hover1, HoverOut).
 
 % Each member contributes a field (with a fresh, don't-care mutability) whose
 % type the sub-pattern is then matched against.  Positional members consume an
 % index; labeled members do not.  The pattern record is closed (exact).
-type_pattern_members([], _Index, _Level, _TypeEnvironment, Environment, Context, [], Environment, Context).
+type_pattern_members([], _Index, _Level, _TypeEnvironment, Environment, Context, [], Environment, Context, Hover, Hover).
 type_pattern_members([positional_member_pattern(SubPattern, _) | Members], Index, Level, TypeEnvironment, EnvironmentIn, ContextIn,
-                     [record_field(Mutability, index(Index), FieldType) | Fields], EnvironmentOut, ContextOut) :-
+                     [record_field(Mutability, index(Index), FieldType) | Fields], EnvironmentOut, ContextOut, HoverIn, HoverOut) :-
   fresh_unification_variable(ContextIn, Level, Mutability, Context1),
   fresh_unification_variable(Context1, Level, FieldType, Context2),
-  type_pattern(SubPattern, FieldType, Level, TypeEnvironment, EnvironmentIn, Context2, Environment1, Context3),
+  type_pattern(SubPattern, FieldType, Level, TypeEnvironment, EnvironmentIn, Context2, Environment1, Context3, HoverIn, Hover1),
   Index1 is Index + 1,
-  type_pattern_members(Members, Index1, Level, TypeEnvironment, Environment1, Context3, Fields, EnvironmentOut, ContextOut).
+  type_pattern_members(Members, Index1, Level, TypeEnvironment, Environment1, Context3, Fields, EnvironmentOut, ContextOut, Hover1, HoverOut).
 type_pattern_members([labeled_member_pattern(Name, SubPattern, _) | Members], Index, Level, TypeEnvironment, EnvironmentIn, ContextIn,
-                     [record_field(Mutability, label(Name), FieldType) | Fields], EnvironmentOut, ContextOut) :-
+                     [record_field(Mutability, label(Name), FieldType) | Fields], EnvironmentOut, ContextOut, HoverIn, HoverOut) :-
   fresh_unification_variable(ContextIn, Level, Mutability, Context1),
   fresh_unification_variable(Context1, Level, FieldType, Context2),
-  type_pattern(SubPattern, FieldType, Level, TypeEnvironment, EnvironmentIn, Context2, Environment1, Context3),
-  type_pattern_members(Members, Index, Level, TypeEnvironment, Environment1, Context3, Fields, EnvironmentOut, ContextOut).
+  type_pattern(SubPattern, FieldType, Level, TypeEnvironment, EnvironmentIn, Context2, Environment1, Context3, HoverIn, Hover1),
+  type_pattern_members(Members, Index, Level, TypeEnvironment, Environment1, Context3, Fields, EnvironmentOut, ContextOut, Hover1, HoverOut).
 
 % Type-check the interpolated expressions inside a string literal.
-infer_string_parts([], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context).
-infer_string_parts([string_static_part(_) | Parts], Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
-  infer_string_parts(Parts, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut).
-infer_string_parts([string_interpolated_part(Node) | Parts], Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut) :-
-  infer(Node, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, _Type, Context1),
-  infer_string_parts(Parts, Level, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut).
+infer_string_parts([], _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, Context, Hover, Hover).
+infer_string_parts([string_static_part(_) | Parts], Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut) :-
+  infer_string_parts(Parts, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut).
+infer_string_parts([string_interpolated_part(Node) | Parts], Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ContextOut, HoverIn, HoverOut) :-
+  infer(Node, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, _Type, Context1, HoverIn, Hover1),
+  infer_string_parts(Parts, Level, InsideFunction, Environment, TypeEnvironment, Context1, ContextOut, Hover1, HoverOut).

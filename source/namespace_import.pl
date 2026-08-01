@@ -305,11 +305,11 @@ longest_member(Current, [], _Members, none, Current, []).
 % ---------------------------------------------------------------------------
 
 rewrite_constructor_tags(Term, Map, Output) :-
-  ( Term = constructor_pattern(Name, SubPatterns, Span)
+  ( Term = constructor_pattern(Name, NameSpan, SubPatterns, Span)
   ->
     ( memberchk(Name - Foreign, Map) -> Name1 = Foreign ; Name1 = Name ),
     rewrite_constructor_tags_list(SubPatterns, Map, SubPatterns1),
-    Output = constructor_pattern(Name1, SubPatterns1, Span)
+    Output = constructor_pattern(Name1, NameSpan, SubPatterns1, Span)
   ; generic_map(rewrite_constructor_tags(_, Map, _), Term, Output)
   ).
 

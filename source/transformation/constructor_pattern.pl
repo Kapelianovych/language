@@ -5,7 +5,7 @@
 
     A bare identifier in a match pattern parses as a `binding_pattern` (the
     parser cannot know which names are constructors).  This pass rewrites
-    `binding_pattern(Name, Span)` into `constructor_pattern(Name, [], Span)`
+    `binding_pattern(Name, Span)` into `constructor_pattern(Name, Span, [], Span)`
     whenever `Name` is an in-scope NULLARY constructor, so `None => ..`
     matches the constructor without the `()` -- in typing, exhaustiveness
     checking, and code generation alike.  A name whose constructor takes
@@ -116,11 +116,11 @@ resolve_patterns([Pattern | Patterns], Names, [Pattern1 | Patterns1]) :-
 
 resolve_pattern(binding_pattern(Name, Span), Names, Output) :- !,
   ( memberchk(Name, Names) ->
-      Output = constructor_pattern(Name, [], Span)
+      Output = constructor_pattern(Name, Span, [], Span)
   ; Output = binding_pattern(Name, Span)
   ).
-resolve_pattern(constructor_pattern(Name, SubPatterns, Span), Names,
-                constructor_pattern(Name, SubPatterns1, Span)) :- !,
+resolve_pattern(constructor_pattern(Name, NameSpan, SubPatterns, Span), Names,
+                constructor_pattern(Name, NameSpan, SubPatterns1, Span)) :- !,
   resolve_patterns(SubPatterns, Names, SubPatterns1).
 resolve_pattern(record_pattern(Members, Span), Names, record_pattern(Members1, Span)) :- !,
   resolve_members(Members, Names, Members1).
