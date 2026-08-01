@@ -107,7 +107,7 @@ compile_source(Source, Output, AnalysisResult) :-
 %              --build_graph-->   modules in topological order (deps first),
 %                                  import cycles rejected
 %              --per module-->    resolve imports against already-compiled
-%                                  dependency interfaces, seed the analyser,
+%                                  dependency exports, seed the analyser,
 %                                  collapse `namespace.member` accesses,
 %                                  resolve bare nullary constructor patterns,
 %                                  `analyse_module`, rewrite `use`/`use_all`
@@ -122,9 +122,9 @@ compile_source(Source, Output, AnalysisResult) :-
 % (the relative specifier the programmer wrote, with the extension swapped).
 %
 % A NAMED import (`use ./math:(a b)`) resolves each listed name across all
-% three namespaces from the dependency's exported interface: a value seeds the
+% three namespaces from the dependency's exported exports: a value seeds the
 % value environment (and is a runtime import), a type seeds the type
-% environment, a constructor seeds both.  A name absent from the interface is
+% environment, a constructor seeds both.  A name absent from the exports is
 % an `unknown_import` error.  A WHOLE-MODULE import (`use ./math`) seeds EVERY
 % public entry under a `math.`-qualified local name -- see `namespace_import`.
 % ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ compile_source(Source, Output, AnalysisResult) :-
 % implicit whole-module import with an EMPTY namespace prefix (see
 % `namespace_import:qualify/3`), so a flat name like `not` and a qualified
 % companion-module name like `Optional.isSome` (already dotted in the
-% dependency's own interface, from a nested `public module`) both resolve
+% dependency's own exports, from a nested `public module`) both resolve
 % unqualified.  Naming the implicit standard library again in `PreludePaths` is
 % harmless (the combined list is deduplicated by normalised path -- see
 % `distinct_preserve_order/2`).  A module that is ITSELF one of the effective
@@ -214,8 +214,8 @@ compile_graph(EntryPath, ResolveModule, ImplicitPreludePaths, PreludePaths, Comp
     % table.  This runs after the whole graph is parsed and before per-module
     % compilation, so cross-file `@name` uses resolve.
     process_macros(Order, ParsedAsts, Asts),
-    empty_assoc(Interfaces0),
-    compile_modules(Order, Asts, PreludeModules, Interfaces0, CompiledModules)
+    empty_assoc(ExportsByModule0),
+    compile_modules(Order, Asts, PreludeModules, ExportsByModule0, CompiledModules)
   )).
 
 % The standard library is always an effective prelude; see `compile/4`'s doc.
@@ -293,7 +293,7 @@ read_module(Module, ResolveModule, ParsedAst) :-
 % import is not a file dependency and is skipped.  The module's EFFECTIVE
 % prelude set (see `effective_preludes/3`) is appended: an implicit dependency
 % edge on every prelude module, so the graph's topological sort compiles them
-% before anything that needs their (implicit or explicit) interface.
+% before anything that needs their (implicit or explicit) exports.
 module_dependencies(program_node(Items), Module, PreludeModules, Dependencies) :-
   module_directory(Module, Directory),
   findall(Dependency,
@@ -321,34 +321,34 @@ use_path_in_item(public_node(Inner, _Span), Path) :-
 % Per-module compilation, in dependency order
 % ---------------------------------------------------------------------------
 
-% compile_modules(+Order, +Asts, +PreludeModules, +Interfaces, -CompiledModules).
+% compile_modules(+Order, +Asts, +PreludeModules, +ExportsByModule, -CompiledModules).
 % Each module's JavaScript is paired with its source path and RETURNED, not
 % written -- see the `compile/4` doc for why this stays I/O-free.
-compile_modules([], _Asts, _PreludeModules, _Interfaces, []).
-compile_modules([Module | Rest], Asts, PreludeModules, InterfacesIn, [Module - JavaScript | Compiled]) :-
+compile_modules([], _Asts, _PreludeModules, _ExportsByModule, []).
+compile_modules([Module | Rest], Asts, PreludeModules, ExportsByModuleIn, [Module - JavaScript | Compiled]) :-
   get_assoc(Module, Asts, Ast),
   module_directory(Module, Directory),
   effective_preludes(Module, PreludeModules, EffectivePreludes),
-  resolve_imports(Ast, Directory, InterfacesIn, EffectivePreludes, SeedValueEnvironment, SeedTypeEnvironment,
+  resolve_imports(Ast, Directory, ExportsByModuleIn, EffectivePreludes, SeedValueEnvironment, SeedTypeEnvironment,
                   PreludePlan, ImportPlan, NamespaceBases, NamespaceMembers, ConstructorTags),
   % Collapse `Namespace.member` value accesses to flat qualified identifiers
-  % (using the imported interfaces' member sets) before anything reads the AST.
+  % (using the imported exports' member sets) before anything reads the AST.
   collapse_namespace_access(Ast, NamespaceBases, NamespaceMembers, CollapsedAst),
   % Resolve bare nullary constructor names in match patterns (this module's
   % own declarations plus the seeded imports), before the AST forks into the
   % analysis and codegen paths -- both must see the same patterns.
   resolve_bare_constructors(CollapsedAst, SeedTypeEnvironment, ResolvedAst),
-  analyse_module(ResolvedAst, SeedValueEnvironment, SeedTypeEnvironment, _Result, Interface),
-  put_assoc(Module, InterfacesIn, Interface, Interfaces1),
+  analyse_module(ResolvedAst, SeedValueEnvironment, SeedTypeEnvironment, _Result, Exports),
+  put_assoc(Module, ExportsByModuleIn, Exports, ExportsByModule1),
   rewrite_imports(ResolvedAst, PreludePlan, ImportPlan, CodegenAst0),
   % An imported constructor's pattern is matched on the dependency's intrinsic
   % tag, not on the local namespace alias.
   rewrite_constructor_tags(CodegenAst0, ConstructorTags, CodegenAst),
   generate(CodegenAst, JavaScript),
-  compile_modules(Rest, Asts, PreludeModules, Interfaces1, Compiled).
+  compile_modules(Rest, Asts, PreludeModules, ExportsByModule1, Compiled).
 
 % ---------------------------------------------------------------------------
-% Import resolution: dependency interfaces -> seed environments + a plan that
+% Import resolution: dependency exports -> seed environments + a plan that
 % records, per `use`, the JS specifier and which names are runtime imports.
 % ---------------------------------------------------------------------------
 
@@ -364,21 +364,21 @@ compile_modules([Module | Rest], Asts, PreludeModules, InterfacesIn, [Module - J
 % is a separate list of `namespace_plan/2` terms (one per prelude module) --
 % they carry no corresponding `Items` node, so `rewrite_imports/4` turns them
 % into codegen nodes directly rather than zipping them against `Items`.
-resolve_imports(program_node(Items), Directory, Interfaces, EffectivePreludes,
+resolve_imports(program_node(Items), Directory, ExportsByModule, EffectivePreludes,
                 SeedValueEnvironment, SeedTypeEnvironment,
                 PreludePlan, ImportPlan, NamespaceBases, NamespaceMembers, ConstructorTags) :-
   empty_assoc(V0),
   empty_assoc(T0),
-  seed_preludes(EffectivePreludes, Directory, Interfaces, V0, T0, V1, T1,
+  seed_preludes(EffectivePreludes, Directory, ExportsByModule, V0, T0, V1, T1,
                PreludePlan, PreludeBases, PreludeMembers, PreludeTags),
-  resolve_import_items(Items, Directory, Interfaces, V1, T1, SeedValueEnvironment, SeedTypeEnvironment,
+  resolve_import_items(Items, Directory, ExportsByModule, V1, T1, SeedValueEnvironment, SeedTypeEnvironment,
                        ImportPlan, ExplicitBases, ExplicitMembers, ExplicitTags),
   append(PreludeBases, ExplicitBases, NamespaceBases),
   append(PreludeMembers, ExplicitMembers, NamespaceMembers),
   append(PreludeTags, ExplicitTags, ConstructorTags).
 
 % Seed the value/type environments from every effective prelude module's
-% ALREADY-COMPILED interface (guaranteed present in `Interfaces`: the
+% ALREADY-COMPILED exports (guaranteed present in `ExportsByModule`: the
 % dependency graph compiles every prelude module before anything that can
 % depend on it, implicitly or explicitly).  Namespace `[]` (see
 % `namespace_import:qualify/3`) leaves each seeded name exactly as the
@@ -387,52 +387,52 @@ resolve_imports(program_node(Items), Directory, Interfaces, EffectivePreludes,
 % `prelude_bases/2` derives the namespace tokens (`Optional`) a caller's
 % source can write for `collapse_namespace_access/4` to recognise, since
 % there is no single `Namespace` token here the way there is for `use_all`.
-seed_preludes([], _Directory, _Interfaces, V, T, V, T, [], [], [], []).
-seed_preludes([PreludeModule | Rest], Directory, Interfaces, V0, T0, V, T,
+seed_preludes([], _Directory, _ExportsByModule, V, T, V, T, [], [], [], []).
+seed_preludes([PreludeModule | Rest], Directory, ExportsByModule, V0, T0, V, T,
              [namespace_plan(JsSpecifier, Renames) | Plans], Bases, Members, Tags) :-
-  ( get_assoc(PreludeModule, Interfaces, Interface) ->
+  ( get_assoc(PreludeModule, ExportsByModule, Exports) ->
       true
   ; throw(analysis_error(missing_module(PreludeModule)))
   ),
-  seed_namespace([], Interface, V0, T0, V1, T1, Renames, MemberNames, ModuleTags),
+  seed_namespace([], Exports, V0, T0, V1, T1, Renames, MemberNames, ModuleTags),
   prelude_bases(MemberNames, ModuleBases),
   relative_specifier(Directory, PreludeModule, JsSpecifier),
-  seed_preludes(Rest, Directory, Interfaces, V1, T1, V, T, Plans, Bases1, Members1, Tags1),
+  seed_preludes(Rest, Directory, ExportsByModule, V1, T1, V, T, Plans, Bases1, Members1, Tags1),
   append(ModuleBases, Bases1, Bases),
   append(MemberNames, Members1, Members),
   append(ModuleTags, Tags1, Tags).
 
-resolve_import_items([], _Directory, _Interfaces, V, T, V, T, [], [], [], []).
-resolve_import_items([use_node(Path, Names, _) | Rest], Directory, Interfaces, V0, T0, V, T,
+resolve_import_items([], _Directory, _ExportsByModule, V, T, V, T, [], [], [], []).
+resolve_import_items([use_node(Path, Names, _) | Rest], Directory, ExportsByModule, V0, T0, V, T,
                      [import_plan(JsSpecifier, RuntimeNames) | Plans], Bases, Members, Tags) :- !,
   resolve_source_path(Directory, Path, Dependency),
-  ( get_assoc(Dependency, Interfaces, Interface) ->
+  ( get_assoc(Dependency, ExportsByModule, Exports) ->
       true
   ; throw(analysis_error(missing_module(Dependency)))
   ),
-  import_names(Names, Path, Interface, V0, T0, V1, T1, RuntimeNames),
+  import_names(Names, Path, Exports, V0, T0, V1, T1, RuntimeNames),
   append(Path, ".js", JsSpecifier),
-  resolve_import_items(Rest, Directory, Interfaces, V1, T1, V, T, Plans, Bases, Members, Tags).
-resolve_import_items([use_all_node(Path, _) | Rest], Directory, Interfaces, V0, T0, V, T,
+  resolve_import_items(Rest, Directory, ExportsByModule, V1, T1, V, T, Plans, Bases, Members, Tags).
+resolve_import_items([use_all_node(Path, _) | Rest], Directory, ExportsByModule, V0, T0, V, T,
                      [namespace_plan(JsSpecifier, Renames) | Plans],
                      [Namespace | Bases], Members, Tags) :- !,
   resolve_source_path(Directory, Path, Dependency),
-  ( get_assoc(Dependency, Interfaces, Interface) ->
+  ( get_assoc(Dependency, ExportsByModule, Exports) ->
       true
   ; throw(analysis_error(missing_module(Dependency)))
   ),
   namespace_of(Path, Namespace),
-  seed_namespace(Namespace, Interface, V0, T0, V1, T1, Renames, MemberNames, NamespaceTags),
+  seed_namespace(Namespace, Exports, V0, T0, V1, T1, Renames, MemberNames, NamespaceTags),
   append(Path, ".js", JsSpecifier),
-  resolve_import_items(Rest, Directory, Interfaces, V1, T1, V, T, Plans, Bases, Members1, Tags1),
+  resolve_import_items(Rest, Directory, ExportsByModule, V1, T1, V, T, Plans, Bases, Members1, Tags1),
   append(MemberNames, Members1, Members),
   append(NamespaceTags, Tags1, Tags).
-resolve_import_items([_Other | Rest], Directory, Interfaces, V0, T0, V, T, Plans, Bases, Members, Tags) :-
-  resolve_import_items(Rest, Directory, Interfaces, V0, T0, V, T, Plans, Bases, Members, Tags).
+resolve_import_items([_Other | Rest], Directory, ExportsByModule, V0, T0, V, T, Plans, Bases, Members, Tags) :-
+  resolve_import_items(Rest, Directory, ExportsByModule, V0, T0, V, T, Plans, Bases, Members, Tags).
 
-import_names([], _Path, _Interface, V, T, V, T, []).
-import_names([Name | Names], Path, Interface, V0, T0, V, T, RuntimeNames) :-
-  Interface = module_interface(ValueEntries, TypeEntries),
+import_names([], _Path, _Exports, V, T, V, T, []).
+import_names([Name | Names], Path, Exports, V0, T0, V, T, RuntimeNames) :-
+  Exports = module_exports(ValueEntries, TypeEntries),
   ( memberchk(Name - _, ValueEntries) -> IsValue = true ; IsValue = false ),
   ( memberchk(Name - _, TypeEntries) -> IsType = true ; IsType = false ),
   ( memberchk(constructor_key(Name) - _, TypeEntries) -> IsConstructor = true ; IsConstructor = false ),
@@ -455,7 +455,7 @@ import_names([Name | Names], Path, Interface, V0, T0, V, T, RuntimeNames) :-
       put_assoc(constructor_key(Name), Ta, ConstructorEntry, T1)
   ; T1 = Ta
   ),
-  import_names(Names, Path, Interface, V1, T1, V, T, RestRuntime),
+  import_names(Names, Path, Exports, V1, T1, V, T, RestRuntime),
   ( IsValue == true ->
       RuntimeNames = [Name | RestRuntime]
   ; RuntimeNames = RestRuntime

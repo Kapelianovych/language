@@ -50,7 +50,7 @@ This document tracks what is left. Nothing here is a bug; it is depth and breadt
 ### 2.3 Go-to-definition / find-references
 - Resolve an identifier at the cursor to its binder (local, top-level, imported,
   constructor) and, in reverse, enumerate uses. Cross-file uses the existing
-  interface/import machinery.
+  module type/import machinery.
 
 ### 2.4 Completion, document symbols, signature help, semantic tokens, rename
 - **Semantic tokens** — DONE (2026-07-24). `source/syntax/semantic_tokens.pl`
@@ -110,7 +110,7 @@ This document tracks what is left. Nothing here is a bug; it is depth and breadt
 1. ~~**2.1 node-at-offset**~~ — DONE. ~~**4 (spans/messages)**~~ — DONE.
    ~~**2.4 semantic tokens**~~ — DONE.
 2. **2.3 go-to-definition / find-references** — next; builds on `node_at` (the
-   identifier token under the cursor) plus the existing interface/import machinery.
+   identifier token under the cursor) plus the existing module type/import machinery.
 3. **3.1 UTF-16 positions** — small, improves real-editor fidelity.
 4. **2.4 document symbols** (cheap green-tree walk, same shape as semantic
    tokens), then completion/rename (need 2.3).

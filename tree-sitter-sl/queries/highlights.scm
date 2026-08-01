@@ -130,7 +130,7 @@
 
 (type_declaration name: (identifier) @type)
 (type_parameter name: (identifier) @type.parameter)
-(interface_member name: (identifier) @property)
+(module_type_member name: (identifier) @property)
 (type_member label: (identifier) @property)
 (type_reference name: (qualified_name (identifier) @type))
 

@@ -24,7 +24,7 @@
       Two kinds of node are already self-describing regardless of where they
       sit in the tree:
         * TYPE-shaped nodes (`type_name`, `type_param`, `type_declaration`,
-          `variant`, `interface_member`, ...) only ever occur in a type
+          `variant`, `module_type_member`, ...) only ever occur in a type
           position, so tagging them by their OWN kind is always right --  no
           "am I inside a type?" context needs to be threaded down from a
           parent.
@@ -304,7 +304,7 @@ special(type_label, Children, Toks, Tail) :- !,
 special(type_declaration, Children, Toks, Tail) :- !,
   single_keyword_then_name(type, Children, Toks, Tail).
 
-% module_declaration/5: `opaque? module NAME <params>? (: Iface)? = { ... }`.
+% module_declaration/5: `opaque? module NAME <params>? (: ModuleType)? = { ... }`.
 % The optional leading `opaque` is already its own `node(opaque,_)` (not a
 % raw leaf), so it does not interfere with "skip the ONE keyword ident,
 % then tag the name".
@@ -341,8 +341,8 @@ special(external, Children, Toks, Tail) :- !,
   ( NameLeaf = t(ident, _, S, E) -> T3 = [tok(EType, S, E) | T4] ; emit(NameLeaf, T3, T4) ),
   emit_list(Rest1, T4, Tail).
 
-% interface_member/5: `NAME : TYPE` inside a `type X = { ... }` interface body.
-special(interface_member, Children, Toks, Tail) :- !,
+% module_type_member/5: `NAME : TYPE` inside a `type X = { ... }` module type body.
+special(module_type_member, Children, Toks, Tail) :- !,
   skip_non_ident(Children, Toks, T1, [NameLeaf | Rest]),
   ( first_node(Rest, TypeNode), is_function_shaped(TypeNode) -> IType = method ; IType = property ),
   ( NameLeaf = t(ident, _, S, E) -> T1 = [tok(IType, S, E) | T2] ; emit(NameLeaf, T1, T2) ),

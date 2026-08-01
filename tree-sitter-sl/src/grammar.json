@@ -579,7 +579,7 @@
                     },
                     {
                       "type": "SYMBOL",
-                      "name": "interface_body"
+                      "name": "module_type_body"
                     },
                     {
                       "type": "SYMBOL",
@@ -687,7 +687,7 @@
         ]
       }
     },
-    "interface_body": {
+    "module_type_body": {
       "type": "SEQ",
       "members": [
         {
@@ -698,7 +698,7 @@
           "type": "REPEAT",
           "content": {
             "type": "SYMBOL",
-            "name": "interface_member"
+            "name": "module_type_member"
           }
         },
         {
@@ -707,7 +707,7 @@
         }
       ]
     },
-    "interface_member": {
+    "module_type_member": {
       "type": "SEQ",
       "members": [
         {

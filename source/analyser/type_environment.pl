@@ -7,7 +7,7 @@
   declared_function_scheme/6,
   instantiate_constructor/7,
   union_constructor_names/3,
-  interface_row_for/7,
+  module_type_row_for/7,
   seed_externals/7
 ]).
 
@@ -93,13 +93,13 @@ register_declarations([type_declaration_node(Name, Parameters, _Opacity, variant
   put_assoc(Name, EnvironmentIn, type_variant_info(Parameters, Constructors), Environment1),
   register_constructors(Constructors, Name, Parameters, Environment1, Environment2),
   register_declarations(Rest, Environment2, EnvironmentOut).
-% An interface (module-type) declaration: registered distinctly from a plain
+% A module type (module-type) declaration: registered distinctly from a plain
 % alias so `convert_named/10` can give it its own opaque(nominal)/transparent
 % (structural row) semantics.
-register_declarations([type_declaration_node(Name, Parameters, Opacity, interface_body(Members), _) | Rest],
+register_declarations([type_declaration_node(Name, Parameters, Opacity, module_type_body(Members), _) | Rest],
                       EnvironmentIn, EnvironmentOut) :- !,
   register_type_name(Name, Parameters, EnvironmentIn),
-  put_assoc(Name, EnvironmentIn, type_interface_info(Opacity, Parameters, Members), Environment1),
+  put_assoc(Name, EnvironmentIn, type_module_type_info(Opacity, Parameters, Members), Environment1),
   register_declarations(Rest, Environment1, EnvironmentOut).
 register_declarations([type_declaration_node(Name, Parameters, Opacity, Body, _) | Rest],
                       EnvironmentIn, EnvironmentOut) :-
@@ -145,11 +145,11 @@ validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, no_bod
   empty_context(Context0),
   bind_validation_parameters(Parameters, TypeEnvironment, Context0, _ValidationEnvironment, _Context1),
   validate_declarations(Rest, TypeEnvironment).
-% An interface's members are each validated as an ordinary proper type.
-validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, interface_body(Members), _) | Rest], TypeEnvironment) :- !,
+% A module type's members are each validated as an ordinary proper type.
+validate_declarations([type_declaration_node(_Name, Parameters, _Opacity, module_type_body(Members), _) | Rest], TypeEnvironment) :- !,
   empty_context(Context0),
   bind_validation_parameters(Parameters, TypeEnvironment, Context0, ValidationEnvironment, Context1),
-  validate_interface_members(Members, ValidationEnvironment, Context1),
+  validate_module_type_members(Members, ValidationEnvironment, Context1),
   validate_declarations(Rest, TypeEnvironment).
 validate_declarations([type_declaration_node(Name, Parameters, _Opacity, Body, _) | Rest], TypeEnvironment) :-
   empty_context(Context0),
@@ -165,10 +165,10 @@ validate_constructor_fields([constructor(_Name, FieldTypes, _) | Rest], Environm
   convert_field_types(FieldTypes, Environment, 0, ContextIn, _ConvertedFields, Context1),
   validate_constructor_fields(Rest, Environment, Context1).
 
-validate_interface_members([], _Environment, _Context).
-validate_interface_members([interface_member(_Name, TypeExpression, _) | Rest], Environment, ContextIn) :-
+validate_module_type_members([], _Environment, _Context).
+validate_module_type_members([module_type_member(_Name, TypeExpression, _) | Rest], Environment, ContextIn) :-
   convert_proper(TypeExpression, Environment, [], 0, ContextIn, _Type, Context1),
-  validate_interface_members(Rest, Environment, Context1).
+  validate_module_type_members(Rest, Environment, Context1).
 
 % Convert a constructor's positional field type expressions (each proper).
 convert_field_types([], _Environment, _Level, Context, [], Context).
@@ -407,15 +407,15 @@ convert_type(type_name_node(Name, Arguments, _), Environment, Expanding, Level, 
 % An INTERSECTION `B + C (+ ...)` -- always kind 0 (a proper type; an
 % intersection is never itself higher-kinded/appliable, unlike a type alias
 % whose body might be a section).  Each member is first checked to actually
-% BE an interface -- a membership contract -- via `require_interface_shaped/2`
+% BE a module type -- a membership contract -- via `require_module_type_shaped/2`
 % below, THEN converted the ordinary way via `convert_proper/6`.  The check
 % has to happen on the SURFACE (un-converted) member: once converted, both a
-% plain tagged union (e.g. `Optional`) and an opaque interface look
+% plain tagged union (e.g. `Optional`) and an opaque module type look
 % IDENTICAL as a monotype (`type_constructor(Name, Args)`), so there is no
 % way to later tell "this came from `type X = {...}`" apart from "this came
 % from `type X = A(..) | B`" by inspecting the MonoType alone -- the
 % provenance only exists in the `TypeEnvironment` entry BEFORE conversion,
-% which is exactly what `require_interface_shaped/2` consults.
+% which is exactly what `require_module_type_shaped/2` consults.
 convert_type(intersection_type_node(Members, _), Environment, Expanding, Level, ContextIn,
              intersection_type(MonoTypes), 0, ContextOut) :- !,
   convert_intersection_members(Members, Environment, Expanding, Level, ContextIn, MonoTypes, ContextOut).
@@ -423,7 +423,7 @@ convert_type(intersection_type_node(Members, _), Environment, Expanding, Level, 
 convert_intersection_members([], _Environment, _Expanding, _Level, Context, [], Context).
 convert_intersection_members([Member | Rest], Environment, Expanding, Level, ContextIn,
                              [MonoType | MonoTypes], ContextOut) :-
-  require_interface_shaped(Member, Environment),
+  require_module_type_shaped(Member, Environment),
   convert_proper(Member, Environment, Expanding, Level, ContextIn, MonoType, Context1),
   convert_intersection_members(Rest, Environment, Expanding, Level, Context1, MonoTypes, ContextOut).
 
@@ -437,7 +437,7 @@ convert_intersection_members([Member | Rest], Environment, Expanding, Level, Con
 %   * a literal/anonymous record type expression (`(x: number)`) -- this is
 %     ALREADY a structural membership contract on its own, no name needed;
 %   * a NAMED reference whose OWN declaration is specifically a
-%     `type_interface_info` (a `type X = {...}` declaration, checked
+%     `type_module_type_info` (a `type X = {...}` declaration, checked
 %     directly against the TypeEnvironment entry, NOT against what it
 %     converts to -- see the comment above `convert_type`'s new clause).
 % Everything else -- a tagged union, an ordinary alias, an abstract FFI type,
@@ -446,13 +446,13 @@ convert_intersection_members([Member | Rest], Environment, Expanding, Level, Con
 % `get_assoc` lookup below simply fails to find them, falling through to the
 % same rejection), a function type, or a quantified type -- is rejected by
 % the final catch-all clause.
-require_interface_shaped(type_name_node(Name, _Arguments, _), Environment) :- !,
-  ( get_assoc(Name, Environment, type_interface_info(_, _, _)) -> true
-  ; throw(analysis_error(not_an_interface(Name)))
+require_module_type_shaped(type_name_node(Name, _Arguments, _), Environment) :- !,
+  ( get_assoc(Name, Environment, type_module_type_info(_, _, _)) -> true
+  ; throw(analysis_error(not_a_module_type(Name)))
   ).
-require_interface_shaped(record_type_node(_, _, _), _Environment) :- !.
-require_interface_shaped(Member, _Environment) :-
-  throw(analysis_error(not_an_interface_expression(Member))).
+require_module_type_shaped(record_type_node(_, _, _), _Environment) :- !.
+require_module_type_shaped(Member, _Environment) :-
+  throw(analysis_error(not_a_module_type_expression(Member))).
 
 % The tail of a record annotation.  A closed record has tail `closed`.  An
 % anonymous open record `(.. ..)` gets a fresh row variable.  A captured open
@@ -519,15 +519,15 @@ convert_named(type_declaration_info(transparent, Parameters, Body), Name, Argume
   ; throw(analysis_error(type_constructor_arity_mismatch(Name, ParameterArity, Given)))
   ).
 
-% An interface (module type) is NOMINAL when `opaque` (a module must
+% A module type (module type) is NOMINAL when `opaque` (a module must
 % explicitly ascribe to satisfy it, exactly like an opaque alias) or a
 % STRUCTURAL row when transparent (the default): expanded to a closed
 % `record_type` of its members at the use site, so any value -- a module or an
 % ordinary record -- with a compatible shape satisfies it.
-convert_named(type_interface_info(opaque, Parameters, _Members), Name, Arguments, Environment,
+convert_named(type_module_type_info(opaque, Parameters, _Members), Name, Arguments, Environment,
               Expanding, Level, ContextIn, MonoType, Kind, ContextOut) :- !,
   nominal_reference(Name, Parameters, Arguments, Environment, Expanding, Level, ContextIn, MonoType, Kind, ContextOut).
-convert_named(type_interface_info(transparent, Parameters, Members), Name, Arguments, Environment,
+convert_named(type_module_type_info(transparent, Parameters, Members), Name, Arguments, Environment,
               Expanding, Level, ContextIn, record_type(Fields, closed), 0, ContextOut) :-
   parameter_arity(Parameters, ParameterArity),
   length(Arguments, Given),
@@ -536,7 +536,7 @@ convert_named(type_interface_info(transparent, Parameters, Members), Name, Argum
       convert_arguments(Arguments, ParameterKinds, Environment, Expanding, Level, ContextIn, ArgumentMonos, Context1),
       enforce_bounds(Parameters, ArgumentMonos, Environment, Level, Context1, Context2),
       bind_alias_parameters(Parameters, ArgumentMonos, Environment, MemberEnvironment),
-      convert_interface_members(Members, MemberEnvironment, [Name | Expanding], Level, Context2, Fields, ContextOut)
+      convert_module_type_members(Members, MemberEnvironment, [Name | Expanding], Level, Context2, Fields, ContextOut)
   ; throw(analysis_error(type_constructor_arity_mismatch(Name, ParameterArity, Given)))
   ).
 
@@ -720,26 +720,26 @@ type_member_key(positional, Index, index(Index), NextIndex) :-
   NextIndex is Index + 1.
 type_member_key(labeled(Name), Index, label(Name), Index).
 
-% An interface's members become a closed row of readonly, labeled fields --
+% A module type's members become a closed row of readonly, labeled fields --
 % every member is named, so there is no positional form to key by index.
-convert_interface_members([], _Environment, _Expanding, _Level, Context, [], Context).
-convert_interface_members([interface_member(Name, TypeExpression, _) | Members], Environment, Expanding, Level,
+convert_module_type_members([], _Environment, _Expanding, _Level, Context, [], Context).
+convert_module_type_members([module_type_member(Name, TypeExpression, _) | Members], Environment, Expanding, Level,
                           ContextIn, [record_field(readonly, label(Name), Type) | Fields], ContextOut) :-
   convert_proper(TypeExpression, Environment, Expanding, Level, ContextIn, Type, Context1),
-  convert_interface_members(Members, Environment, Expanding, Level, Context1, Fields, ContextOut).
+  convert_module_type_members(Members, Environment, Expanding, Level, Context1, Fields, ContextOut).
 
-% interface_row_for(+Name, +Arguments, +Environment, +Level, +ContextIn, -Fields, -ContextOut).
+% module_type_row_for(+Name, +Arguments, +Environment, +Level, +ContextIn, -Fields, -ContextOut).
 %
-% Resolve a KNOWN interface name to its member row given ALREADY-CONVERTED
+% Resolve a KNOWN module type name to its member row given ALREADY-CONVERTED
 % monotype arguments (e.g. from a resolved `type_constructor(Name, Arguments)`).
 % Used for nominal field access and module-ascription conformance checking,
-% both of which must see an interface's actual shape regardless of its own
+% both of which must see a module type's actual shape regardless of its own
 % opacity (opacity governs whether OTHER differently-named values may
 % substitute for it, not whether its own values support member access).
-interface_row_for(Name, Arguments, Environment, Level, ContextIn, Fields, ContextOut) :-
-  ( get_assoc(Name, Environment, type_interface_info(_Opacity, Parameters, Members)) ->
+module_type_row_for(Name, Arguments, Environment, Level, ContextIn, Fields, ContextOut) :-
+  ( get_assoc(Name, Environment, type_module_type_info(_Opacity, Parameters, Members)) ->
       bind_alias_parameters(Parameters, Arguments, Environment, MemberEnvironment),
-      convert_interface_members(Members, MemberEnvironment, [Name], Level, ContextIn, Fields, ContextOut)
+      convert_module_type_members(Members, MemberEnvironment, [Name], Level, ContextIn, Fields, ContextOut)
   ; throw(analysis_error(unknown_member_target(Name)))
   ).
 

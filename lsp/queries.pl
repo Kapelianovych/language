@@ -98,7 +98,7 @@
 :- dynamic(comp_stack/1).            % comp_stack(ListOfCurrentlyComputingKeys)
 :- dynamic(dep_edge/2).              % dep_edge(ParentKey, ChildKey)
 :- dynamic(exec_log/1).              % exec_log(Key) -- one per actual recompute
-:- dynamic(resolving_dependency/1).  % import-cycle guard (see dependency_interface/2)
+:- dynamic(resolving_dependency/1).  % import-cycle guard (see dependency_exports/2)
 :- discontiguous(compute/2).         % compute clauses are interleaved with helpers
 
 init_db :-
@@ -307,21 +307,21 @@ exec_count(Key, Count) :-
 %   parse(File)          parsed(GreenTree, Diagnostics)
 %   program_ast(File)    the file lowered to the historical `*_node` AST
 %   def_names(File)      list of top-level definition names
-%   interface(File)      this file's module_interface (its public entries)
+%   exports(File)        this file's module_exports (its public entries)
 %   import_seeds(File)   seed value/type environments built from its imports
-%   analysis(File)       analysis(Errors, DefTypes, Interface) for the whole file
+%   analysis(File)       analysis(Errors, DefTypes, Exports) for the whole file
 %   diagnostics(File)    parse diagnostics ++ type errors
 %   type_at(File, Name)  a top-level definition's resolved type (for hover)
 %
-% Cross-file flow: `import_seeds(A)` reads `interface(B)` for each dependency B
+% Cross-file flow: `import_seeds(A)` reads `exports(B)` for each dependency B
 % of A, so editing B re-checks A automatically -- and the value-equality firewall
-% means a change to B that does NOT alter its public interface leaves A untouched.
+% means a change to B that does NOT alter its public exports leaves A untouched.
 % ===========================================================================
 
 % Source text.  When the file is open in the editor `query/2` returns its INPUT
 % directly (the `input(...)` branch) and never reaches here; this clause is the
 % fallback that reads an unopened DEPENDENCY from disk.  A file that cannot be
-% read yields empty text (-> empty program -> empty interface), so an importer of
+% read yields empty text (-> empty program -> empty exports), so an importer of
 % a missing module simply sees its imported names as unbound.
 compute(src(File), Chars) :-
   ( read_source_chars(File, Source) -> Chars = Source ; Chars = [] ).
@@ -468,13 +468,13 @@ ast_has_macros(Term) :-
 % the editor sees EXACTLY what the compiler sees, with no risk of the two
 % checkers drifting apart.  The analyser is whole-program, so type-checking is
 % incremental at FILE granularity (a file is re-checked when its source -- hence
-% its AST, or one of its dependencies' interfaces -- changes); parsing stays
+% its AST, or one of its dependencies' exports -- changes); parsing stays
 % incremental within the file via the green tree.
 % ===========================================================================
 
-% Build the seed environments for a file from the interfaces of the modules it
+% Build the seed environments for a file from the exports of the modules it
 % imports.  This mirrors the loader's `resolve_imports`, but reads each
-% dependency's interface through `query(interface(Dep))` so the dependency edge
+% dependency's exports through `query(exports(Dep))` so the dependency edge
 % is recorded (editing a dependency re-checks its importers) and the result is
 % memoised.  Seeding is BEST-EFFORT: a name the dependency does not export is
 % left unseeded (so analysis continues) but is ALSO reported as an
@@ -490,7 +490,7 @@ ast_has_macros(Term) :-
 % declaration of the same name overrides a prelude entry, same as today.  Each
 % is seeded with an EMPTY namespace (`namespace_import:qualify/3`), so a flat
 % prelude name resolves unqualified and a qualified companion-module name
-% (`Optional.isSome`, already dotted in the prelude's own interface) needs
+% (`Optional.isSome`, already dotted in the prelude's own exports) needs
 % only `prelude_bases/2`'s derived tokens in `Bases` for the access collapse
 % below to recognise it -- no `Std.`-style prefix to strip.
 compute(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members, ImportErrors)) :-
@@ -502,40 +502,40 @@ compute(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members, 
   seed_imports(Items, Directory, V1, T1, SeedValues, SeedTypes, PreludeBases, Bases, PreludeMembers, Members, [], ImportErrors).
 
 % Seed the value/type environments from every effective prelude module's
-% interface, resolved through the query engine (so editing the prelude
-% re-checks every importer).  `prelude_interface_of/2` guards against import
-% cycles the same way `dependency_interface_of/3` does for explicit imports.
+% exports, resolved through the query engine (so editing the prelude
+% re-checks every importer). `prelude_exports_of/2` guards against import
+% cycles the same way `dependency_exports_of/3` does for explicit imports.
 seed_prelude_modules([], V, T, V, T, Bases, Bases, Members, Members).
 seed_prelude_modules([PreludeModule | Rest], V0, T0, V, T, Bases0, Bases, Members0, Members) :-
-  prelude_interface_of(PreludeModule, Interface),
-  seed_namespace([], Interface, V0, T0, V1, T1, _Renames, MemberNames, _Tags),
+  prelude_exports_of(PreludeModule, Exports),
+  seed_namespace([], Exports, V0, T0, V1, T1, _Renames, MemberNames, _Tags),
   prelude_bases(MemberNames, ModuleBases),
   append(MemberNames, Members0, Members1),
   append(ModuleBases, Bases0, Bases1),
   seed_prelude_modules(Rest, V1, T1, V, T, Bases1, Bases, Members1, Members).
 
-% Like `dependency_interface_of/3`, but the prelude module's path is already
+% Like `dependency_exports_of/3`, but the prelude module's path is already
 % fully resolved (not relative to some importer's `Directory`), so there is no
 % `resolve_source_path` step.
-prelude_interface_of(PreludeModule, Interface) :-
+prelude_exports_of(PreludeModule, Exports) :-
   ( resolving_dependency(PreludeModule) ->
-      Interface = module_interface([], [])
+      Exports = module_exports([], [])
   ; setup_call_cleanup(
       assertz(resolving_dependency(PreludeModule)),
-      query(interface(PreludeModule), Interface),
+      query(exports(PreludeModule), Exports),
       retract(resolving_dependency(PreludeModule)))
   ).
 
 seed_imports([], _Directory, V, T, V, T, Bases, Bases, Members, Members, Errors, Errors).
 seed_imports([use_node(Path, Names, Span) | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members, E0, E) :-
   Path \== "Compiler", !,                       % the compiler-macro import is not a file
-  dependency_interface_of(Directory, Path, module_interface(ValueEntries, TypeEntries)),
+  dependency_exports_of(Directory, Path, module_exports(ValueEntries, TypeEntries)),
   seed_named_imports(Names, Path, Span, ValueEntries, TypeEntries, V0, T0, V1, T1, E0, E1),
   seed_imports(Rest, Directory, V1, T1, V, T, Bases0, Bases, Members0, Members, E1, E).
 seed_imports([use_all_node(Path, _) | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members, E0, E) :- !,
-  dependency_interface_of(Directory, Path, Interface),
+  dependency_exports_of(Directory, Path, Exports),
   namespace_of(Path, Namespace),
-  seed_namespace(Namespace, Interface, V0, T0, V1, T1, _Renames, MemberNames, _Tags),
+  seed_namespace(Namespace, Exports, V0, T0, V1, T1, _Renames, MemberNames, _Tags),
   append(MemberNames, Members0, Members1),
   seed_imports(Rest, Directory, V1, T1, V, T, [Namespace | Bases0], Bases, Members1, Members, E0, E).
 seed_imports([_Other | Rest], Directory, V0, T0, V, T, Bases0, Bases, Members0, Members, E0, E) :-
@@ -556,18 +556,18 @@ seed_named_imports([Name | Names], Path, Span, ValueEntries, TypeEntries, V0, T0
   ),
   seed_named_imports(Names, Path, Span, ValueEntries, TypeEntries, V1, T1, V, T, E1, E).
 
-% A dependency's interface, resolved through the query engine.  The
+% A dependency's exports, resolved through the query engine.  The
 % `resolving_dependency/1` guard breaks IMPORT CYCLES: if we are already
-% resolving this dependency higher up the call chain, return an empty interface
+% resolving this dependency higher up the call chain, return an empty exports
 % instead of recursing forever (the compiler rejects cycles outright; the editor
 % just degrades gracefully).
-dependency_interface_of(Directory, Path, Interface) :-
+dependency_exports_of(Directory, Path, Exports) :-
   resolve_source_path(Directory, Path, Dependency),
   ( resolving_dependency(Dependency) ->
-      Interface = module_interface([], [])
+      Exports = module_exports([], [])
   ; setup_call_cleanup(
       assertz(resolving_dependency(Dependency)),
-      query(interface(Dependency), Interface),
+      query(exports(Dependency), Exports),
       retract(resolving_dependency(Dependency)))
   ).
 
@@ -577,7 +577,7 @@ dependency_interface_of(Directory, Path, Interface) :-
 % qualified identifiers (so `Math.add` resolves to the seeded `Math.add`).  A
 % catch guards against an unexpected throw so one malformed construct cannot take
 % the whole editor session down.
-compute(analysis(File), analysis(Errors, DefinitionTypes, Interface)) :-
+compute(analysis(File), analysis(Errors, DefinitionTypes, Exports)) :-
   query(expanded_ast(File), Expansion),
   ( Expansion = expanded(Ast) ->
       query(import_seeds(File), import_seeds(SeedValues, SeedTypes, Bases, Members, ImportErrors)),
@@ -588,23 +588,23 @@ compute(analysis(File), analysis(Errors, DefinitionTypes, Interface)) :-
       % Import errors (a name not exported by a dependency) lead the list, so the
       % `use`-site diagnostic shows even when the same name later also trips an
       % `unbound_variable` at its use sites.
-      ( catch(analyse_accumulating(ResolvedAst, SeedValues, SeedTypes, Es, Ds, Iface), Reason,
-              ( Es = [error_at(span(0, 0), Reason)], Ds = [], Iface = module_interface([], []) ))
-        -> append(ImportErrors, Es, Errors), DefinitionTypes = Ds, Interface = Iface
+      ( catch(analyse_accumulating(ResolvedAst, SeedValues, SeedTypes, Es, Ds, Exports), Reason,
+              ( Es = [error_at(span(0, 0), Reason)], Ds = [], Exports = module_exports([], []) ))
+        -> append(ImportErrors, Es, Errors), DefinitionTypes = Ds, Exports = Exports
         ;  append(ImportErrors, [error_at(span(0, 0), analysis_failed)], Errors), DefinitionTypes = [],
-           Interface = module_interface([], []) )
+           Exports = module_exports([], []) )
   ; % Expansion = macro_error(Span, Reason) -- Span points at the offending
     % `@invocation` (file start for a whole-program macro error).
     Expansion = macro_error(MacroSpan, MacroReason),
     Errors = [error_at(MacroSpan, MacroReason)], DefinitionTypes = [],
-    Interface = module_interface([], []) ).
+    Exports = module_exports([], []) ).
 
-% A PROJECTION of `analysis` to just the module interface.  Importers depend on
+% A PROJECTION of `analysis` to just the module exports.  Importers depend on
 % this, not on the full `analysis`, so the firewall holds: a change inside a
-% dependency that leaves its public interface equal does NOT advance this query's
+% dependency that leaves its public exports equal does NOT advance this query's
 % `changed_at`, and the importers are not re-checked.
-compute(interface(File), Interface) :-
-  query(analysis(File), analysis(_, _, Interface)).
+compute(exports(File), Exports) :-
+  query(analysis(File), analysis(_, _, Exports)).
 
 % All diagnostics for a file: parse errors first, then type errors.
 compute(diagnostics(File), All) :-

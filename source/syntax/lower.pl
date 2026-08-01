@@ -597,14 +597,14 @@ lower_type_declaration(node(type_declaration, Ch), type_declaration_node(Name, P
       ( member(node(opaque, _), Ch) -> Opacity = opaque ; Opacity = transparent ),
       findall(Ctor, ( member(node(variant, VCh), Ch), lower_constructor(VCh, Ctor) ), Ctors),
       Body = variant_body(Ctors)
-  ; member(node(interface, ICh), Ch) ->
-      % An interface (module-type) body.  `opaque` makes it NOMINAL (a module
+  ; member(node(module_type, ICh), Ch) ->
+      % A module type (module-type) body.  `opaque` makes it NOMINAL (a module
       % must explicitly ascribe to satisfy it); transparent (the default)
       % makes it a STRUCTURAL row, matched by shape -- same opaque/transparent
       % axis as any other type declaration.
       ( member(node(opaque, _), Ch) -> Opacity = opaque ; Opacity = transparent ),
-      lower_interface_members(ICh, Members),
-      Body = interface_body(Members)
+      lower_module_type_members(ICh, Members),
+      Body = module_type_body(Members)
   ; body_type_node(Ch, TypeGreen) ->
       % An alias body.  (`opaque` before an alias is RETIRED and diagnosed by
       % the parser, but a mid-edit tree still lowers -- as nominal, its old
@@ -630,15 +630,15 @@ lower_constructor(VCh, constructor(Name, ArgTypes, Span)) :-
   maplist_lower_type(ArgGreens, ArgTypes),
   variant_span(VCh, Span).
 
-% Interface (module-type) members: each is `Name : Type`, in declaration order.
-lower_interface_members(ICh, Members) :-
-  findall(M, ( member(node(interface_member, MCh), ICh), lower_interface_member(MCh, M) ), Members).
+% ModuleType (module-type) members: each is `Name : Type`, in declaration order.
+lower_module_type_members(ICh, Members) :-
+  findall(M, ( member(node(module_type_member, MCh), ICh), lower_module_type_member(MCh, M) ), Members).
 
-lower_interface_member(MCh, interface_member(Name, Type, Span)) :-
+lower_module_type_member(MCh, module_type_member(Name, Type, Span)) :-
   child_token(MCh, ident, t(ident, Name, _, _)),
   child_nodes(MCh, [TypeGreen]),
   lower_type(TypeGreen, Type),
-  gspan(node(interface_member, MCh), Span).
+  gspan(node(module_type_member, MCh), Span).
 variant_span(VCh, span(S, E)) :-
   leaves(node(x, VCh), Ls), my_exclude(trivia_leaf, Ls, Sig),
   Sig = [t(_, _, _, _) | _],

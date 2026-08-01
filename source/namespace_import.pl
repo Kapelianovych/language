@@ -15,7 +15,7 @@
 
     Unlike a nested `module` (a genuine record VALUE, type-checked and
     compiled in place -- see analyser/infer.pl and generator/javascript.pl),
-    this needs the dependency's compiled INTERFACE -- which member names
+    this needs the dependency's compiled exports -- which member names
     exist, and their types -- so it runs in the compiler, after the
     dependency is analysed.  A dependency's own nested `module` crosses this
     boundary as ONE ordinary exported value (like any other), not as a set
@@ -23,9 +23,9 @@
     the namespace qualifying `Foo` itself, followed by ordinary field access
     on the imported module value, not a further namespace lookup.
 
-    NAMESPACING THE INTERFACE.  The imported names are seeded under qualified
+    NAMESPACING THE EXPORTS.  The imported names are seeded under qualified
     local names (`Math.Option`), and the imported types/constructors are
-    RE-QUALIFIED to match: a nominal type `Option` in the interface becomes
+    RE-QUALIFIED to match: a nominal type `Option` in the exports becomes
     `Math.Option` everywhere it appears (in constructor schemes, in variant
     info, in field type expressions), so two modules' `Option`s stay distinct
     nominal types and a `match` on `Math.Some`/`Math.None` checks against the
@@ -56,9 +56,9 @@ namespace_of(Path, Namespace) :-
   ).
 
 % ---------------------------------------------------------------------------
-% Seeding the value / type environments from a dependency's interface.
+% Seeding the value / type environments from a dependency's exports.
 %
-% seed_namespace(+Namespace, +Interface, +VIn, +TIn,
+% seed_namespace(+Namespace, +Exports, +VIn, +TIn,
 %                -VOut, -TOut, -Renames, -MemberNames, -ConstructorTags)
 %
 %   Renames          [Foreign - Local] runtime import pairs (values+ctors)
@@ -66,13 +66,13 @@ namespace_of(Path, Namespace) :-
 %   ConstructorTags  [Local - Foreign] for constructors (for tag rewrite)
 % ---------------------------------------------------------------------------
 
-seed_namespace(Namespace, module_interface(ValueEntries, TypeEntries), VIn, TIn,
+seed_namespace(Namespace, module_exports(ValueEntries, TypeEntries), VIn, TIn,
                VOut, TOut, Renames, MemberNames, ConstructorTags) :-
   exported_type_names(TypeEntries, ExportedTypeNames),
   seed_values(ValueEntries, Namespace, ExportedTypeNames, VIn, VOut, Renames, MemberNames),
   seed_types(TypeEntries, Namespace, ExportedTypeNames, TIn, TOut, ConstructorTags).
 
-% Names of declared types (the non-`constructor_key` keys of the interface).
+% Names of declared types (the non-`constructor_key` keys of the exports).
 exported_type_names([], []).
 exported_type_names([constructor_key(_) - _ | Rest], Names) :- !,
   exported_type_names(Rest, Names).

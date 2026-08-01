@@ -54,7 +54,7 @@ resolve_bare_constructors(program_node(Items), SeedTypeEnvironment, program_node
 % An `opaque` variant's constructors are matchable INSIDE the defining module
 % (opacity binds importers only), so opacity is ignored here; imported opaque
 % constructors never reach a seed environment in the first place (they are
-% excluded from the module interface at export).
+% excluded from the module exports at export).
 local_nullary_constructors([], []).
 local_nullary_constructors([public_node(Item, _) | Rest], Names) :- !,
   local_nullary_constructors([Item | Rest], Names).

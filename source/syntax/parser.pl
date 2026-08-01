@@ -270,19 +270,19 @@ from_clause(Tokens, Rest, Children, D0, D) :-
 
 % ===========================================================================
 % type NAME TypeParameters? ("=" DeclarationBody)?
-%   DeclarationBody :- "opaque"? (VariantBody | InterfaceBody) | TypeExpression
+%   DeclarationBody :- "opaque"? (VariantBody | ModuleTypeBody) | TypeExpression
 %   VariantBody     :- "|"? Constructor ("|" Constructor)*
 %   Constructor     :- Identifier ("(" TypeExpression+ ")")?
-%   InterfaceBody   :- "{" InterfaceMember* "}"
-%   InterfaceMember :- Identifier ":" TypeExpression
+%   ModuleTypeBody   :- "{" ModuleTypeMember* "}"
+%   ModuleTypeMember :- Identifier ":" TypeExpression
 %
 % A declaration WITHOUT `= body` is an ABSTRACT (FFI) type: nominal, with no
 % constructors anywhere -- its values arrive only through `external`s.
 %
-% An InterfaceBody ("module type") describes a module's public members by
-% name -- curly braces mark it as a module/interface shape, distinct from a
+% An ModuleTypeBody ("module type") describes a module's public members by
+% name -- curly braces mark it as a module/module type shape, distinct from a
 % record type's "(...)" and a variant's "|"-separated constructors.
-% `opaque` on an interface makes it NOMINAL (a module must explicitly
+% `opaque` on a module type makes it NOMINAL (a module must explicitly
 % ascribe to it to count as one); transparent (the default) makes it
 % STRUCTURAL, matched by shape at every use site -- the same opaque/
 % transparent axis as any other type declaration.
@@ -320,8 +320,8 @@ type_body(Tokens, Rest, Children, D0, D) :-
           variants(T1, Rest, VariantChildren, D0, D),
           Children = [node(opaque, OpaqueCh) | VariantChildren]
       ; peek_punct(T1, open_brace) ->
-          interface_body(T1, Rest, InterfaceNode, D0, D),
-          Children = [node(opaque, OpaqueCh), InterfaceNode]
+          module_type_body(T1, Rest, ModuleTypeNode, D0, D),
+          Children = [node(opaque, OpaqueCh), ModuleTypeNode]
       ; offset(T1, At),
         D0 = [diagnostic(At, At, opaque_alias_removed) | D1],
         type_expression(T1, Rest, TypeNode, D1, D),
@@ -330,8 +330,8 @@ type_body(Tokens, Rest, Children, D0, D) :-
   ; variant_lookahead(Tokens) ->
       variants(Tokens, Rest, Children, D0, D)
   ; peek_punct(Tokens, open_brace) ->
-      interface_body(Tokens, Rest, InterfaceNode, D0, D),
-      Children = [InterfaceNode]
+      module_type_body(Tokens, Rest, ModuleTypeNode, D0, D),
+      Children = [ModuleTypeNode]
   ; type_expression(Tokens, Rest, TypeNode, D0, D),
       Children = [TypeNode] ).
 
@@ -341,27 +341,27 @@ variant_lookahead(Tokens) :-
   skip_trivia(AfterIdent, _, [t(Kind, _, _, _) | _]),
   ( punct(open_paren, Kind) ; punct(bar, Kind) ).
 
-% An interface body: "{" InterfaceMember* "}".  Every member is named
-% (Identifier ":" TypeExpression) -- an interface describes a module's public
+% A module type body: "{" ModuleTypeMember* "}".  Every member is named
+% (Identifier ":" TypeExpression) -- a module type describes a module's public
 % members by name, so there is no positional form.
-interface_body(Tokens, Rest, node(interface, Children), D0, D) :-
+module_type_body(Tokens, Rest, node(module_type, Children), D0, D) :-
   bump(Tokens, T1, OpenCh),                            % `{`
-  interface_member_seq(T1, T2, MemberChildren, D0, D1),
+  module_type_member_seq(T1, T2, MemberChildren, D0, D1),
   expect_punct(close_brace, T2, Rest, CloseCh, D1, D),
   append(OpenCh, MemberChildren, C1), append(C1, CloseCh, Children).
 
-interface_member_seq(Tokens, Tokens, [], D, D) :-
+module_type_member_seq(Tokens, Tokens, [], D, D) :-
   ( peek_punct(Tokens, close_brace) ; peek(Tokens, eof) ), !.
-interface_member_seq(Tokens, Rest, [Member | Members], D0, D) :-
+module_type_member_seq(Tokens, Rest, [Member | Members], D0, D) :-
   peek(Tokens, ident), !,
-  interface_member(Tokens, T1, Member, D0, D1),
-  interface_member_seq(T1, Rest, Members, D1, D).
-interface_member_seq(Tokens, Rest, [node(error, Err) | Members], D0, D) :-
+  module_type_member(Tokens, T1, Member, D0, D1),
+  module_type_member_seq(T1, Rest, Members, D1, D).
+module_type_member_seq(Tokens, Rest, [node(error, Err) | Members], D0, D) :-
   offset(Tokens, At), bump(Tokens, T1, Err),
-  interface_member_seq(T1, Rest, Members, D1, D),
+  module_type_member_seq(T1, Rest, Members, D1, D),
   D0 = [diagnostic(At, At, unexpected_token) | D1].
 
-interface_member(Tokens, Rest, node(interface_member, Children), D0, D) :-
+module_type_member(Tokens, Rest, node(module_type_member, Children), D0, D) :-
   expect_kind(ident, Tokens, T1, NameCh, D0, D1),
   expect_punct(colon, T1, T2, ColonCh, D1, D2),
   type_expression(T2, Rest, TypeNode, D2, D),
@@ -400,7 +400,7 @@ constructor_node(Tokens, Rest, node(variant, Children), D0, D) :-
 % allowed); transparent (the default) makes it STRUCTURAL (its type is its
 % own inferred member row, matched by shape anywhere) -- the same opaque/
 % transparent axis `type` declarations already use.  The optional `: Type`
-% ascribes the module to a declared interface (or, via `+`, several at once);
+% ascribes the module to a declared module type (or, via `+`, several at once);
 % satisfying it is checked structurally regardless of the module's own
 % nominal/structural marker.  The optional `<T>` declares a type parameter
 % SHARED by every member (unlike each member independently writing its own
@@ -422,12 +422,12 @@ module_declaration(Tokens, Rest, node(module, Children), D0, D) :-
       type_parameters(Tokens2, Tokens2a, ParamsNode, D1, D1a),
       ParamsPart = [ParamsNode]
   ; ParamsPart = [], Tokens2a = Tokens2, D1a = D1 ),
-  ( peek_punct(Tokens2a, colon) ->                 % optional interface ascription
+  ( peek_punct(Tokens2a, colon) ->                 % optional module_type ascription
       bump(Tokens2a, Tokens3, ColonCh),
       % A full `type_expression/5`, not just `type_reference/5` -- this is
       % what lets the ascription be an INTERSECTION (`module A: B + C = ..`),
       % since `+` is parsed at the `type_expression` level (see the
-      % "INTERSECTION TYPES" grammar section above).  A plain single-interface
+      % "INTERSECTION TYPES" grammar section above).  A plain single-module type
       % ascription (`module A: B = ..`) still parses exactly the same as
       % before: `type_expression/5` falls through to a bare `type_reference`
       % whenever there is no `+` to see.
@@ -1104,7 +1104,7 @@ split_close(t(_, ['>', C | Cs], Start, End), t('>', ['>'], Start, Mid), t(RestKi
 %
 % WHY NO SEMANTIC VALIDATION HERE.  The parser has no idea what `B` or `C`
 % *mean* -- it only knows they are type expressions.  Whether each side is
-% actually "interface-shaped" (a declared `type X = {...}`, nominal or
+% actually "module type-shaped" (a declared `type X = {...}`, nominal or
 % structural) is a semantic question, checked later during type conversion
 % (see `type_environment.pl`'s new `intersection_type_node` clause).  Writing
 % `number + string` parses FINE here and is rejected downstream instead --

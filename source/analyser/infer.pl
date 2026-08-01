@@ -77,7 +77,7 @@
   declared_function_scheme/6,
   instantiate_constructor/7,
   union_constructor_names/3,
-  interface_row_for/7,
+  module_type_row_for/7,
   seed_externals/7
 ]).
 
@@ -210,13 +210,13 @@ infer_sequence_item(type_declaration_node(_, _, _, _, _), _Level, _InsideFunctio
 % members only -- private members are simply absent from the row (and, in
 % codegen, from the emitted object), so they are inaccessible from outside
 % both statically and at runtime.  `opaque` on the module marks its exposed
-% type NOMINAL (its own name, unregistered as an interface unless ascribed --
+% type NOMINAL (its own name, unregistered as a module type unless ascribed --
 % see the module documentation on why an unascribed opaque module does not
 % yet support `.field` access); transparent (the default) exposes the row
-% directly, structurally.  An explicit `: Interface` ascription overrides
-% either: the module's own natural row must `subsume` the interface's
-% declared row field-by-field, and the exposed type becomes the interface's
-% own (nominal or structural per the INTERFACE's own opacity, independent of
+% directly, structurally.  An explicit `: ModuleType` ascription overrides
+% either: the module's own natural row must `subsume` the module type's
+% declared row field-by-field, and the exposed type becomes the module type's
+% own (nominal or structural per the MODULE TYPE's own opacity, independent of
 % the module's own marker).
 %
 % `Parameters` (a module's own `<T>`, e.g. `module Stack<T> = {...}`) needs
@@ -257,33 +257,33 @@ infer_sequence_item(module_node(Name, Parameters, Opacity, Ascription, Items, _S
   infer_sequence(CleanItems, BodyLevel, InsideFunction, SeededEnvironment, ScopedTypeEnvironment, Context1,
                 _BodyLastType, BodyEnvironment, Context2),
   module_member_row(PublicValueNames, BodyEnvironment, MemberFieldsRaw),
-  ( Ascription = some(InterfaceTypeExpression) ->
+  ( Ascription = some(ModuleTypeExpression) ->
       % The ascription is converted in `ScopedTypeEnvironment` too (not the
       % plain outer one) -- it may itself reference the module's own `T`,
       % e.g. `module Stack<T>: Container<T> = {...}`.
-      convert_annotation_type(InterfaceTypeExpression, ScopedTypeEnvironment, BodyLevel, Context2, InterfaceTypeRaw, Context3),
-      % `InterfaceTypeRaw` is either a SINGLE interface (`module A: B = {...}`,
+      convert_annotation_type(ModuleTypeExpression, ScopedTypeEnvironment, BodyLevel, Context2, ModuleTypeRaw, Context3),
+      % `ModuleTypeRaw` is either a SINGLE module type (`module A: B = {...}`,
       % `type_constructor` if `B` is opaque, `record_type` if transparent) or,
       % when the ascription used `+`, an `intersection_type(Members)` (each
       % Member itself a `type_constructor`/`record_type` the same way).  Either
-      % way the module's own row must satisfy EVERY interface named -- for a
-      % single interface that's one check; for `B + C` it's one check PER
+      % way the module's own row must satisfy EVERY module type named -- for a
+      % single module type that's one check; for `B + C` it's one check PER
       % member, all against the SAME module row (see
       % `check_module_satisfies_each/7` below).  The check runs BEFORE the
       % skolem substitution just below, while `T` is still the same rigid
       % skolem on both sides (the module's row and, if the ascription
-      % mentioned `T`, the interface's row too) -- substituting first would
+      % mentioned `T`, the module type's row too) -- substituting first would
       % make them impossible to relate to each other correctly.
-      ( InterfaceTypeRaw = intersection_type(InterfaceMembers) ->
-          check_module_satisfies_each(InterfaceMembers, MemberFieldsRaw, Name, ScopedTypeEnvironment, BodyLevel, Context3, Context5)
-      ; check_module_satisfies_one(InterfaceTypeRaw, MemberFieldsRaw, Name, ScopedTypeEnvironment, BodyLevel, Context3, Context5)
+      ( ModuleTypeRaw = intersection_type(ModuleTypeMembers) ->
+          check_module_satisfies_each(ModuleTypeMembers, MemberFieldsRaw, Name, ScopedTypeEnvironment, BodyLevel, Context3, Context5)
+      ; check_module_satisfies_one(ModuleTypeRaw, MemberFieldsRaw, Name, ScopedTypeEnvironment, BodyLevel, Context3, Context5)
       ),
       % NOW swap `T`'s skolem back to its flexible replacement -- in whatever
-      % `InterfaceTypeRaw` turned out to be (a plain interface reference or
+      % `ModuleTypeRaw` turned out to be (a plain module type reference or
       % an intersection; `substitute_skolems/3` dispatches on shape and
       % recurses into an `intersection_type`'s members the same way it
       % recurses into a `type_constructor`'s arguments, see types.pl).
-      substitute_skolems(InterfaceTypeRaw, SkolemPairs, ModuleType0)
+      substitute_skolems(ModuleTypeRaw, SkolemPairs, ModuleType0)
   ; Opacity == opaque ->
       % An unascribed opaque module's synthetic identity ignores `T`
       % entirely (this is the same pre-existing scope limit noted above: it
@@ -407,53 +407,53 @@ module_member_row([MemberName | Names], Environment,
   ),
   module_member_row(Names, Environment, Fields).
 
-% Check the module's own row satisfies an ascribed interface's declared row,
+% Check the module's own row satisfies an ascribed module type's declared row,
 % field by field: the module's actual member type must be at least as
-% general as the interface's declared type -- `subsume/5`, the same
+% general as the module type's declared type -- `subsume/5`, the same
 % "actual-as-polymorphic-as-expected" check already used for Rank-N generics,
 % instantiating the module's member if it is itself generic and skolemising
-% the interface's expectation if IT is generic.
+% the module type's expectation if IT is generic.
 check_module_satisfies([], _MemberFields, _Name, _Level, Context, Context).
 check_module_satisfies([record_field(_, label(MemberName), ExpectedType) | Rest], MemberFields, Name, Level,
                        ContextIn, ContextOut) :-
   ( memberchk(record_field(_, label(MemberName), ActualType), MemberFields) ->
       subsume(ActualType, ExpectedType, Level, ContextIn, Context1)
-  ; throw(analysis_error(missing_interface_member(Name, MemberName)))
+  ; throw(analysis_error(missing_module_type_member(Name, MemberName)))
   ),
   check_module_satisfies(Rest, MemberFields, Name, Level, Context1, ContextOut).
 
-% check_module_satisfies_one(+InterfaceType, +MemberFields, +Name, +TypeEnvironment,
+% check_module_satisfies_one(+ModuleType, +MemberFields, +Name, +TypeEnvironment,
 %                            +Level, +ContextIn, -ContextOut).
 %
-% Resolve ONE ascribed interface -- `InterfaceType` is whatever
+% Resolve ONE ascribed module type -- `ModuleType` is whatever
 % `convert_annotation_type` produced for it, either a `type_constructor`
-% (the interface is `opaque`: nominal, so its row is hidden from ordinary
+% (the module type is `opaque`: nominal, so its row is hidden from ordinary
 % unification and has to be looked up explicitly, the same way nominal
-% FIELD ACCESS does via `interface_row_for/7`) or a `record_type` directly
-% (the interface is transparent: already its own row, nothing to look up)
+% FIELD ACCESS does via `module_type_row_for/7`) or a `record_type` directly
+% (the module type is transparent: already its own row, nothing to look up)
 % -- to its member row, then delegate to `check_module_satisfies/6` above.
-% This is the single-interface case (`module A: B = {...}`) AND, called once
+% This is the single-module type case (`module A: B = {...}`) AND, called once
 % per member, the building block for the intersection case
 % (`module A: B + C = {...}`) right below.
-check_module_satisfies_one(InterfaceType, MemberFields, Name, TypeEnvironment, Level, ContextIn, ContextOut) :-
-  ( InterfaceType = type_constructor(InterfaceName, InterfaceArguments) ->
-      interface_row_for(InterfaceName, InterfaceArguments, TypeEnvironment, Level, ContextIn, InterfaceRow, Context1)
-  ; InterfaceType = record_type(InterfaceRow, _) ->
+check_module_satisfies_one(ModuleType, MemberFields, Name, TypeEnvironment, Level, ContextIn, ContextOut) :-
+  ( ModuleType = type_constructor(ModuleTypeName, ModuleTypeArguments) ->
+      module_type_row_for(ModuleTypeName, ModuleTypeArguments, TypeEnvironment, Level, ContextIn, ModuleTypeRow, Context1)
+  ; ModuleType = record_type(ModuleTypeRow, _) ->
       Context1 = ContextIn
-  ; throw(analysis_error(not_an_interface_ascription(Name)))
+  ; throw(analysis_error(not_a_module_type_ascription(Name)))
   ),
-  check_module_satisfies(InterfaceRow, MemberFields, Name, Level, Context1, ContextOut).
+  check_module_satisfies(ModuleTypeRow, MemberFields, Name, Level, Context1, ContextOut).
 
 % Ascribing to `B + C` means satisfying EACH of B and C independently,
 % against the SAME module row -- there is no "merged" row to build and check
 % once; `MemberFields` (the module's own row) is passed to every member's
 % own `check_module_satisfies_one` call unchanged.  A module missing a
-% member of ANY one interface fails here with that interface's own
-% `missing_interface_member`/`type_mismatch`-style error, exactly as it
-% would if it were ascribed to that interface alone.
+% member of ANY one module type fails here with that module type's own
+% `missing_module_type_member`/`type_mismatch`-style error, exactly as it
+% would if it were ascribed to that module type alone.
 check_module_satisfies_each([], _MemberFields, _Name, _TypeEnvironment, _Level, Context, Context).
-check_module_satisfies_each([InterfaceType | Rest], MemberFields, Name, TypeEnvironment, Level, ContextIn, ContextOut) :-
-  check_module_satisfies_one(InterfaceType, MemberFields, Name, TypeEnvironment, Level, ContextIn, Context1),
+check_module_satisfies_each([ModuleType | Rest], MemberFields, Name, TypeEnvironment, Level, ContextIn, ContextOut) :-
+  check_module_satisfies_one(ModuleType, MemberFields, Name, TypeEnvironment, Level, ContextIn, Context1),
   check_module_satisfies_each(Rest, MemberFields, Name, TypeEnvironment, Level, Context1, ContextOut).
 
 % ---------------------------------------------------------------------------
@@ -530,7 +530,7 @@ infer(block_node(Expressions, _), Level, InsideFunction, Environment, TypeEnviro
 % mutability.  The open tail is what makes `(p) p.x` row-polymorphic: the
 % target need not be a fully known record.
 %
-% When the target is instead a NOMINAL type (a module or interface value --
+% When the target is instead a NOMINAL type (a module or module type value --
 % an ordinary tagged union has no fields to access this way, its values are
 % inspected only through `match`), its row is looked up regardless of its own
 % opacity: opacity governs whether some OTHER, differently-named value may
@@ -541,7 +541,7 @@ infer(access_node(Target, Accessor, _), Level, InsideFunction, Environment, Type
   accessor_key(Accessor, Key),
   resolve_head(TargetType, Context1, ResolvedTarget),
   ( ResolvedTarget = type_constructor(TypeName, TypeArguments) ->
-      interface_row_for(TypeName, TypeArguments, TypeEnvironment, Level, Context1, Fields, ContextOut),
+      module_type_row_for(TypeName, TypeArguments, TypeEnvironment, Level, Context1, Fields, ContextOut),
       ( memberchk(record_field(_, Key, FieldType), Fields) ->
           true
       ; throw(analysis_error(unknown_member(TypeName, Key)))

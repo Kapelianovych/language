@@ -27,11 +27,11 @@ bad_program('empty string interpolation',
 bad_program('annotated definition whose value mismatches',
             "x: number = (y) y\n",
             type_mismatch(_, _)).
-bad_program('module ascribed to an interface it does not satisfy (missing member)',
-            "type Interface = {\n  foo: (number): number\n}\nopaque module Impl: Interface = {\n  public bar = (n) n\n}\n",
-            missing_interface_member(_, _)).
-bad_program('module ascribed to an interface it does not satisfy (wrong member type)',
-            "type Interface = {\n  foo: (number): number\n}\nopaque module Impl: Interface = {\n  public foo = (n) n == 0\n}\n",
+bad_program('module ascribed to a module type it does not satisfy (missing member)',
+            "type ModuleType = {\n  foo: (number): number\n}\nopaque module Impl: ModuleType = {\n  public bar = (n) n\n}\n",
+            missing_module_type_member(_, _)).
+bad_program('module ascribed to a module type it does not satisfy (wrong member type)',
+            "type ModuleType = {\n  foo: (number): number\n}\nopaque module Impl: ModuleType = {\n  public foo = (n) n == 0\n}\n",
             type_mismatch(_, _)).
 bad_program('multi-bound generic called with a value satisfying only one bound',
             "public type Logger = {\n  info: (number): number\n}\npublic type Named = {\n  tag: number\n}\nopaque module OnlyLogger: Logger = {\n  public info = (n) n + 1\n}\npublic identity = <A: Logger + Named>(x: A): A x\npublic result = identity(OnlyLogger)\n",

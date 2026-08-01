@@ -60,26 +60,26 @@
 analyse(AST, Result) :-
   empty_assoc(EmptyValueEnvironment),
   empty_assoc(EmptyTypeEnvironment),
-  analyse_module(AST, EmptyValueEnvironment, EmptyTypeEnvironment, Result, _Interface).
+  analyse_module(AST, EmptyValueEnvironment, EmptyTypeEnvironment, Result, _Exports).
 
-% analyse_module(+AST, +SeedValueEnvironment, +SeedTypeEnvironment, -Result, -Interface).
+% analyse_module(+AST, +SeedValueEnvironment, +SeedTypeEnvironment, -Result, -Exports).
 %
 % Type-checks one module.  `SeedValueEnvironment` / `SeedTypeEnvironment` are
 % assocs pre-populated by the module loader with the entries this module
 % imports (values, type names, and `constructor_key/1` constructor entries).
-% `Result` is the usual `analysis_result(Type, Substitution)`.  `Interface` is
-% `module_interface(ValueEntries, TypeEntries)`: the assoc-ready entries this
+% `Result` is the usual `analysis_result(Type, Substitution)`.  `Exports` is
+% `module_exports(ValueEntries, TypeEntries)`: the assoc-ready entries this
 % module makes `public`, ready to seed an importing module.
 %
 % `public` wrappers are unwrapped and `use` / `use_all` declarations dropped
 % before inference (the loader has already turned imports into seed entries);
-% the set of exported names is remembered so the interface can be collected
+% the set of exported names is remembered so the exports can be collected
 % afterwards.  A nested `module` is NOT erased -- `infer.pl`'s own
 % `infer_sequence_item` clause for `module_node` type-checks it directly,
 % producing a genuine record value (see infer.pl's module documentation).
 analyse_module(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment,
                analysis_result(Type, Substitution),
-               module_interface(ValueEntries, TypeEntries)) :-
+               module_exports(ValueEntries, TypeEntries)) :-
   normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
   CleanAST = program_node(CleanItems),
   build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),
@@ -96,14 +96,14 @@ analyse_module(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment,
   collect_exports(PublicValueNames, PublicTypeDeclarations, FinalEnvironment, TypeEnvironment,
                   ValueEntries, TypeEntries).
 
-% analyse_accumulating(+AST, +SeedValueEnv, +SeedTypeEnv, -Errors, -DefinitionTypes, -Interface).
+% analyse_accumulating(+AST, +SeedValueEnv, +SeedTypeEnv, -Errors, -DefinitionTypes, -Exports).
 %
 % The SAME checker as `analyse_module/5` -- identical environment setup and the
 % identical inference rules -- but it ACCUMULATES type errors instead of
 % throwing on the first (via `infer:infer_program_accumulating/7`).  `Errors` is
 % a list of `error_at(Span, Reason)`.  `DefinitionTypes` is `Name - ResolvedType`
-% for each top-level definition (for editor hover).  `Interface` is this module's
-% `module_interface(ValueEntries, TypeEntries)` -- exactly the shape
+% for each top-level definition (for editor hover).  `Exports` is this module's
+% `module_exports(ValueEntries, TypeEntries)` -- exactly the shape
 % `analyse_module/5` produces -- so the incremental engine can seed an importing
 % file's environment from it (cross-file imports).  This is the single
 % full-coverage checker the LSP / incremental engine uses; the batch compiler
@@ -111,10 +111,10 @@ analyse_module(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment,
 %
 % Export collection here is BEST-EFFORT (unlike `collect_exports/6`, which
 % throws): in an editor a module is often mid-edit, so a public name whose body
-% failed to type is simply omitted from the interface rather than aborting the
+% failed to type is simply omitted from the exports rather than aborting the
 % whole analysis.
 analyse_accumulating(program_node(Items), SeedValueEnvironment, SeedTypeEnvironment, Errors, DefinitionTypes,
-                     module_interface(ValueEntries, TypeEntries)) :-
+                     module_exports(ValueEntries, TypeEntries)) :-
   normalise_items(Items, CleanItems, PublicValueNames, PublicTypeDeclarations),
   CleanAST = program_node(CleanItems),
   build_type_environment(CleanAST, SeedTypeEnvironment, TypeEnvironment, ConstructorBindings),

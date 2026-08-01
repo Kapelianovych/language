@@ -209,7 +209,7 @@ module.exports = grammar({
       optional(seq(
         '=',
         optional('opaque'),
-        choice($.variant_body, $.interface_body, $._type_expression),
+        choice($.variant_body, $.module_type_body, $._type_expression),
       )),
     ),
 
@@ -233,13 +233,13 @@ module.exports = grammar({
       optional(seq('(', sepBy1($, $._type_expression), ')')),
     )),
 
-    interface_body: $ => seq(
+    module_type_body: $ => seq(
       '{',
-      repeat($.interface_member),
+      repeat($.module_type_member),
       '}',
     ),
 
-    interface_member: $ => seq(
+    module_type_member: $ => seq(
       field('name', $.identifier),
       ':',
       field('type', $._type_expression),

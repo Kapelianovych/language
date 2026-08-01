@@ -87,7 +87,7 @@ check_macro_set(MacroDefinitions, CompilerImportNames) :-
   seed_environments(CompilerImportNames, SeedValueEnvironment, SeedTypeEnvironment),
   desugar_macros(MacroDefinitions, DesugaredDefinitions),
   analyse_module(program_node(DesugaredDefinitions),
-                 SeedValueEnvironment, SeedTypeEnvironment, _Result, _Interface).
+                 SeedValueEnvironment, SeedTypeEnvironment, _Result, _Exports).
 
 % require_parse_item_import(+MacroDefinitions, +CompilerImportNames).
 %

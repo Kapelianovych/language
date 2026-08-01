@@ -3,7 +3,7 @@ public type Logger = {
 }
 
 opaque module ConsoleLogger: Logger = {
-  public info = (message) message
+  public info = (message) ()
 }
 
 public module Optional = {

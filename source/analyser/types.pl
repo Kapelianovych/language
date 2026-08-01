@@ -619,7 +619,7 @@ collect_unification_variable_ids(Type, Accumulator, Ids) :-
       % by calling THIS predicate first (`collect_unification_variable_ids`)
       % -- if it didn't know to look inside an intersection's members, any
       % still-free variable living in `B` or `C` (e.g. from a generic
-      % interface) would never be discovered, and so would never be
+      % module type) would never be discovered, and so would never be
       % generalized -- it would stay a bare, ungeneralized unification
       % variable, silently shared (and wrongly unified) across every future
       % use of that module, instead of being properly abstracted per use.
@@ -813,7 +813,7 @@ substitute_skolems(Type, Mapping, Out) :-
       % rigid skolems are swapped back to flexible variables in its result
       % type before that type is generalized.  If the result type happens to
       % be (or contain) an intersection -- e.g. a generic module ascribed to
-      % an interface that itself mentions the module's own type parameter --
+      % a module type that itself mentions the module's own type parameter --
       % the swap has to reach inside its members too, or a rigid skolem
       % would be left stranded where a flexible variable was expected.
       substitute_skolems_list(Members, Mapping, Members1),
