@@ -177,8 +177,12 @@ export_constructor_list_best_effort([constructor(CtorName, _Fields, _) | Rest], 
 definition_types([], _Environment, _Context, []).
 definition_types([definition_node(identifier_node(Name, _), _, _, _) | Rest], Environment, Context,
                  [Name - Resolved | DefinitionTypes]) :- !,
-  ( get_assoc(Name, Environment, defined(type_scheme(_, Body))) ->
-      fully_resolve(Body, Context, Resolved)
+  ( get_assoc(Name, Environment, defined(type_scheme(QuantifiedIdentifiers, Body))) ->
+      fully_resolve(Body, Context, ResolvedBody),
+      ( QuantifiedIdentifiers = [] ->
+          Resolved = ResolvedBody
+      ; Resolved = forall_type(QuantifiedIdentifiers, ResolvedBody)
+      )
   ; Resolved = unknown ),
   definition_types(Rest, Environment, Context, DefinitionTypes).
 % An `external Name: Type = ...` (foreign JS import) has no VALUE to check
@@ -191,8 +195,12 @@ definition_types([definition_node(identifier_node(Name, _), _, _, _) | Rest], En
 % nothing, even though its declared type is right there in the source.
 definition_types([external_node(Name, _Type, _Source, _Span) | Rest], Environment, Context,
                  [Name - Resolved | DefinitionTypes]) :- !,
-  ( get_assoc(Name, Environment, defined(type_scheme(_, Body))) ->
-      fully_resolve(Body, Context, Resolved)
+  ( get_assoc(Name, Environment, defined(type_scheme(QuantifiedIdentifiers, Body))) ->
+      fully_resolve(Body, Context, ResolvedBody),
+      ( QuantifiedIdentifiers = [] ->
+          Resolved = ResolvedBody
+      ; Resolved = forall_type(QuantifiedIdentifiers, ResolvedBody)
+      )
   ; Resolved = unknown ),
   definition_types(Rest, Environment, Context, DefinitionTypes).
 % A `module Name<Params> = { ... }` binds `Name` to the module's own value
@@ -227,8 +235,12 @@ definition_types([external_node(Name, _Type, _Source, _Span) | Rest], Environmen
 % no worse than any other shadowed name already is in this hover model.
 definition_types([module_node(Name, _Parameters, _Opacity, _Ascription, _Items, _Span) | Rest],
                  Environment, Context, AllDefinitionTypes) :- !,
-  ( get_assoc(Name, Environment, defined(type_scheme(_, Body))) ->
-      fully_resolve(Body, Context, Resolved)
+  ( get_assoc(Name, Environment, defined(type_scheme(QuantifiedIdentifiers, Body))) ->
+      fully_resolve(Body, Context, ResolvedBody),
+      ( QuantifiedIdentifiers = [] ->
+          Resolved = ResolvedBody
+      ; Resolved = forall_type(QuantifiedIdentifiers, ResolvedBody)
+      )
   ; Resolved = unknown ),
   module_member_types(Resolved, MemberDefinitionTypes),
   definition_types(Rest, Environment, Context, RestDefinitionTypes),
