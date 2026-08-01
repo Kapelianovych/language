@@ -378,8 +378,8 @@ convert_proper_each([TypeExpression | Rest], Environment, Expanding, Level, Cont
 % was written somewhere it cannot be interpreted.
 convert_type(type_hole(_), _Environment, _Expanding, _Level, _ContextIn, _MonoType, _Kind, _ContextOut) :- !,
   throw(analysis_error(unexpected_type_hole)).
-convert_type(tuple_type_node(Members, Openness, _), Environment, Expanding, Level, ContextIn,
-             tuple_type(Fields, Tail), 0, ContextOut) :- !,
+convert_type(record_type_node(Members, Openness, _), Environment, Expanding, Level, ContextIn,
+             record_type(Fields, Tail), 0, ContextOut) :- !,
   convert_members(Members, 0, Environment, Expanding, Level, ContextIn, Fields, Context1),
   tail_for(Openness, Environment, Level, Context1, Tail, ContextOut).
 convert_type(function_type_node(Parameters, Return, _), Environment, Expanding, Level, ContextIn,
@@ -450,7 +450,7 @@ require_interface_shaped(type_name_node(Name, _Arguments, _), Environment) :- !,
   ( get_assoc(Name, Environment, type_interface_info(_, _, _)) -> true
   ; throw(analysis_error(not_an_interface(Name)))
   ).
-require_interface_shaped(tuple_type_node(_, _, _), _Environment) :- !.
+require_interface_shaped(record_type_node(_, _, _), _Environment) :- !.
 require_interface_shaped(Member, _Environment) :-
   throw(analysis_error(not_an_interface_expression(Member))).
 
@@ -522,13 +522,13 @@ convert_named(type_declaration_info(transparent, Parameters, Body), Name, Argume
 % An interface (module type) is NOMINAL when `opaque` (a module must
 % explicitly ascribe to satisfy it, exactly like an opaque alias) or a
 % STRUCTURAL row when transparent (the default): expanded to a closed
-% `tuple_type` of its members at the use site, so any value -- a module or an
+% `record_type` of its members at the use site, so any value -- a module or an
 % ordinary record -- with a compatible shape satisfies it.
 convert_named(type_interface_info(opaque, Parameters, _Members), Name, Arguments, Environment,
               Expanding, Level, ContextIn, MonoType, Kind, ContextOut) :- !,
   nominal_reference(Name, Parameters, Arguments, Environment, Expanding, Level, ContextIn, MonoType, Kind, ContextOut).
 convert_named(type_interface_info(transparent, Parameters, Members), Name, Arguments, Environment,
-              Expanding, Level, ContextIn, tuple_type(Fields, closed), 0, ContextOut) :-
+              Expanding, Level, ContextIn, record_type(Fields, closed), 0, ContextOut) :-
   parameter_arity(Parameters, ParameterArity),
   length(Arguments, Given),
   ( Given =:= ParameterArity ->
@@ -706,12 +706,12 @@ bind_alias_parameters([type_parameter(Name, Kind, _Bound, _) | Parameters], [Arg
   put_assoc(Name, EnvironmentIn, type_parameter_binding(Argument, Kind), Environment1),
   bind_alias_parameters(Parameters, Arguments, Environment1, EnvironmentOut).
 
-% A tuple type's members become keyed fields: positional members get
+% A record type's members become keyed fields: positional members get
 % sequential `index` keys, labeled members get `label` keys.
 convert_members([], _Index, _Environment, _Expanding, _Level, Context, [], Context).
-convert_members([tuple_type_member(Mutability, Label, TypeExpression, _) | Members], Index,
+convert_members([record_type_member(Mutability, Label, TypeExpression, _) | Members], Index,
                 Environment, Expanding, Level, ContextIn,
-                [tuple_field(Mutability, Key, Type) | Fields], ContextOut) :-
+                [record_field(Mutability, Key, Type) | Fields], ContextOut) :-
   type_member_key(Label, Index, Key, NextIndex),
   convert_proper(TypeExpression, Environment, Expanding, Level, ContextIn, Type, Context1),
   convert_members(Members, NextIndex, Environment, Expanding, Level, Context1, Fields, ContextOut).
@@ -724,7 +724,7 @@ type_member_key(labeled(Name), Index, label(Name), Index).
 % every member is named, so there is no positional form to key by index.
 convert_interface_members([], _Environment, _Expanding, _Level, Context, [], Context).
 convert_interface_members([interface_member(Name, TypeExpression, _) | Members], Environment, Expanding, Level,
-                          ContextIn, [tuple_field(readonly, label(Name), Type) | Fields], ContextOut) :-
+                          ContextIn, [record_field(readonly, label(Name), Type) | Fields], ContextOut) :-
   convert_proper(TypeExpression, Environment, Expanding, Level, ContextIn, Type, Context1),
   convert_interface_members(Members, Environment, Expanding, Level, Context1, Fields, ContextOut).
 

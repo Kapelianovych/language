@@ -35,7 +35,7 @@ bad_program('module ascribed to an interface it does not satisfy (wrong member t
             type_mismatch(_, _)).
 bad_program('multi-bound generic called with a value satisfying only one bound',
             "public type Logger = {\n  info: (number): number\n}\npublic type Named = {\n  tag: number\n}\nopaque module OnlyLogger: Logger = {\n  public info = (n) n + 1\n}\npublic identity = <A: Logger + Named>(x: A): A x\npublic result = identity(OnlyLogger)\n",
-            tuple_field_mismatch(_)).
+            record_field_mismatch(_)).
 
 error_results(Results) :-
   findall(Result, error_check(Result), Results).

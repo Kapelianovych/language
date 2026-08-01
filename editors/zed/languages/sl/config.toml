@@ -7,9 +7,8 @@ path_suffixes = ["sl"]
 line_comments = ["# "]
 autoclose_before = ")}>"
 
-# The language has no `[`/`]` at all (see grammar) -- tuples
-# and records use `(...)`, blocks use `{...}`, generics/type-arguments use
-# `<...>`.
+# The language has no `[`/`]` at all (see grammar) -- records use `(...)`,
+# blocks use `{...}`, generics/type-arguments use `<...>`.
 brackets = [
   { start = "(", end = ")", close = true, newline = false },
   { start = "{", end = "}", close = true, newline = true },

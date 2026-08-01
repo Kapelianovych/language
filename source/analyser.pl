@@ -207,7 +207,7 @@ definition_types([external_node(Name, _Type, _Source, _Span) | Rest], Environmen
 % `Name`-keyed scheme for e.g. `wrap` to look up directly here.
 %
 % But a TRANSPARENT module's resolved type already IS that row: one
-% `tuple_field(_, label(MemberName), MemberType)` per public member (see
+% `record_field(_, label(MemberName), MemberType)` per public member (see
 % `module_member_row/3`). So once the module's own type is resolved below,
 % each member's type is just a field lookup away (`module_member_types/2`) --
 % no need to reach back into that discarded private environment at all. An
@@ -240,9 +240,9 @@ definition_types([_Other | Rest], Environment, Context, DefinitionTypes) :-
 % `MemberName - MemberType` out of a transparent module's own resolved row
 % type. Anything else (an opaque module's synthetic `type_constructor(Name,
 % [])`, or `unknown`) has no derivable members, so yields none.
-module_member_types(tuple_type(Fields, _Tail), MemberDefinitionTypes) :- !,
+module_member_types(record_type(Fields, _Tail), MemberDefinitionTypes) :- !,
   findall(MemberName - MemberType,
-          member(tuple_field(_, label(MemberName), MemberType), Fields),
+          member(record_field(_, label(MemberName), MemberType), Fields),
           MemberDefinitionTypes).
 module_member_types(_Other, []).
 

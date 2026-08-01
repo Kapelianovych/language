@@ -184,7 +184,7 @@ maplist_surface([Type | Types], Exported, Namespace, [Type1 | Types1]) :-
 prefix_surface(type_name_node(Name, Arguments, Span), Exported, Namespace, type_name_node(Name1, Arguments1, Span)) :- !,
   prefix_type_name(Name, Exported, Namespace, Name1),
   prefix_surface_arguments(Arguments, Exported, Namespace, Arguments1).
-prefix_surface(tuple_type_node(Members, Openness, Span), Exported, Namespace, tuple_type_node(Members1, Openness, Span)) :- !,
+prefix_surface(record_type_node(Members, Openness, Span), Exported, Namespace, record_type_node(Members1, Openness, Span)) :- !,
   prefix_surface_members(Members, Exported, Namespace, Members1).
 prefix_surface(function_type_node(Parameters, Return, Span), Exported, Namespace,
                function_type_node(Parameters1, Return1, Span)) :- !,
@@ -208,8 +208,8 @@ prefix_surface_arguments([Argument | Rest], Exported, Namespace, [Argument1 | Re
   prefix_surface_arguments(Rest, Exported, Namespace, Rest1).
 
 prefix_surface_members([], _Exported, _Namespace, []).
-prefix_surface_members([tuple_type_member(Mut, Label, Type, Span) | Rest], Exported, Namespace,
-                       [tuple_type_member(Mut, Label, Type1, Span) | Rest1]) :-
+prefix_surface_members([record_type_member(Mut, Label, Type, Span) | Rest], Exported, Namespace,
+                       [record_type_member(Mut, Label, Type1, Span) | Rest1]) :-
   prefix_surface(Type, Exported, Namespace, Type1),
   prefix_surface_members(Rest, Exported, Namespace, Rest1).
 
@@ -226,7 +226,7 @@ prefix_mono(constructor_ref(Name), Exported, Namespace, constructor_ref(Name1)) 
 prefix_mono(function_type(Parameters, Return), Exported, Namespace, function_type(Parameters1, Return1)) :- !,
   prefix_mono_list(Parameters, Exported, Namespace, Parameters1),
   prefix_mono(Return, Exported, Namespace, Return1).
-prefix_mono(tuple_type(Fields, Tail), Exported, Namespace, tuple_type(Fields1, Tail1)) :- !,
+prefix_mono(record_type(Fields, Tail), Exported, Namespace, record_type(Fields1, Tail1)) :- !,
   prefix_mono_fields(Fields, Exported, Namespace, Fields1),
   prefix_mono(Tail, Exported, Namespace, Tail1).
 prefix_mono(forall_type(Ids, Body), Exported, Namespace, forall_type(Ids, Body1)) :- !,
@@ -245,8 +245,8 @@ prefix_mono_list([Type | Types], Exported, Namespace, [Type1 | Types1]) :-
   prefix_mono_list(Types, Exported, Namespace, Types1).
 
 prefix_mono_fields([], _Exported, _Namespace, []).
-prefix_mono_fields([tuple_field(Mut, Key, Type) | Rest], Exported, Namespace,
-                   [tuple_field(Mut, Key, Type1) | Rest1]) :-
+prefix_mono_fields([record_field(Mut, Key, Type) | Rest], Exported, Namespace,
+                   [record_field(Mut, Key, Type1) | Rest1]) :-
   prefix_mono(Type, Exported, Namespace, Type1),
   prefix_mono_fields(Rest, Exported, Namespace, Rest1).
 

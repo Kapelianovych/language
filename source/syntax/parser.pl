@@ -281,7 +281,7 @@ from_clause(Tokens, Rest, Children, D0, D) :-
 %
 % An InterfaceBody ("module type") describes a module's public members by
 % name -- curly braces mark it as a module/interface shape, distinct from a
-% tuple/record type's "(...)" and a variant's "|"-separated constructors.
+% record type's "(...)" and a variant's "|"-separated constructors.
 % `opaque` on an interface makes it NOMINAL (a module must explicitly
 % ascribe to it to count as one); transparent (the default) makes it
 % STRUCTURAL, matched by shape at every use site -- the same opaque/
@@ -574,11 +574,11 @@ postfixable(node(Kind, _)) :-
   \+ member(Kind, [block, conditional, match, quote, unquote, function]).
 
 % Accessor :- Identifier | DecimalDigit+ (grammar).  A numeric accessor names
-% a positional tuple member: `t.0`.  The lexer knows nothing about access
+% a positional record member: `t.0`.  The lexer knows nothing about access
 % chains, so in `t.0.1` it reads `0.1` as ONE float token; the accessor is
 % only the leading digit run, so the token is SPLIT there and the remainder is
 % pushed back as a fresh `.` token plus number token for the next chain step
-% to consume.  The split halves' texts concatenate to the original token's
+% to consume. The split halves' texts concatenate to the original token's
 % text, so the tree stays lossless.
 accessor(Tokens, Rest, Children, D0, D) :-
   ( peek(Tokens, number) ->
@@ -678,7 +678,7 @@ definition_annotation(Tokens, Rest, Children, D0, D) :-
 
 % ===========================================================================
 % Atoms (including the keyword expressions `if` and `match`, and the `(...)`
-% form which is a tuple/record OR a function literal -- see paren_or_function).
+% form which is a record OR a function literal -- see paren_or_function).
 % ===========================================================================
 
 atom_expression(Tokens, Rest, Node, D0, D) :-
@@ -814,7 +814,7 @@ pattern(Tokens, Rest, Node, D0, D) :-
       pattern_member_sequence(T1, T2, SubCh, D0, D1),
       expect_punct(close_paren, T2, Rest, CloseCh, D1, D),
       append(OpenCh, SubCh, C1), append(C1, CloseCh, Children),
-      Node = node(tuple_pattern, Children)
+      Node = node(record_pattern, Children)
   ;   offset(Tokens, At),
       Node = node(error, [t(missing, [], At, At)]), Rest = Tokens,
       D0 = [diagnostic(At, At, expected_pattern) | D]
@@ -868,14 +868,15 @@ labeled_pattern_ahead(Tokens) :-
   punct(eq, Kind).
 
 % ===========================================================================
-% Parenthesised form: tuple / record literal, OR a function literal when the
+% Parenthesised form: record literal, OR a function literal when the
 % closing `)` is followed by `: returntype body` -- or (annotation-free form)
 % when every member is parameter-shaped and an expression follows.
 %
-%   (a + b)                 -> tuple
-%   (10 20)  (x = 1 y = 2)  -> tuple / record (space-separated members)
+%   (a + b)                               -> record with one positional property
+%   (10 20)  (x = 1 y = 2)                -> records with two positional properties and
+%                                            record with two labeled properties (space-separated members)
 %   (a: number b: number): number  BODY   -> function
-%   (n) n                   -> function (grammar: TypeAnnotation? is optional)
+%   (n) n                                 -> function (grammar: TypeAnnotation? is optional)
 %
 % Members are space-separated; a member may carry a `: type` annotation and an
 % optional `mutable` prefix, or be a `..value` spread.
@@ -899,13 +900,13 @@ paren_or_function(Tokens, Rest, Node, D0, D) :-
   ; parameter_members(MemberChildren), function_body_follows(T3) ->
       % Annotation-free function literal: `(n) n`.  The grammar is
       % whitespace-insensitive, so a parameter-shaped `(...)` followed by an
-      % expression is genuinely ambiguous between a tuple and an independent
+      % expression is genuinely ambiguous between a record and an independent
       % next expression versus one function literal; the language resolves
       % the ambiguity in favour of the function.  Committing requires BOTH
       % conditions: members that are valid parameters (so `(a + b)`,
-      % `(x = 1)`, `(10 20)` stay tuples) and a following expression starter
+      % `(x = 1)`, `(10 20)` stay records) and a following expression starter
       % (so a trailing `(..)` at end of block, `(a).f`, `(a) = v` stay
-      % tuples).
+      % records).
       expression(0, T3, Rest, Body, D2, D),
       append(GroupChildren, [Body], Children),
       Node = node(function, Children)
@@ -913,7 +914,7 @@ paren_or_function(Tokens, Rest, Node, D0, D) :-
 
 % Every member is parameter-shaped: an irrefutable pattern with an optional
 % `: type` annotation.  A `mutable` prefix, a spread, a literal, a labeled
-% member (`x = 1`) or any compound expression rules the form a tuple.
+% member (`x = 1`) or any compound expression rules the form a record.
 parameter_members([]).
 parameter_members([node(member, [Value | _]) | Ms]) :-
   parameter_value(Value),
@@ -983,10 +984,10 @@ member_sequence(Tokens, Rest, [node(error, Err) | Members], D0, D) :-
   member_sequence(Tokens1, Rest, Members, D1, D),
   D0 = [diagnostic(At, At, unexpected_token) | D1].
 
-% A spread member `..expr` splices another record's fields into this tuple
+% A spread member `..expr` splices another record's fields into this record
 % (grammar: Spread :- ".." Expression).  The lexer has no `..` token, so it
 % arrives as two `.` tokens.  The value is parsed above precedence 0 because
-% `=` inside a tuple introduces a labeled member, never a definition inside a
+% `=` inside a record introduces a labeled member, never a definition inside a
 % spread value.
 spread_member(Tokens, Rest, node(spread, Children), D0, D) :-
   bump(Tokens, T1, Dot1),
@@ -999,7 +1000,7 @@ member_item(Tokens, Rest, node(member, Children), D0, D) :-
       bump(Tokens, T1, ModCh)
   ; ModCh = [], T1 = Tokens ),
   % expression(0) so a record binding `x = 1` is parsed whole (as a `definition`
-  % node via the `=` operator); a plain tuple member or a parameter name has no
+  % node via the `=` operator); a plain record member or a parameter name has no
   % `=`, and a parameter annotation `name : type` is picked up by the `:` branch
   % below (the `:` is not a binary operator, so expression(0) stops before it).
   expression(0, T1, T2, Expr, D0, D1),
@@ -1037,7 +1038,7 @@ block_items(Tokens, Rest, [node(error, Err) | Items], D0, D) :-
 %   TypeExpression  :- QuantifiedType | ParenthesizedType | TypeReference
 %   QuantifiedType  :- TypeParameters TypeExpression               <A>(A): A
 %   ParenthesizedType :- "(" TypeMember* (".." Id?)? ")" (":" Type)?
-%                          tuple / open record / function type
+%                          record (including open) / function type
 %   TypeReference   :- QualifiedName TypeArguments?                Box<number>
 %   TypeArguments   :- "<" (TypeArgument)+ ">"   TypeArgument :- "_" | Type
 % `..` is two `.` tokens (the lexer has no `..`); `<`/`>` are the same tokens as
@@ -1089,7 +1090,7 @@ split_close(t(_, ['>', C | Cs], Start, End), t('>', ['>'], Start, Mid), t(RestKi
 % `type_expression/5` used to BE what is now `type_expression_primary/5` (the
 % quantified-or-atom form).  It is split so that `+` can sit at the TOP,
 % wrapping a whole quantified-or-atom term on each side, while every EXISTING
-% caller of `type_expression/5` elsewhere in this file (tuple members,
+% caller of `type_expression/5` elsewhere in this file (record members,
 % function parameter/return types, constructor fields, type arguments, ...)
 % keeps calling the SAME name and so transparently gains `+` support in every
 % position a type can appear -- without those call sites needing to change at
@@ -1218,21 +1219,21 @@ type_arg_seq(Tokens, Rest, [node(error, Err) | Args], D0, D) :-
 type_starts(Tokens) :-
   ( peek(Tokens, ident) ; peek_punct(Tokens, open_paren) ; peek_punct(Tokens, open_angle) ).
 
-% A parenthesized type: a tuple/record type, optionally open (`.. R?`), and a
+% A parenthesized type: a record type, optionally open (`.. R?`), and a
 % function type when a `: ReturnType` follows.
 parenthesized_type(Tokens, Rest, Node, D0, D) :-
   bump(Tokens, T1, OpenCh),                            % `(`
   type_member_seq(T1, T2, MemberChildren, D0, D1),
   type_rest_opt(T2, T3, RestChildren, D1, D2),         % optional `.. R?`
   expect_punct(close_paren, T3, T4, CloseCh, D2, D3),
-  append(OpenCh, MemberChildren, C1), append(C1, RestChildren, C2), append(C2, CloseCh, TupleChildren),
-  Tuple = node(type_tuple, TupleChildren),
+  append(OpenCh, MemberChildren, C1), append(C1, RestChildren, C2), append(C2, CloseCh, RecordChildren),
+  Record = node(type_record, RecordChildren),
   ( peek_punct(T4, colon) ->
       bump(T4, T5, ColonCh),
       type_expression(T5, Rest, Ret, D3, D),
-      append([Tuple | ColonCh], [Ret], FChildren),
+      append([Record | ColonCh], [Ret], FChildren),
       Node = node(function_type, FChildren)
-  ; Node = Tuple, Rest = T4, D3 = D ).
+  ; Node = Record, Rest = T4, D3 = D ).
 
 % Members stop at `)` or the open-record `..` (a leading `.`).
 type_member_seq(Tokens, Tokens, [], D, D) :-

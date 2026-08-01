@@ -24,7 +24,7 @@
     Implements the level-based algorithmic type system of Fan, Xu & Xie,
     "Practical Type Inference with Levels" (PLDI'25), with let-generalisation
     as in Heeren, Hage & Swierstra (UU-CS-2002-031), extended with
-    Remy/Wand-style ROW POLYMORPHISM for tuples (records).
+    Remy/Wand-style ROW POLYMORPHISM for records (records).
 
     --------------------------------------------------------------------
     THE TYPE LANGUAGE
@@ -33,13 +33,13 @@
 
         number / boolean / string       base types
         readonly / mutable              base types, used only in the
-                                        mutability slot of a tuple field
+                                        mutability slot of a record field
                                         (so mutability unifies like any type)
         unification_variable(Id)        an as-yet-unknown type/row; level and
                                         solution live in the context
         function_type(Params, Ret)      an n-ary function `(t1 .. tn) -> r`
         type_constructor(Name, Args)    a NOMINAL named type (see below)
-        tuple_type(Fields, Tail)        a RECORD; see below
+        record_type(Fields, Tail)        a RECORD; see below
         forall_type(BoundIds, Body)     a RANK-N polytype `forall a.. . Body`;
                                         the bound variables appear in Body as
                                         `quantified_variable(Id)`.  Unlike a
@@ -81,22 +81,22 @@
     (a polytype may not be a type ARGUMENT), so unification variables only ever
     stand for monotypes.
 
-    TUPLES AS ROWS.  A `tuple_type(Fields, Tail)` is a record:
+    TUPLES AS ROWS.  A `record_type(Fields, Tail)` is a record:
 
-        Fields  a list of  tuple_field(Mutability, Key, Type)
+        Fields  a list of  record_field(Mutability, Key, Type)
                   Key is  index(N)   for a positional member, or
                           label(Name) for a labeled member.
         Tail    either `closed` (these are exactly the fields) or a
                 unification variable -- a ROW VARIABLE standing for "any
                 further fields".  Solving a row variable binds it to another
-                `tuple_type(MoreFields, FurtherTail)`, so an open record is a
-                chain that `flatten_tuple/4` collapses.
+                `record_type(MoreFields, FurtherTail)`, so an open record is a
+                chain that `flatten_record/4` collapses.
 
-    A tuple LITERAL is closed.  A member access only requires "a record with
+    A record LITERAL is closed.  A member access only requires "a record with
     at least this field" -- an open tail -- which is what makes functions
     like `(p) p.x` row-polymorphic: the row variable is generalised.
 
-    NOMINAL vs STRUCTURAL.  `function_type` and `tuple_type` unify
+    NOMINAL vs STRUCTURAL.  `function_type` and `record_type` unify
     structurally.  `type_constructor` unifies NOMINALLY (only equal names).
 
     A *type scheme* is `type_scheme(QuantifiedIds, Body)`; generalised
@@ -187,18 +187,18 @@ zip_mapping([Id | Ids], [Argument | Arguments], [Id - Argument | Mapping]) :-
 
 % fully_resolve(+Type, +Context, -Resolved).
 %
-% Deep context application, leaving no solved variables.  Tuple chains are
-% flattened so the result is a single `tuple_type(AllFields, FinalTail)`.
+% Deep context application, leaving no solved variables.  Record chains are
+% flattened so the result is a single `record_type(AllFields, FinalTail)`.
 fully_resolve(Type, Context, Resolved) :-
   resolve_head(Type, Context, Head),
   ( Head = function_type(Parameters, Return) ->
       fully_resolve_list(Parameters, Context, Parameters1),
       fully_resolve(Return, Context, Return1),
       Resolved = function_type(Parameters1, Return1)
-  ; Head = tuple_type(_, _) ->
-      flatten_tuple(Head, Context, Fields, Tail),
+  ; Head = record_type(_, _) ->
+      flatten_record(Head, Context, Fields, Tail),
       fully_resolve_fields(Fields, Context, Fields1),
-      Resolved = tuple_type(Fields1, Tail)
+      Resolved = record_type(Fields1, Tail)
   ; Head = type_constructor(Name, Arguments) ->
       fully_resolve_list(Arguments, Context, Arguments1),
       Resolved = type_constructor(Name, Arguments1)
@@ -233,18 +233,18 @@ fully_resolve_list([Type | Types], Context, [Resolved | Rest]) :-
 
 % Resolve the mutability and type carried by each field, keeping the key.
 fully_resolve_fields([], _, []).
-fully_resolve_fields([tuple_field(Mutability, Key, Type) | Fields], Context,
-                     [tuple_field(Mutability1, Key, Type1) | Rest]) :-
+fully_resolve_fields([record_field(Mutability, Key, Type) | Fields], Context,
+                     [record_field(Mutability1, Key, Type1) | Rest]) :-
   fully_resolve(Mutability, Context, Mutability1),
   fully_resolve(Type, Context, Type1),
   fully_resolve_fields(Fields, Context, Rest).
 
 % Collapse an open-record chain into its full field list and final tail.
 % The tail is resolved to either `closed` or an unsolved unification variable.
-flatten_tuple(tuple_type(Fields, Tail), Context, AllFields, FinalTail) :-
+flatten_record(record_type(Fields, Tail), Context, AllFields, FinalTail) :-
   resolve_head(Tail, Context, ResolvedTail),
-  ( ResolvedTail = tuple_type(MoreFields, FurtherTail) ->
-      flatten_tuple(tuple_type(MoreFields, FurtherTail), Context, RestFields, FinalTail),
+  ( ResolvedTail = record_type(MoreFields, FurtherTail) ->
+      flatten_record(record_type(MoreFields, FurtherTail), Context, RestFields, FinalTail),
       append(Fields, RestFields, AllFields)
   ; AllFields = Fields,
     FinalTail = ResolvedTail
@@ -253,7 +253,7 @@ flatten_tuple(tuple_type(Fields, Tail), Context, AllFields, FinalTail) :-
 % The monotypes carried by a field (its mutability and its type), used by the
 % occurs check and variable collection, which treat both like any subtype.
 field_monotypes([], []).
-field_monotypes([tuple_field(Mutability, _, Type) | Fields], [Mutability, Type | Rest]) :-
+field_monotypes([record_field(Mutability, _, Type) | Fields], [Mutability, Type | Rest]) :-
   field_monotypes(Fields, Rest).
 
 % ---------------------------------------------------------------------------
@@ -289,10 +289,10 @@ unify_resolved(function_type(Params1, Return1), function_type(Params2, Return2),
       unify(Return1, Return2, Context1, ContextOut)
   ; throw(analysis_error(function_arity_mismatch(Params1, Params2)))
   ).
-% STRUCTURAL, row-polymorphic rule for tuples.
-unify_resolved(tuple_type(Fields1, Tail1), tuple_type(Fields2, Tail2), ContextIn, ContextOut) :- !,
-  flatten_tuple(tuple_type(Fields1, Tail1), ContextIn, AllFields1, FinalTail1),
-  flatten_tuple(tuple_type(Fields2, Tail2), ContextIn, AllFields2, FinalTail2),
+% STRUCTURAL, row-polymorphic rule for records.
+unify_resolved(record_type(Fields1, Tail1), record_type(Fields2, Tail2), ContextIn, ContextOut) :- !,
+  flatten_record(record_type(Fields1, Tail1), ContextIn, AllFields1, FinalTail1),
+  flatten_record(record_type(Fields2, Tail2), ContextIn, AllFields2, FinalTail2),
   unify_rows(AllFields1, FinalTail1, AllFields2, FinalTail2, ContextIn, ContextOut).
 % NOMINAL rule: type constructors unify only when names match.
 unify_resolved(type_constructor(Name, Arguments1), type_constructor(Name, Arguments2),
@@ -440,7 +440,7 @@ unify_rows(Fields1, Tail1, Fields2, Tail2, ContextIn, ContextOut) :-
 % Pair up fields by key; `Only1`/`Only2` are the unmatched remainders.
 match_fields([], Fields2Remaining, [], [], Fields2Remaining).
 match_fields([Field1 | Rest1], Fields2, Common, Only1, Only2) :-
-  Field1 = tuple_field(_, Key, _),
+  Field1 = record_field(_, Key, _),
   ( select_field(Key, Fields2, Field2, Fields2Rest) ->
       Common = [Field1 - Field2 | CommonRest],
       match_fields(Rest1, Fields2Rest, CommonRest, Only1, Only2)
@@ -448,12 +448,12 @@ match_fields([Field1 | Rest1], Fields2, Common, Only1, Only2) :-
     match_fields(Rest1, Fields2, Common, Only1Rest, Only2)
   ).
 
-select_field(Key, [tuple_field(M, Key, T) | Rest], tuple_field(M, Key, T), Rest) :- !.
+select_field(Key, [record_field(M, Key, T) | Rest], record_field(M, Key, T), Rest) :- !.
 select_field(Key, [Other | Rest], Found, [Other | RestOut]) :-
   select_field(Key, Rest, Found, RestOut).
 
 unify_common_fields([], Context, Context).
-unify_common_fields([tuple_field(M1, _, T1) - tuple_field(M2, _, T2) | Rest], ContextIn, ContextOut) :-
+unify_common_fields([record_field(M1, _, T1) - record_field(M2, _, T2) | Rest], ContextIn, ContextOut) :-
   unify(M1, M2, ContextIn, Context1),     % mutability (readonly/mutable/var)
   unify(T1, T2, Context1, Context2),
   unify_common_fields(Rest, Context2, ContextOut).
@@ -469,10 +469,10 @@ close_rows(Only1, Tail1In, Only2, Tail2In, ContextIn, ContextOut) :-
       ContextOut = ContextIn
   ; Tail1 == closed ->
       require_no_extra_fields(Only2),
-      unify(Tail2, tuple_type(Only1, closed), ContextIn, ContextOut)
+      unify(Tail2, record_type(Only1, closed), ContextIn, ContextOut)
   ; Tail2 == closed ->
       require_no_extra_fields(Only1),
-      unify(Tail1, tuple_type(Only2, closed), ContextIn, ContextOut)
+      unify(Tail1, record_type(Only2, closed), ContextIn, ContextOut)
   ; Tail1 == Tail2 ->
       % The same open row cannot be extended two different ways.
       require_no_extra_fields(Only1),
@@ -480,14 +480,14 @@ close_rows(Only1, Tail1In, Only2, Tail2In, ContextIn, ContextOut) :-
       ContextOut = ContextIn
   ; % Two distinct row variables: link both through one fresh common tail.
     fresh_common_tail(Tail1, Tail2, ContextIn, CommonTail, Context1),
-    unify(Tail1, tuple_type(Only2, CommonTail), Context1, Context2),
-    unify(Tail2, tuple_type(Only1, CommonTail), Context2, ContextOut)
+    unify(Tail1, record_type(Only2, CommonTail), Context1, Context2),
+    unify(Tail2, record_type(Only1, CommonTail), Context2, ContextOut)
   ).
 
 require_no_extra_fields([]) :- !.
 require_no_extra_fields(Fields) :-
-  findall(Key, member(tuple_field(_, Key, _), Fields), Keys),
-  throw(analysis_error(tuple_field_mismatch(Keys))).
+  findall(Key, member(record_field(_, Key, _), Fields), Keys),
+  throw(analysis_error(record_field_mismatch(Keys))).
 
 % A fresh row variable for the shared tail, born at the shallower of the two
 % tails' levels so it generalises no more eagerly than they would.
@@ -525,7 +525,7 @@ occurs_check_and_adjust_levels(Id, MaxLevel, Type, ContextIn, ContextOut) :-
   ; Resolved = function_type(Parameters, Return) ->
       occurs_check_and_adjust_levels_list(Id, MaxLevel, Parameters, ContextIn, Context1),
       occurs_check_and_adjust_levels(Id, MaxLevel, Return, Context1, ContextOut)
-  ; Resolved = tuple_type(Fields, Tail) ->
+  ; Resolved = record_type(Fields, Tail) ->
       field_monotypes(Fields, Monotypes),
       occurs_check_and_adjust_levels_list(Id, MaxLevel, Monotypes, ContextIn, Context1),
       occurs_check_and_adjust_levels(Id, MaxLevel, Tail, Context1, ContextOut)
@@ -598,7 +598,7 @@ collect_unification_variable_ids(Type, Accumulator, Ids) :-
   ; Type = function_type(Parameters, Return) ->
       collect_unification_variable_ids_list(Parameters, Accumulator, Accumulator1),
       collect_unification_variable_ids(Return, Accumulator1, Ids)
-  ; Type = tuple_type(Fields, Tail) ->
+  ; Type = record_type(Fields, Tail) ->
       field_monotypes(Fields, Monotypes),
       collect_unification_variable_ids_list(Monotypes, Accumulator, Accumulator1),
       collect_unification_variable_ids(Tail, Accumulator1, Ids)
@@ -649,10 +649,10 @@ abstract_quantified_variables(Type, QuantifiedIds, Out) :-
       abstract_quantified_variables_list(Parameters, QuantifiedIds, Parameters1),
       abstract_quantified_variables(Return, QuantifiedIds, Return1),
       Out = function_type(Parameters1, Return1)
-  ; Type = tuple_type(Fields, Tail) ->
+  ; Type = record_type(Fields, Tail) ->
       abstract_fields(Fields, QuantifiedIds, Fields1),
       abstract_quantified_variables(Tail, QuantifiedIds, Tail1),
-      Out = tuple_type(Fields1, Tail1)
+      Out = record_type(Fields1, Tail1)
   ; Type = type_constructor(Name, Arguments) ->
       abstract_quantified_variables_list(Arguments, QuantifiedIds, Arguments1),
       Out = type_constructor(Name, Arguments1)
@@ -687,8 +687,8 @@ abstract_quantified_variables_list([Type | Types], QuantifiedIds, [Out | Outs]) 
   abstract_quantified_variables_list(Types, QuantifiedIds, Outs).
 
 abstract_fields([], _, []).
-abstract_fields([tuple_field(Mutability, Key, Type) | Fields], QuantifiedIds,
-                [tuple_field(Mutability1, Key, Type1) | Outs]) :-
+abstract_fields([record_field(Mutability, Key, Type) | Fields], QuantifiedIds,
+                [record_field(Mutability1, Key, Type1) | Outs]) :-
   abstract_quantified_variables(Mutability, QuantifiedIds, Mutability1),
   abstract_quantified_variables(Type, QuantifiedIds, Type1),
   abstract_fields(Fields, QuantifiedIds, Outs).
@@ -733,10 +733,10 @@ substitute_quantified_variables(Type, Mapping, Out) :-
       substitute_quantified_variables_list(Parameters, Mapping, Parameters1),
       substitute_quantified_variables(Return, Mapping, Return1),
       Out = function_type(Parameters1, Return1)
-  ; Type = tuple_type(Fields, Tail) ->
+  ; Type = record_type(Fields, Tail) ->
       substitute_fields(Fields, Mapping, Fields1),
       substitute_quantified_variables(Tail, Mapping, Tail1),
-      Out = tuple_type(Fields1, Tail1)
+      Out = record_type(Fields1, Tail1)
   ; Type = type_constructor(Name, Arguments) ->
       substitute_quantified_variables_list(Arguments, Mapping, Arguments1),
       Out = type_constructor(Name, Arguments1)
@@ -769,8 +769,8 @@ substitute_quantified_variables_list([Type | Types], Mapping, [Out | Outs]) :-
   substitute_quantified_variables_list(Types, Mapping, Outs).
 
 substitute_fields([], _, []).
-substitute_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping,
-                  [tuple_field(Mutability1, Key, Type1) | Outs]) :-
+substitute_fields([record_field(Mutability, Key, Type) | Fields], Mapping,
+                  [record_field(Mutability1, Key, Type1) | Outs]) :-
   substitute_quantified_variables(Mutability, Mapping, Mutability1),
   substitute_quantified_variables(Type, Mapping, Type1),
   substitute_fields(Fields, Mapping, Outs).
@@ -790,10 +790,10 @@ substitute_skolems(Type, Mapping, Out) :-
       substitute_skolems_list(Parameters, Mapping, Parameters1),
       substitute_skolems(Return, Mapping, Return1),
       Out = function_type(Parameters1, Return1)
-  ; Type = tuple_type(Fields, Tail) ->
+  ; Type = record_type(Fields, Tail) ->
       substitute_skolems_fields(Fields, Mapping, Fields1),
       substitute_skolems(Tail, Mapping, Tail1),
-      Out = tuple_type(Fields1, Tail1)
+      Out = record_type(Fields1, Tail1)
   ; Type = type_constructor(Name, Arguments) ->
       substitute_skolems_list(Arguments, Mapping, Arguments1),
       Out = type_constructor(Name, Arguments1)
@@ -827,8 +827,8 @@ substitute_skolems_list([Type | Types], Mapping, [Out | Outs]) :-
   substitute_skolems_list(Types, Mapping, Outs).
 
 substitute_skolems_fields([], _, []).
-substitute_skolems_fields([tuple_field(Mutability, Key, Type) | Fields], Mapping,
-                          [tuple_field(Mutability1, Key, Type1) | Outs]) :-
+substitute_skolems_fields([record_field(Mutability, Key, Type) | Fields], Mapping,
+                          [record_field(Mutability1, Key, Type1) | Outs]) :-
   substitute_skolems(Mutability, Mapping, Mutability1),
   substitute_skolems(Type, Mapping, Type1),
   substitute_skolems_fields(Fields, Mapping, Outs).

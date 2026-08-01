@@ -85,14 +85,14 @@ Block :- "{" Separator* (Expression (Separator+ Expression)*)* Separator* "}"
 # before the colon is allowed (so `a: T` and `a : T` both parse).
 TypeAnnotation :- Separator* ":" Separator* TypeExpression
 
-# A tuple mixes positional and labeled members, each optionally `mutable`.
+# A record mixes positional and labeled members, each optionally `mutable`.
 # Labeled members may appear in any order; positional order is significant.
-Tuple :- "(" Separator* (TupleMember (Separator+ TupleMember)*)* Separator* ")"
+Record :- "(" Separator* (RecordMember (Separator+ RecordMember)*)* Separator* ")"
 
 # A member is either a SPREAD (splice another record's fields in) or a
 # (possibly mutable) labeled / positional member.  Spreads are emitted first,
 # so an explicit field overrides a spread field of the same key.
-TupleMember :- Spread | Mutability? (LabeledMember | Expression)
+RecordMember :- Spread | Mutability? (LabeledMember | Expression)
 
 Spread :- ".." Expression
 
@@ -138,7 +138,7 @@ ConstructorPattern :-
 RecordPattern :- "(" Separator* (PatternMember (Separator+ PatternMember)*)* Separator* ")"
 
 # A labeled member uses `=` (`(x = p)` matches field x against p), mirroring
-# labeled tuple values and avoiding the typed-binder lookalike of `:`.
+# labeled record values and avoiding the typed-binder lookalike of `:`.
 PatternMember :- Identifier Separator* "=" Separator* Pattern | Pattern
 
 IrrefutablePattern :- IrrefutableRecordPattern | "_" | Identifier
@@ -157,7 +157,7 @@ Primary :-
 	NumberLiteral
 	| BooleanLiteral
 	| StringLiteral
-	| Tuple
+	| Record
 	| Block
 	| Identifier
 
@@ -280,7 +280,7 @@ VariantBody :- "|"? Constructor (Separator* "|" Separator* Constructor)*
 Constructor :-
 	Identifier ("(" Separator* (TypeExpression (Separator+ TypeExpression)* Separator*)? ")")?
 
-# Curly braces mark the body as a module type, distinct from a tuple/record
+# Curly braces mark the body as a module type, distinct from a record
 # type's "(...)" and a variant's "|"-separated constructors.  Every member is
 # named -- an interface describes a module's public members by name, so
 # there is no positional form.
@@ -320,7 +320,7 @@ TypeParameter :-
 TypeExpression :- TypeExpressionPrimary ("+" TypeExpressionPrimary)*
 
 # A primary type expression is a quantified (polymorphic) type, a
-# parenthesized form (a tuple type, or a function type when a `: ReturnType`
+# parenthesized form (a record type, or a function type when a `: ReturnType`
 # follows), or a named reference.
 TypeExpressionPrimary :- QuantifiedType | ParenthesizedType | TypeReference
 
@@ -346,8 +346,8 @@ QuantifiedType :- TypeParameters Separator* TypeExpressionPrimary
 # annotations share a tail, so a function can preserve a caller's extra
 # fields (open-row results).  A trailing `: ReturnType` instead makes it a
 # FUNCTION type, whose parameters are the member types:
-#     (number string)            closed tuple type
-#     (one: number two: string)  tuple type with labeled members
+#     (number string)            closed record type
+#     (one: number two: string)  record type with labeled members
 #     (x: string ..)             OPEN record: at least field x, plus more
 #     (x: string ..R)            OPEN record capturing the rest as R
 #     (..)                       any record
@@ -458,7 +458,7 @@ Module :-
 # source is one of: omitted -- an ambient global of the same name
 # (`external max : T`); a JS expression (`= 'Math.max'`); or a renamed module
 # import (`= 'print' from './io.js'`).  A function type gets a currying shim in
-# the back end; all values (tuples and variants included) cross unchanged.
+# the back end; all values (records and variants included) cross unchanged.
 # `external` is a soft keyword.  JsString is single-quoted but, unlike the
 # language's own strings, raw -- no escapes or interpolation.
 External :-
@@ -504,7 +504,7 @@ MacroInvocation :- "@" QualifiedName
 # TEMPLATE producing an Ast value -- it is NOT type-checked at the macro's
 # definition, but is checked after expansion, at each use site.  `~x` / `~( EXPR )`
 # splices an Ast-valued sub-result into the surrounding template.  The parens
-# after `` ` `` and after `~` are delimiters, not Tuple syntax.
+# after `` ` `` and after `~` are delimiters, not Record syntax.
 Quote :- "`" Separator* "(" Separator* Expression Separator* ")"
 Unquote :- "~" (Identifier | "(" Separator* Expression Separator* ")")
 

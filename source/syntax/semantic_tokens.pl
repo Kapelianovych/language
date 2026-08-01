@@ -38,7 +38,7 @@
       role the green tree's shape does not otherwise reveal -- e.g. a bare
       `ident` LEAF (not wrapped in an `identifier` node) is a declared type
       name in `type_declaration` but a declared macro name in
-      `macro_definition`; a function's parameter list and a tuple literal's
+      `macro_definition`; a function's parameter list and a record literal's
       member list both use the SAME `member` node shape but mean
       `parameter` in one and `variable`/`property` in the other.  Those are
       handled by dedicated `special/4` clauses below, each documented at its
@@ -295,7 +295,7 @@ special(type_name, Children, Toks, Tail) :- !,
 special(type_param, Children, Toks, Tail) :- !,
   named_then_rest(typeParameter, Children, Toks, Tail).
 
-% type_member/5's label wrapper: `Identifier ":"` before a tuple/record
+% type_member/5's label wrapper: `Identifier ":"` before a record/record
 % type's member type.
 special(type_label, Children, Toks, Tail) :- !,
   named_then_rest(property, Children, Toks, Tail).
@@ -391,7 +391,7 @@ drop_angle_leaves([t(K, _, _, _) | Rest], Inner) :- is_angle(K), !, drop_angle_l
 drop_angle_leaves([Other | Rest], [Other | Inner]) :- drop_angle_leaves(Rest, Inner).
 
 % postfix_chain/6's `.access` branch: `Acc.name` / `Acc.0` (a positional
-% tuple accessor -- see `accessor/5` -- falls through to the plain `number`
+% record accessor -- see `accessor/5` -- falls through to the plain `number`
 % default since only a trailing `ident` is overridden here).
 special(access, [Acc | RestLeaves], Toks, Tail) :- !,
   emit(Acc, Toks, Mid),
@@ -481,7 +481,7 @@ param_scan([Other | Rest], Toks, Tail) :-
   emit(Other, Toks, Mid),
   param_scan(Rest, Mid, Tail).
 
-% member_sequence/5 as used by a tuple/record LITERAL (or a destructuring
+% member_sequence/5 as used by a record/record LITERAL (or a destructuring
 % `definition` LHS) -- a `group`, never a `function`'s parameter list (that
 % is intercepted by `special(function,...)` above before recursion ever
 % reaches a bare `member` node here).  A labeled member `x = 1` names a

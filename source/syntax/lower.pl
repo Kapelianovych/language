@@ -21,7 +21,7 @@
 
     COVERAGE.  Programs, definitions / assignments / destructuring, all
     expression forms (literals incl. interpolated strings, binary/unary,
-    call/access, if, match + patterns, block, tuple/record, function literal,
+    call/access, if, match + patterns, block, record/record, function literal,
     placeholder), reader macros (def/call/quote/unquote), and the item forms
     use / external / type / module.  Type expressions are lowered for
     annotations.  Anything unrecognised lowers to `error_node(Span)` rather
@@ -338,10 +338,10 @@ binary_name('&', and).            binary_name('^', xor). binary_name('|', or).
 binary_name('->', pipe).
 
 % ===========================================================================
-% Tuples / records (the `group` node), and destructuring patterns from a group.
+% Records / records (the `group` node), and destructuring patterns from a group.
 % ===========================================================================
 
-lower_group(node(group, Ch), tuple_node(Members, Span)) :-
+lower_group(node(group, Ch), record_node(Members, Span)) :-
   child_nodes(Ch, MemberGreens),
   maplist_lower_member(MemberGreens, Members),
   gspan(node(group, Ch), Span).
@@ -357,7 +357,7 @@ lower_member(node(spread, Ch), spread_member(Value, Span)) :- !,
   gspan(node(spread, Ch), Span).
 % A member node:  [ mutable? EXPR (: TYPE)? ].  EXPR is either a bare
 % value (positional) or a `definition` node `name = value` (labeled).
-lower_member(node(member, Ch), tuple_member(Mut, Kind, Annotation, Value, Span)) :-
+lower_member(node(member, Ch), record_member(Mut, Kind, Annotation, Value, Span)) :-
   ( child_token(Ch, ident, t(ident, [m,u,t,a,b,l,e], _, _)) -> Mut = mutable ; Mut = readonly ),
   child_nodes(Ch, ValueGreens0),
   exclude_type_node(ValueGreens0, [ValueGreen]),
@@ -381,7 +381,7 @@ member_annotation(Ch, type_annotation(Type)) :-
 member_annotation(_Ch, no_annotation).
 
 is_type_node(node(type_name, _)).
-is_type_node(node(type_tuple, _)).
+is_type_node(node(type_record, _)).
 is_type_node(node(function_type, _)).
 is_type_node(node(quantified_type, _)).
 is_type_node(node(intersection_type, _)).
@@ -400,7 +400,7 @@ maplist_lower_pat_member([G | Gs], [M | Ms]) :- lower_pat_member(G, M), maplist_
 % An irrefutable-pattern member (grammar: IrrefutablePatternMember :-
 % Identifier "=" IrrefutablePattern | IrrefutablePattern).  These greens come
 % from the EXPRESSION parser -- a destructuring LHS and function parameters
-% are parsed as tuples -- so a labeled member arrives as a `definition` node
+% are parsed as records -- so a labeled member arrives as a `definition` node
 % (`x = subpattern`) and a positional one as a bare value.
 lower_pat_member(node(member, Ch), Member) :-
   child_nodes(Ch, ValueGreens0), exclude_type_node(ValueGreens0, [ValueGreen]),
@@ -509,10 +509,10 @@ lower_match_pattern(node(constructor_pattern, Ch), constructor_pattern(Name, Sub
   child_nodes(Ch, SubGreens),
   maplist_lower_match_pattern(SubGreens, Subs),
   gspan(node(constructor_pattern, Ch), Span).
-lower_match_pattern(node(tuple_pattern, Ch), record_pattern(Members, Span)) :- !,
+lower_match_pattern(node(record_pattern, Ch), record_pattern(Members, Span)) :- !,
   child_nodes(Ch, SubGreens),
-  maplist_lower_tuple_member(SubGreens, Members),
-  gspan(node(tuple_pattern, Ch), Span).
+  maplist_lower_record_member(SubGreens, Members),
+  gspan(node(record_pattern, Ch), Span).
 lower_match_pattern(Green, error_node(Span)) :- gspan(Green, Span).
 
 maplist_lower_match_pattern([], []).
@@ -521,15 +521,15 @@ maplist_lower_match_pattern([G | Gs], [P | Ps]) :- lower_match_pattern(G, P), ma
 % A record-pattern member is labeled (`(x = p)`, a `labeled_pattern` node
 % holding the field name and sub-pattern) or a bare pattern matching the next
 % positional field.
-maplist_lower_tuple_member([], []).
-maplist_lower_tuple_member([node(labeled_pattern, MCh) | Gs], [labeled_member_pattern(Name, Sub, Span) | Ms]) :- !,
+maplist_lower_record_member([], []).
+maplist_lower_record_member([node(labeled_pattern, MCh) | Gs], [labeled_member_pattern(Name, Sub, Span) | Ms]) :- !,
   child_token(MCh, ident, t(ident, Name, _, _)),
   child_nodes(MCh, [SubG]),
   lower_match_pattern(SubG, Sub),
   gspan(node(labeled_pattern, MCh), Span),
-  maplist_lower_tuple_member(Gs, Ms).
-maplist_lower_tuple_member([G | Gs], [positional_member_pattern(P, Span) | Ms]) :-
-  lower_match_pattern(G, P), gspan(G, Span), maplist_lower_tuple_member(Gs, Ms).
+  maplist_lower_record_member(Gs, Ms).
+maplist_lower_record_member([G | Gs], [positional_member_pattern(P, Span) | Ms]) :-
+  lower_match_pattern(G, P), gspan(G, Span), maplist_lower_record_member(Gs, Ms).
 
 % ===========================================================================
 % Reader-macro helpers.
@@ -659,17 +659,17 @@ lower_type(node(quantified_type, [ParamsNode, BodyNode]), quantified_type_node(P
 % A type hole `_` (only valid inside type arguments; carries a span).
 lower_type(node(type_hole, Ch), type_hole(Span)) :- !,
   gspan(node(type_hole, Ch), Span).
-% A tuple / record type, possibly open (`.. R?`).
-lower_type(node(type_tuple, Ch), tuple_type_node(Members, Openness, Span)) :- !,
+% A record / record type, possibly open (`.. R?`).
+lower_type(node(type_record, Ch), record_type_node(Members, Openness, Span)) :- !,
   findall(M, ( member(node(type_member, MCh), Ch), lower_type_member(MCh, M) ), Members),
-  tuple_openness(Ch, Openness),
-  gspan(node(type_tuple, Ch), Span).
+  record_openness(Ch, Openness),
+  gspan(node(type_record, Ch), Span).
 % A function type:  ( params ) : return.  The first node is the parameter
-% tuple, the last node is the return type; parameters are the member TYPES.
+% record, the last node is the return type; parameters are the member TYPES.
 lower_type(node(function_type, Ch), function_type_node(ParamTypes, ReturnType, Span)) :- !,
   child_nodes(Ch, Nodes),
   Nodes = [ParamG | _], append(_, [ReturnG], Nodes),
-  ( ParamG = node(type_tuple, PCh) ->
+  ( ParamG = node(type_record, PCh) ->
       findall(PT, ( member(node(type_member, MCh), PCh), member_type_node(MCh, TypeNode), lower_type(TypeNode, PT) ), ParamTypes)
   ; lower_type(ParamG, PT), ParamTypes = [PT] ),
   lower_type(ReturnG, ReturnType),
@@ -680,7 +680,7 @@ lower_type(node(function_type, Ch), function_type_node(ParamTypes, ReturnType, S
 % skips every leaf, keeping only `node(Kind, _)` children) is exactly what's
 % needed to pull out just the members, in their original left-to-right
 % order, ignoring the `+`s between them.  Each member is itself an ordinary
-% type node (a `type_name`, `quantified_type`, `type_tuple`, or
+% type node (a `type_name`, `quantified_type`, `type_record`, or
 % `function_type`), lowered the same way any other type is.
 lower_type(node(intersection_type, Ch), intersection_type_node(Members, Span)) :- !,
   child_nodes(Ch, MemberGreens),
@@ -708,9 +708,9 @@ lower_type_arguments(ACh, Arguments) :-
   child_nodes(ACh, Nodes),
   maplist_lower_type(Nodes, Arguments).
 
-% A tuple type member: mutability (default readonly), an optional label, and the
+% A record type member: mutability (default readonly), an optional label, and the
 % member's type.  Mutability and label sit in their own wrapper nodes.
-lower_type_member(MCh, tuple_type_member(Mutability, Label, Type, Span)) :-
+lower_type_member(MCh, record_type_member(Mutability, Label, Type, Span)) :-
   ( member(node(mutability, MutCh), MCh), child_token(MutCh, ident, t(ident, "mutable", _, _)) -> Mutability = mutable
   ; Mutability = readonly ),
   ( member(node(type_label, LCh), MCh) -> child_token(LCh, ident, t(ident, LName, _, _)), Label = labeled(LName)
@@ -729,7 +729,7 @@ member_meta_node(node(type_label, _)).
 
 % Openness from a `type_rest` node: a captured rest `..R` names a row variable,
 % an anonymous `..` is open, and no `type_rest` means a closed record.
-tuple_openness(Ch, Openness) :-
+record_openness(Ch, Openness) :-
   ( member(node(type_rest, RCh), Ch) ->
       ( child_token(RCh, ident, t(ident, RName, _, _)) -> Openness = open(capture(RName))
       ; Openness = open(anonymous) )

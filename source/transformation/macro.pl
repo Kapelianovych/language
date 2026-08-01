@@ -344,7 +344,7 @@ bind_names([Name | Names], [Value | Values], EnvironmentIn, EnvironmentOut) :-
 % ===========================================================================
 /*  Evaluates a macro body to a VALUE.  Values:
 
-      num(Number)  str(Chars)  bool(true|false)  tuple(Key-Value list)
+      num(Number)  str(Chars)  bool(true|false)  record(Key-Value list)
       closure(Parameters, Body, Env)   -- a lambda
       macro_ref(Name)                  -- a macro used as a function (recursion)
       builtin(parse_item)              -- `Compiler.parseItem`
@@ -389,10 +389,10 @@ eval(block_node(Expressions, _), Environment, Table, Value) :-
 eval(match_node(Scrutinee, Arms, _), Environment, Table, Value) :-
   eval(Scrutinee, Environment, Table, ScrutineeValue),
   eval_match(Arms, ScrutineeValue, Environment, Table, Value).
-eval(tuple_node(Members, _), Environment, Table, tuple(Fields)) :-
+eval(record_node(Members, _), Environment, Table, record(Fields)) :-
   eval_members(Members, 0, Environment, Table, Fields).
 eval(access_node(Target, Accessor, _), Environment, Table, Value) :-
-  eval(Target, Environment, Table, tuple(Fields)),
+  eval(Target, Environment, Table, record(Fields)),
   accessor_field(Accessor, Key),
   ( memberchk(Key - Value, Fields) -> true ; throw(analysis_error(macro_no_field(Key))) ).
 eval(definition_node(_, _, ValueExpression, _), Environment, Table, Value) :-
@@ -458,7 +458,7 @@ eval_block([Expression | Rest], Environment, Table, Value) :-
     Environment1 = Environment
   ),
   eval_block(Rest, Environment1, Table, Value).
-eval_block([], _Environment, _Table, tuple([])).
+eval_block([], _Environment, _Table, record([])).
 
 % Match: first arm whose (or-)pattern matches and whose guard holds.
 eval_match([match_arm(Patterns, Guard, Result, _) | Rest], ScrutineeValue, Environment, Table, Value) :-
@@ -486,7 +486,7 @@ match_pattern(binding_pattern(Name, _), Value, EnvironmentIn, _Table, Environmen
 match_pattern(literal_pattern(Node, _), Value, Environment, Table, Environment) :-
   eval(Node, Environment, Table, LiteralValue),
   values_equal(LiteralValue, Value).
-match_pattern(record_pattern(Members, _), tuple(Fields), Environment, Table, EnvironmentOut) :-
+match_pattern(record_pattern(Members, _), record(Fields), Environment, Table, EnvironmentOut) :-
   match_record(Members, 0, Fields, Environment, Table, EnvironmentOut).
 
 match_record([], _Index, _Fields, Environment, _Table, Environment).
@@ -504,14 +504,14 @@ values_equal(num(A), num(B)) :- A =:= B.
 values_equal(bool(B), bool(B)).
 values_equal(str(A), str(B)) :- A == B.
 
-% Tuple members -> a field list keyed by `index(I)` / `label(Name)`.
+% Record members -> a field list keyed by `index(I)` / `label(Name)`.
 eval_members([], _Index, _Environment, _Table, []).
-eval_members([tuple_member(_Mutability, positional, _Annotation, ValueExpression, _) | Rest], Index, Environment, Table,
+eval_members([record_member(_Mutability, positional, _Annotation, ValueExpression, _) | Rest], Index, Environment, Table,
              [index(Index) - Value | Fields]) :-
   eval(ValueExpression, Environment, Table, Value),
   Index1 is Index + 1,
   eval_members(Rest, Index1, Environment, Table, Fields).
-eval_members([tuple_member(_Mutability, labeled(Name), _Annotation, ValueExpression, _) | Rest], Index, Environment, Table,
+eval_members([record_member(_Mutability, labeled(Name), _Annotation, ValueExpression, _) | Rest], Index, Environment, Table,
              [label(Name) - Value | Fields]) :-
   eval(ValueExpression, Environment, Table, Value),
   eval_members(Rest, Index, Environment, Table, Fields).

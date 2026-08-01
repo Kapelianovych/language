@@ -101,12 +101,12 @@
 
 ; ---------------------------------------------------------------------------
 ; Definitions: a name bound by `Name = value` is a function if its value is
-; one, a field if the definition is itself a tuple's labeled member (`(x =
-; 1)`; see grammar.js's `tuple_member`/`definition` merge note), otherwise a
+; one, a field if the definition is itself a record's labeled member (`(x =
+; 1)`; see grammar.js's `record_member`/`definition` merge note), otherwise a
 ; plain variable (already covered by the fallback above).
 ; ---------------------------------------------------------------------------
 
-(tuple_member
+(record_member
   (definition name: (identifier) @property))
 
 (definition

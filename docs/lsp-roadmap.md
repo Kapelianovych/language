@@ -66,7 +66,7 @@ This document tracks what is left. Nothing here is a bug; it is depth and breadt
   green nodes (`type_name`, `type_param`, `variant`, ...) are self-describing
   regardless of nesting, and a bare identifier defaults to `variable`; only
   ~15 PARENT kinds whose child's role isn't otherwise visible in the tree
-  shape (a function's parameter list vs. a tuple literal's member list, both
+  shape (a function's parameter list vs. a record literal's member list, both
   `member` nodes; `type_declaration`'s bare name leaf vs. `macro_definition`'s)
   get an explicit `special/4` override. Verified against the full standard
   library (850 tokens) and every fixture (`golden/`, `roundtrip/`, including

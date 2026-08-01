@@ -1182,7 +1182,7 @@
         }
       ]
     },
-    "tuple": {
+    "record": {
       "type": "SEQ",
       "members": [
         {
@@ -1193,7 +1193,7 @@
           "type": "REPEAT",
           "content": {
             "type": "SYMBOL",
-            "name": "tuple_member"
+            "name": "record_member"
           }
         },
         {
@@ -1202,7 +1202,7 @@
         }
       ]
     },
-    "tuple_member": {
+    "record_member": {
       "type": "CHOICE",
       "members": [
         {
@@ -1659,7 +1659,7 @@
         },
         {
           "type": "SYMBOL",
-          "name": "tuple"
+          "name": "record"
         },
         {
           "type": "SYMBOL",
@@ -3558,7 +3558,7 @@
   ],
   "conflicts": [
     [
-      "tuple",
+      "record",
       "function"
     ],
     [
@@ -3571,7 +3571,7 @@
     ],
     [
       "irrefutable_record_pattern",
-      "tuple"
+      "record"
     ],
     [
       "parameter",
@@ -3585,7 +3585,7 @@
       "irrefutable_record_pattern"
     ],
     [
-      "tuple",
+      "record",
       "function",
       "irrefutable_record_pattern"
     ],

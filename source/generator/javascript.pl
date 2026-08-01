@@ -23,7 +23,7 @@
     identifier_node(Cs)     `$`-prefixed name      $counter
     function_node(Tp,Ps,Ra,B) curried arrow        ($a => $b => <B>)
     function_call_node(T,A) curried application    ($f)($a)($b)
-    tuple_node(Ms)          object literal         {0: e0, "bar": e1}
+    record_node(Ms)          object literal         {0: e0, "bar": e1}
     access_node(T, Acc)     bracket indexing       ($t)["bar"] / ($t)[0]
     assignment_node(A, V)   assignment expression  (($t)["bar"] = <V>)
     block_node(Es)          IIFE returning last    (() => { ...; return e })()
@@ -201,11 +201,11 @@ expression(function_call_node(Target, Arguments, _)) -->
   "(", expression(Target), ")", section_arguments(Arguments, 0, _),
   ")".
 
-% Tuple -> object literal.  Positional members get sequential numeric keys
+% Record -> object literal.  Positional members get sequential numeric keys
 % (0, 1, ... in positional order, skipping labeled members), labeled members
-% get their name as a string key.  The empty tuple () is the unit value {}.
+% get their name as a string key.  The empty record () is the unit value {}.
 % Mutability is a compile-time-only concept and is not reflected at runtime.
-expression(tuple_node(Members, _)) -->
+expression(record_node(Members, _)) -->
   "{", object_body(Members), "}".
 
 % Member access -> bracket indexing, so numeric and unicode-label keys work
@@ -339,14 +339,14 @@ curried_arrows([Parameter], Body) -->
 curried_arrows([Parameter, Next | Parameters], Body) -->
   parameter(Parameter), " => ", curried_arrows([Next | Parameters], Body).
 
-% An arrow-function body.  A tuple compiles to an object literal `{...}`, but
-% `=> {` after an arrow opens a STATEMENT BLOCK, not an object, so a tuple body
+% An arrow-function body.  A record compiles to an object literal `{...}`, but
+% `=> {` after an arrow opens a STATEMENT BLOCK, not an object, so a record body
 % must be wrapped in parentheses: `=> ({...})`.  No other expression begins
-% with `{`, so only tuples need this.
-arrow_body(tuple_node(Members, TupleSpan)) -->
-  "(", expression(tuple_node(Members, TupleSpan)), ")".
+% with `{`, so only records need this.
+arrow_body(record_node(Members, RecordSpan)) -->
+  "(", expression(record_node(Members, RecordSpan)), ")".
 arrow_body(Body) -->
-  { Body \= tuple_node(_, _) },
+  { Body \= record_node(_, _) },
   expression(Body).
 
 % A parameter is rendered as its JS binding pattern (parenthesised so a
@@ -435,7 +435,7 @@ return_statement(Expression) -->
     Expression \= destructuring_node(_, _, _) },
   "return ", expression(Expression), ";".
 
-% A tuple object: spreads first, then explicit `key: value` entries, so that
+% A record object: spreads first, then explicit `key: value` entries, so that
 % an explicit field overrides a spread field of the same key (matching the
 % type, where explicit fields are the record's head).  Positional members get
 % sequential numeric keys; labeled members get their name as a string key.
@@ -447,8 +447,8 @@ object_body(Members) -->
 separate_members([], [], []).
 separate_members([spread_member(Value, _) | Members], [Value | Spreads], Regulars) :-
   separate_members(Members, Spreads, Regulars).
-separate_members([tuple_member(Mutability, Label, Annotation, Value, MemberSpan) | Members], Spreads,
-                 [tuple_member(Mutability, Label, Annotation, Value, MemberSpan) | Regulars]) :-
+separate_members([record_member(Mutability, Label, Annotation, Value, MemberSpan) | Members], Spreads,
+                 [record_member(Mutability, Label, Annotation, Value, MemberSpan) | Regulars]) :-
   separate_members(Members, Spreads, Regulars).
 
 % `Count` is the number of entries emitted so far, used to place commas.
@@ -467,10 +467,10 @@ regular_entries([Member | Members], Index, CountIn, CountOut) -->
 comma_if(0) --> [].
 comma_if(Count) --> { Count > 0 }, ", ".
 
-regular_entry(tuple_member(_Mutability, positional, _Annotation, Value, _), Index, NextIndex) -->
+regular_entry(record_member(_Mutability, positional, _Annotation, Value, _), Index, NextIndex) -->
   number(Index), ": ", expression(Value),
   { NextIndex is Index + 1 }.
-regular_entry(tuple_member(_Mutability, labeled(Name), _Annotation, Value, _), Index, Index) -->
+regular_entry(record_member(_Mutability, labeled(Name), _Annotation, Value, _), Index, Index) -->
   "\"", chars(Name), "\": ", expression(Value).
 
 % Emit an integer literal.
@@ -651,7 +651,7 @@ external_binding(Name, Type, Callee) -->
 %
 % A value's declared `Type` drives how it crosses the JS boundary.  Only
 % FUNCTION types are adapted (the language curries, JS does not); every other
-% type -- numbers, strings, records, tuples, variants -- crosses AS-IS.
+% type -- numbers, strings, records, records, variants -- crosses AS-IS.
 % Marshalling is bidirectional and flips at each arrow (a function's arguments
 % travel the opposite way to the function itself):
 %

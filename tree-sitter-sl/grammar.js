@@ -56,7 +56,7 @@ module.exports = grammar({
 
   conflicts: $ => [
     // `(n)`, `(a b)`, `()` -- a parenthesised group of bare
-    // identifiers/wildcards (or none at all) parses as both a tuple and a
+    // identifiers/wildcards (or none at all) parses as both a record and a
     // parameter list; `function`'s dynamic precedence below picks the
     // function reading when a full parse exists either way, matching
     // parser.pl's `paren_or_function` ("the language resolves the ambiguity
@@ -64,20 +64,20 @@ module.exports = grammar({
     // bare name (labeled members, literals, spreads) don't overlap with
     // `parameter` at all, so this conflict is only ever this narrow case.
     // All stem from the SAME root ambiguity above: a parenthesised group's
-    // opening `(` doesn't yet reveal whether it is a `tuple` (general
+    // opening `(` doesn't yet reveal whether it is a `record` (general
     // expressions/labeled members/spreads) or a `function`'s parameter list
     // (identifiers/wildcards/nested irrefutable patterns only) until the
     // members' actual shapes -- or what follows the closing `)` -- are
     // known. GLR explores every reading; `function`'s dynamic precedence
     // above picks it when a full parse survives that way.
-    [$.tuple, $.function],
+    [$.record, $.function],
     [$._irrefutable_pattern, $.definition],
     [$._irrefutable_pattern, $._primary_expression],
-    [$.irrefutable_record_pattern, $.tuple],
+    [$.irrefutable_record_pattern, $.record],
     [$.parameter, $._irrefutable_pattern_member],
     [$.type_declaration],
     [$.function, $.irrefutable_record_pattern],
-    [$.tuple, $.function, $.irrefutable_record_pattern],
+    [$.record, $.function, $.irrefutable_record_pattern],
     [$.match],
     [$.type_reference],
     // `type X = Identifier` -- a single bare name with no leading `|` and no
@@ -310,20 +310,20 @@ module.exports = grammar({
     qualified_name: $ => sepBy1Dot($, $.identifier),
 
     // -------------------------------------------------------------------
-    // Blocks, tuples/records
+    // Blocks, records/records
     // -------------------------------------------------------------------
 
     block: $ => seq('{', repeat($._expression), '}'),
 
-    tuple: $ => seq('(', repeat($.tuple_member), ')'),
+    record: $ => seq('(', repeat($.record_member), ')'),
 
     // A labeled member (`x = 1`, `x: number = 1`) is syntactically IDENTICAL
     // to a `definition` (see grammar.md: both are `Identifier
     // TypeAnnotation? "=" Expression`) -- there is deliberately no separate
     // `labeled_member` rule here competing with it for the same input; a
-    // tuple member that looks like a definition simply IS one (`definition`
+    // record member that looks like a definition simply IS one (`definition`
     // is already reachable via `_expression` below), same shape either way.
-    tuple_member: $ => choice(
+    record_member: $ => choice(
       $.spread,
       seq(optional('mutable'), $._expression),
     ),
@@ -402,7 +402,7 @@ module.exports = grammar({
       $.number,
       $.boolean,
       $.string_literal,
-      $.tuple,
+      $.record,
       $.block,
       $.identifier,
     ),
@@ -464,7 +464,7 @@ module.exports = grammar({
     // precedence" number -- hence a real parallel rule excluding just `|`
     // by identity, recursing into ITSELF (not `_expression`) so a `|`
     // can't sneak in one level down either. Any BRACKETED sub-expression
-    // (a tuple/block/function-body/call-argument nested inside) switches
+    // (a record/block/function-body/call-argument nested inside) switches
     // back to full `_expression` immediately, same as everywhere else,
     // since only THOSE rules reference `_expression`, not this one.
     // -------------------------------------------------------------------

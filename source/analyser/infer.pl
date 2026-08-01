@@ -110,7 +110,7 @@ infer_program_accumulating(program_node(Expressions), TypeEnvironment, InitialEn
   reverse(ReverseErrors, Errors).
 
 walk_accumulating([], _Level, _InsideFunction, Environment, _TypeEnvironment, Context,
-                  tuple_type([], closed), Environment, Context, Errors, Errors).
+                  record_type([], closed), Environment, Context, Errors, Errors).
 walk_accumulating([Expression], Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
                   ResultType, FinalEnvironment, ContextOut, ErrorsIn, ErrorsOut) :-
   try_item(Expression, Level, InsideFunction, Environment, TypeEnvironment, ContextIn,
@@ -132,7 +132,7 @@ try_item(Expression, Level, InsideFunction, Environment, TypeEnvironment, Contex
                           ContextIn, Type, EnvironmentOut, ContextOut),
       ErrorsOut = ErrorsIn ),
     analysis_error(Reason),
-    ( EnvironmentOut = Environment, ContextOut = ContextIn, Type = tuple_type([], closed),
+    ( EnvironmentOut = Environment, ContextOut = ContextIn, Type = record_type([], closed),
       item_span(Expression, Span),
       ErrorsOut = [error_at(Span, Reason) | ErrorsIn] )
   ).
@@ -188,7 +188,7 @@ prebind_forward([_ | Expressions], Level, Environment, TypeEnvironment, ContextI
 % Walk the sequence, threading the (growing) environment and reporting the
 % last expression's type.  An empty sequence has the unit type `()`.
 infer_sequence_walk([], _Level, _InsideFunction, Environment, _TypeEnvironment,
-                    Context, tuple_type([], closed), Environment, Context).
+                    Context, record_type([], closed), Environment, Context).
 infer_sequence_walk([Expression], Level, InsideFunction, Environment, TypeEnvironment,
                     ContextIn, ResultType, FinalEnvironment, ContextOut) :-
   infer_sequence_item(Expression, Level, InsideFunction, Environment, TypeEnvironment,
@@ -203,7 +203,7 @@ infer_sequence_walk([Expression, Next | Rest], Level, InsideFunction, Environmen
 % Process one sequence element, returning its type and the environment to
 % use for the rest of the sequence.
 infer_sequence_item(type_declaration_node(_, _, _, _, _), _Level, _InsideFunction,
-                    Environment, _TypeEnvironment, Context, tuple_type([], closed), Environment, Context) :- !.
+                    Environment, _TypeEnvironment, Context, record_type([], closed), Environment, Context) :- !.
 % A MODULE is a genuine record VALUE: its body is its own nested scope (own
 % `let`-like sequence, one level deeper, seeded with its own `external`s
 % exactly like the top level), and its type is a row built from its PUBLIC
@@ -263,9 +263,9 @@ infer_sequence_item(module_node(Name, Parameters, Opacity, Ascription, Items, _S
       % e.g. `module Stack<T>: Container<T> = {...}`.
       convert_annotation_type(InterfaceTypeExpression, ScopedTypeEnvironment, BodyLevel, Context2, InterfaceTypeRaw, Context3),
       % `InterfaceTypeRaw` is either a SINGLE interface (`module A: B = {...}`,
-      % `type_constructor` if `B` is opaque, `tuple_type` if transparent) or,
+      % `type_constructor` if `B` is opaque, `record_type` if transparent) or,
       % when the ascription used `+`, an `intersection_type(Members)` (each
-      % Member itself a `type_constructor`/`tuple_type` the same way).  Either
+      % Member itself a `type_constructor`/`record_type` the same way).  Either
       % way the module's own row must satisfy EVERY interface named -- for a
       % single interface that's one check; for `B + C` it's one check PER
       % member, all against the SAME module row (see
@@ -295,10 +295,10 @@ infer_sequence_item(module_node(Name, Parameters, Opacity, Ascription, Items, _S
   ; % Transparent, unascribed: the module's own row IS its type, so `T`
     % needs the same skolem-back-to-flexible swap the ascribed branch does,
     % just applied to the row directly (wrapping/unwrapping a throwaway
-    % `tuple_type` is how `substitute_skolems/3`'s existing per-field
+    % `record_type` is how `substitute_skolems/3`'s existing per-field
     % recursion is reused here, without needing a new exported helper).
-    substitute_skolems(tuple_type(MemberFieldsRaw, closed), SkolemPairs, tuple_type(MemberFields, closed)),
-    ModuleType0 = tuple_type(MemberFields, closed),
+    substitute_skolems(record_type(MemberFieldsRaw, closed), SkolemPairs, record_type(MemberFields, closed)),
+    ModuleType0 = record_type(MemberFields, closed),
     Context5 = Context2
   ),
   generalize(ModuleType0, Level, Context5, Scheme, Context6),
@@ -309,7 +309,7 @@ infer_sequence_item(module_node(Name, Parameters, Opacity, Ascription, Items, _S
 % already seeded into the environment before the walk, so there is nothing to
 % do here.  Its "value" is unit, like a type declaration.
 infer_sequence_item(external_node(_, _, _, _), _Level, _InsideFunction,
-                    Environment, _TypeEnvironment, Context, tuple_type([], closed), Environment, Context) :- !.
+                    Environment, _TypeEnvironment, Context, record_type([], closed), Environment, Context) :- !.
 % A destructuring definition binds the pattern's variables for the rest of
 % the sequence (monomorphically); its value is the matched value's type.
 infer_sequence_item(destructuring_node(Pattern, Value, _), Level, InsideFunction,
@@ -400,7 +400,7 @@ normalise_module_items([Item | Rest], [Item | CleanItems], PublicNames) :-
 % (e.g. `map: <A B>(...)`) is represented exactly, not flattened away.
 module_member_row([], _Environment, []).
 module_member_row([MemberName | Names], Environment,
-                  [tuple_field(readonly, label(MemberName), FieldType) | Fields]) :-
+                  [record_field(readonly, label(MemberName), FieldType) | Fields]) :-
   ( get_assoc(MemberName, Environment, defined(type_scheme(Ids, Body))) ->
       ( Ids == [] -> FieldType = Body ; FieldType = forall_type(Ids, Body) )
   ; throw(analysis_error(internal_error))
@@ -414,9 +414,9 @@ module_member_row([MemberName | Names], Environment,
 % instantiating the module's member if it is itself generic and skolemising
 % the interface's expectation if IT is generic.
 check_module_satisfies([], _MemberFields, _Name, _Level, Context, Context).
-check_module_satisfies([tuple_field(_, label(MemberName), ExpectedType) | Rest], MemberFields, Name, Level,
+check_module_satisfies([record_field(_, label(MemberName), ExpectedType) | Rest], MemberFields, Name, Level,
                        ContextIn, ContextOut) :-
-  ( memberchk(tuple_field(_, label(MemberName), ActualType), MemberFields) ->
+  ( memberchk(record_field(_, label(MemberName), ActualType), MemberFields) ->
       subsume(ActualType, ExpectedType, Level, ContextIn, Context1)
   ; throw(analysis_error(missing_interface_member(Name, MemberName)))
   ),
@@ -429,7 +429,7 @@ check_module_satisfies([tuple_field(_, label(MemberName), ExpectedType) | Rest],
 % `convert_annotation_type` produced for it, either a `type_constructor`
 % (the interface is `opaque`: nominal, so its row is hidden from ordinary
 % unification and has to be looked up explicitly, the same way nominal
-% FIELD ACCESS does via `interface_row_for/7`) or a `tuple_type` directly
+% FIELD ACCESS does via `interface_row_for/7`) or a `record_type` directly
 % (the interface is transparent: already its own row, nothing to look up)
 % -- to its member row, then delegate to `check_module_satisfies/6` above.
 % This is the single-interface case (`module A: B = {...}`) AND, called once
@@ -438,7 +438,7 @@ check_module_satisfies([tuple_field(_, label(MemberName), ExpectedType) | Rest],
 check_module_satisfies_one(InterfaceType, MemberFields, Name, TypeEnvironment, Level, ContextIn, ContextOut) :-
   ( InterfaceType = type_constructor(InterfaceName, InterfaceArguments) ->
       interface_row_for(InterfaceName, InterfaceArguments, TypeEnvironment, Level, ContextIn, InterfaceRow, Context1)
-  ; InterfaceType = tuple_type(InterfaceRow, _) ->
+  ; InterfaceType = record_type(InterfaceRow, _) ->
       Context1 = ContextIn
   ; throw(analysis_error(not_an_interface_ascription(Name)))
   ),
@@ -511,12 +511,12 @@ infer(function_node(TypeParameters, Parameters, ReturnAnnotation, Body, _), Leve
   fully_resolve(function_type(ParameterTypes, BodyType), ContextOut, ResolvedType),
   substitute_skolems(ResolvedType, SkolemPairs, ResultType).
 
-% Tuple: infer each member into a field.  A literal is a CLOSED record, so
+% Record: infer each member into a field.  A literal is a CLOSED record, so
 % its tail is `closed`.  Positional members get sequential `index` keys;
 % labeled members get `label` keys.  Labels must be unique.
-infer(tuple_node(Members, _), Level, InsideFunction, Environment, TypeEnvironment,
-      ContextIn, tuple_type(Fields, Tail), ContextOut) :-
-  infer_tuple_members(Members, 0, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Fields, SpreadTypes, ContextOut),
+infer(record_node(Members, _), Level, InsideFunction, Environment, TypeEnvironment,
+      ContextIn, record_type(Fields, Tail), ContextOut) :-
+  infer_record_members(Members, 0, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, Fields, SpreadTypes, ContextOut),
   check_unique_labels(Fields, []),
   spread_tail(SpreadTypes, Tail).
 
@@ -528,7 +528,7 @@ infer(block_node(Expressions, _), Level, InsideFunction, Environment, TypeEnviro
 % Member access `target.label` / `target.index`: constrain the target to be
 % a record having AT LEAST this field (an open row tail), with any
 % mutability.  The open tail is what makes `(p) p.x` row-polymorphic: the
-% target need not be a fully known tuple.
+% target need not be a fully known record.
 %
 % When the target is instead a NOMINAL type (a module or interface value --
 % an ordinary tagged union has no fields to access this way, its values are
@@ -542,14 +542,14 @@ infer(access_node(Target, Accessor, _), Level, InsideFunction, Environment, Type
   resolve_head(TargetType, Context1, ResolvedTarget),
   ( ResolvedTarget = type_constructor(TypeName, TypeArguments) ->
       interface_row_for(TypeName, TypeArguments, TypeEnvironment, Level, Context1, Fields, ContextOut),
-      ( memberchk(tuple_field(_, Key, FieldType), Fields) ->
+      ( memberchk(record_field(_, Key, FieldType), Fields) ->
           true
       ; throw(analysis_error(unknown_member(TypeName, Key)))
       )
   ; fresh_unification_variable(Context1, Level, FieldType, Context2),
     fresh_unification_variable(Context2, Level, AnyMutability, Context3),
     fresh_unification_variable(Context3, Level, RestTail, Context4),
-    unify(TargetType, tuple_type([tuple_field(AnyMutability, Key, FieldType)], RestTail), Context4, ContextOut)
+    unify(TargetType, record_type([record_field(AnyMutability, Key, FieldType)], RestTail), Context4, ContextOut)
   ).
 
 % Member assignment `target.member = value`: like access, but the member's
@@ -560,7 +560,7 @@ infer(assignment_node(access_node(Target, Accessor, _), Value, _), Level, Inside
   accessor_key(Accessor, Key),
   fresh_unification_variable(Context1, Level, FieldType, Context2),
   fresh_unification_variable(Context2, Level, RestTail, Context3),
-  unify(TargetType, tuple_type([tuple_field(mutable, Key, FieldType)], RestTail), Context3, Context4),
+  unify(TargetType, record_type([record_field(mutable, Key, FieldType)], RestTail), Context3, Context4),
   infer(Value, Level, InsideFunction, Environment, TypeEnvironment, Context4, ValueType, Context5),
   unify(ValueType, FieldType, Context5, ContextOut).
 
@@ -671,7 +671,7 @@ infer(error_node(Span), _Level, _InsideFunction, _Environment, _TypeEnvironment,
 
 % A type declaration reached in expression position carries no value.
 infer(type_declaration_node(_, _, _, _, _), _Level, _InsideFunction, _Environment, _TypeEnvironment,
-      Context, tuple_type([], closed), Context).
+      Context, record_type([], closed), Context).
 
 % A definition reached *outside* a sequence position (e.g. as a function
 % argument): it cannot bind anything visible, so it just contributes the
@@ -876,29 +876,29 @@ binding_scheme(forward(Scheme), InsideFunction, Name, Scheme) :-
   ; throw(analysis_error(forward_reference_outside_function(Name)))
   ).
 
-% Infer each tuple member into a `tuple_field`.  Positional members are
+% Infer each record member into a `record_field`.  Positional members are
 % assigned sequential `index` keys (skipping labeled members, which keep the
 % counter unchanged); labeled members get `label` keys.  Mutability is
 % recorded as the base type `readonly` / `mutable`.
-infer_tuple_members([], _Index, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], [], Context).
+infer_record_members([], _Index, _Level, _InsideFunction, _Environment, _TypeEnvironment, Context, [], [], Context).
 % A spread `..value`: the value must be a record, and its fields are spliced
 % in.  We collect its type to use as the new record's tail (see spread_tail).
-infer_tuple_members([spread_member(Value, _) | Members], Index, Level,
+infer_record_members([spread_member(Value, _) | Members], Index, Level,
                     InsideFunction, Environment, TypeEnvironment, ContextIn,
                     Fields, [SpreadType | SpreadTypes], ContextOut) :-
   infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, SpreadType, Context1),
   % The spread value must be a record; assert that by unifying it with an
   % open empty record, so spreading a non-record is rejected.
   fresh_unification_variable(Context1, Level, AssertTail, Context2),
-  unify(SpreadType, tuple_type([], AssertTail), Context2, Context3),
-  infer_tuple_members(Members, Index, Level, InsideFunction, Environment, TypeEnvironment, Context3, Fields, SpreadTypes, ContextOut).
-infer_tuple_members([tuple_member(Mutability, Label, Annotation, Value, _) | Members], Index, Level,
+  unify(SpreadType, record_type([], AssertTail), Context2, Context3),
+  infer_record_members(Members, Index, Level, InsideFunction, Environment, TypeEnvironment, Context3, Fields, SpreadTypes, ContextOut).
+infer_record_members([record_member(Mutability, Label, Annotation, Value, _) | Members], Index, Level,
                     InsideFunction, Environment, TypeEnvironment, ContextIn,
-                    [tuple_field(Mutability, Key, ValueType) | Fields], SpreadTypes, ContextOut) :-
+                    [record_field(Mutability, Key, ValueType) | Fields], SpreadTypes, ContextOut) :-
   member_key(Label, Index, Key, NextIndex),
   infer(Value, Level, InsideFunction, Environment, TypeEnvironment, ContextIn, ValueType, Context1),
   apply_annotation(Annotation, ValueType, TypeEnvironment, Level, Context1, Context2),
-  infer_tuple_members(Members, NextIndex, Level, InsideFunction, Environment, TypeEnvironment, Context2, Fields, SpreadTypes, ContextOut).
+  infer_record_members(Members, NextIndex, Level, InsideFunction, Environment, TypeEnvironment, Context2, Fields, SpreadTypes, ContextOut).
 
 % The explicit fields are the head of the record; a single spread provides
 % the tail (so the result is "these fields, then all of the spread's").  A
@@ -914,15 +914,15 @@ member_key(positional, Index, index(Index), NextIndex) :-
 member_key(labeled(Name), Index, label(Name), Index).
 
 % A member access's surface accessor (which carries a span) maps to a field
-% key (the internal tuple-field key, which does not).
+% key (the internal record-field key, which does not).
 accessor_key(label(Name, _), label(Name)).
 accessor_key(index(Index, _), index(Index)).
 
-% Reject a tuple that labels two members with the same name.
+% Reject a record that labels two members with the same name.
 check_unique_labels([], _).
-check_unique_labels([tuple_field(_, index(_), _) | Fields], Seen) :-
+check_unique_labels([record_field(_, index(_), _) | Fields], Seen) :-
   check_unique_labels(Fields, Seen).
-check_unique_labels([tuple_field(_, label(Name), _) | Fields], Seen) :-
+check_unique_labels([record_field(_, label(Name), _) | Fields], Seen) :-
   ( memberchk(Name, Seen) ->
       throw(analysis_error(duplicate_label(Name)))
   ; check_unique_labels(Fields, [Name | Seen])
@@ -1113,7 +1113,7 @@ type_pattern(constructor_pattern(CtorName, SubPatterns, _), ExpectedType, Level,
   type_pattern_each(SubPatterns, FieldTypes, Level, TypeEnvironment, EnvironmentIn, Context2, EnvironmentOut, ContextOut).
 type_pattern(record_pattern(Members, _), ExpectedType, Level, TypeEnvironment, EnvironmentIn, ContextIn, EnvironmentOut, ContextOut) :-
   type_pattern_members(Members, 0, Level, TypeEnvironment, EnvironmentIn, ContextIn, Fields, EnvironmentOut, Context1),
-  unify(ExpectedType, tuple_type(Fields, closed), Context1, ContextOut).
+  unify(ExpectedType, record_type(Fields, closed), Context1, ContextOut).
 
 literal_type(number_node(_, _), number).
 literal_type(boolean_node(_, _), boolean).
@@ -1130,14 +1130,14 @@ type_pattern_each([Pattern | Patterns], [Type | Types], Level, TypeEnvironment, 
 % index; labeled members do not.  The pattern record is closed (exact).
 type_pattern_members([], _Index, _Level, _TypeEnvironment, Environment, Context, [], Environment, Context).
 type_pattern_members([positional_member_pattern(SubPattern, _) | Members], Index, Level, TypeEnvironment, EnvironmentIn, ContextIn,
-                     [tuple_field(Mutability, index(Index), FieldType) | Fields], EnvironmentOut, ContextOut) :-
+                     [record_field(Mutability, index(Index), FieldType) | Fields], EnvironmentOut, ContextOut) :-
   fresh_unification_variable(ContextIn, Level, Mutability, Context1),
   fresh_unification_variable(Context1, Level, FieldType, Context2),
   type_pattern(SubPattern, FieldType, Level, TypeEnvironment, EnvironmentIn, Context2, Environment1, Context3),
   Index1 is Index + 1,
   type_pattern_members(Members, Index1, Level, TypeEnvironment, Environment1, Context3, Fields, EnvironmentOut, ContextOut).
 type_pattern_members([labeled_member_pattern(Name, SubPattern, _) | Members], Index, Level, TypeEnvironment, EnvironmentIn, ContextIn,
-                     [tuple_field(Mutability, label(Name), FieldType) | Fields], EnvironmentOut, ContextOut) :-
+                     [record_field(Mutability, label(Name), FieldType) | Fields], EnvironmentOut, ContextOut) :-
   fresh_unification_variable(ContextIn, Level, Mutability, Context1),
   fresh_unification_variable(Context1, Level, FieldType, Context2),
   type_pattern(SubPattern, FieldType, Level, TypeEnvironment, EnvironmentIn, Context2, Environment1, Context3),

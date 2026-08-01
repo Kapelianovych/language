@@ -99,7 +99,7 @@ syntax:
 builds the AST of a call `sequence(<ast> <rest>)` where `<ast>` and `<rest>` are
 the `Ast` values produced by the unquoted sub-expressions.
 
-The parentheses after `` ` `` and after `~` are **delimiters**, not tuple syntax.
+The parentheses after `` ` `` and after `~` are **delimiters**, not record syntax.
 `` `(()) `` is the quasiquote of the unit expression `()`.
 
 ## Using a macro from another file

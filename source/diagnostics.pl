@@ -100,8 +100,8 @@ reason_words([C | Cs], [C | Ms]) :- reason_words(Cs, Ms).
 % Rendering the analyser's resolved types (the SINGLE type representation).
 %   number | boolean | string                          base types
 %   function_type(Params, Return)                      `(p ..): r`
-%   tuple_type(Fields, Tail)                           record `(key: t .. ..)`
-%       Fields = [tuple_field(Mutability, Key, Type)]; Key = index(N) | label(Cs)
+%   record_type(Fields, Tail)                           record `(key: t .. ..)`
+%       Fields = [record_field(Mutability, Key, Type)]; Key = index(N) | label(Cs)
 %       Tail   = closed | unification_variable(_)      (open row)
 %   type_constructor(Name, Args)                       nominal `Name<a ..>`
 %   unification_variable(Id)                           `_UId` (unsolved)
@@ -121,12 +121,12 @@ tt(quantified_variable(Id))                 --> "_Q", emit_number(Id).
 tt(skolem(Id, _, anonymous))                --> !, "_S", emit_number(Id).
 tt(skolem(_, _, Name))                      --> emit_name(Name).
 tt(function_type(Params, Return))           --> "(", tt_sequence(Params), "): ", tt(Return).
-tt(tuple_type(Fields, Tail))                --> "(", tt_fields(Fields), tt_tail(Tail), ")".
+tt(record_type(Fields, Tail))                --> "(", tt_fields(Fields), tt_tail(Tail), ")".
 tt(type_constructor(Name, []))              --> emit_name(Name).
 tt(type_constructor(Name, TypeParameters))  --> emit_name(Name), "<", tt_sequence(TypeParameters), ">".
 tt(forall_type(BoundIds, Body))             --> "<", { tt_bound_ids(BoundIds, Ids) }, tt_sequence(Ids), ">", tt(Body).
-tt(_) --> "?".
-% tt(X) --> { format(user_error, "tt fallback hit for: ~q~n", [X]) }, "?".
+% tt(_) --> "?".
+tt(X) --> { format(user_error, "tt fallback hit for: ~q~n", [X]) }, "?".
 % tt(type_lambda([], Body)) --> tt(Body).
 % tt(type_lambda(TypeArguments, Body)) --> tt(Body), "<", tt_sequence(TypeArguments), ">".
 
@@ -144,7 +144,7 @@ tt_fields([])          --> [].
 tt_fields([F])         --> tt_field(F).
 tt_fields([F, G | Fs]) --> tt_field(F), "\n", tt_fields([G | Fs]).
 
-tt_field(tuple_field(Mutability, Key, Type)) --> tt_field_mutability(Mutability), tt_key(Key), ": ", tt(Type).
+tt_field(record_field(Mutability, Key, Type)) --> tt_field_mutability(Mutability), tt_key(Key), ": ", tt(Type).
 
 tt_field_mutability(readonly) --> [].
 tt_field_mutability(mutable)  --> "mutable ".
